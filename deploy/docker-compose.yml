@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: sunder
+      POSTGRES_USER: sunder
+      POSTGRES_PASSWORD: sunder-dev-only
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sunder"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  sunder:
+    build: ..
+    environment:
+      SUNDER_DB_URL: postgres://sunder:sunder-dev-only@postgres:5432/sunder
+      SUNDER_LISTEN: ":8080"
+      SUNDER_KEYSTORE: file
+      SUNDER_KEYSTORE_PATH: /keystore
+    volumes:
+      - keystore:/keystore
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  keystore:

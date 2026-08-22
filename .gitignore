@@ -1,0 +1,10 @@
+/sunder
+keystore/
+*.tsr
+.env
+dist/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+coverage.out

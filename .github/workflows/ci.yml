@@ -1,0 +1,43 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: sunder_test
+          POSTGRES_USER: sunder
+          POSTGRES_PASSWORD: sunder
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sunder"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      SUNDER_TEST_DB_URL: postgres://sunder:sunder@localhost:5432/sunder_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: CGO_ENABLED=0 go build -mod=readonly ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race ./...
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+      - name: Dependencies up to date check
+        run: |
+          go list -u -m all | grep '\[' && echo "::warning::outdated dependencies found" || true
