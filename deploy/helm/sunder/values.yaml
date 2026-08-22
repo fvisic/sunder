@@ -1,8 +1,8 @@
 image:
   repository: ghcr.io/fvisic/sunder
-  tag: v0.1.0
+  tag: v0.2.0
   # The ops image (anchor/verify-audit cron jobs) needs openssl:
-  opsTag: v0.1.0-ops
+  opsTag: v0.2.0-ops
 
 replicaCount: 2
 
