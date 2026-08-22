@@ -1,0 +1,358 @@
+{
+  "info": {
+    "name": "Sunder API",
+    "description": "Pseudonymous identity provider. Set the collection variables first:\n\n- `baseUrl` (default http://localhost:8080)\n- `credCrm` — client credential with actions contacts.register,lookup,attributes.read,oti.issue,consent.manage and purposes support,create_order,escalation_notify\n- `credErp` — scope erp, action oti.verify, purpose create_order\n- `credNotifier` — scope notifier, actions oti.verify,attributes.read,consent.manage, purpose escalation_notify\n\nCreate credentials with `sunder client create` (see README). The folders 'Demo' are ordered flows: run them top-to-bottom (or via the Collection Runner) — test scripts pass cid/token between steps automatically.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {"key": "baseUrl", "value": "http://localhost:8080"},
+    {"key": "credCrm", "value": ""},
+    {"key": "credErp", "value": ""},
+    {"key": "credNotifier", "value": ""},
+    {"key": "cid", "value": ""},
+    {"key": "otiToken", "value": ""},
+    {"key": "erpCid", "value": ""},
+    {"key": "notifierCid", "value": ""},
+    {"key": "demoEmail", "value": "ana.demo@example.com"}
+  ],
+  "item": [
+    {
+      "name": "Ops",
+      "item": [
+        {"name": "Health", "request": {"method": "GET", "url": "{{baseUrl}}/healthz"}},
+        {"name": "Readiness", "request": {"method": "GET", "url": "{{baseUrl}}/readyz"}},
+        {"name": "OpenAPI spec", "request": {"method": "GET", "url": "{{baseUrl}}/openapi.yaml"}},
+        {"name": "Metrics", "request": {"method": "GET", "url": "{{baseUrl}}/metrics"}}
+      ]
+    },
+    {
+      "name": "Contacts",
+      "item": [
+        {
+          "name": "Register contact",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('201 created', () => pm.response.to.have.status(201));",
+            "pm.collectionVariables.set('cid', pm.response.json().cid);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/contacts",
+            "body": {"mode": "raw", "raw": "{\n  \"email\": \"{{demoEmail}}\",\n  \"phones\": [\"+385 91 123 4567\", \"+385 1 4666-000\"],\n  \"name\": \"Ana Anic\",\n  \"attributes\": {\"loyalty_tier\": \"gold\", \"address_home\": \"Ilica 1, Zagreb\"}\n}"}
+          }
+        },
+        {
+          "name": "Issue CID in another scope (linkage-capable!)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/contacts/{{cid}}/scopes",
+            "body": {"mode": "raw", "raw": "{\"scope\": \"billing\"}"}
+          }
+        },
+        {
+          "name": "Get one attribute (purpose-checked)",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{credCrm}}"}],
+            "url": {
+              "raw": "{{baseUrl}}/v1/contacts/{{cid}}/attributes/email?purpose=support",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "contacts", "{{cid}}", "attributes", "email"],
+              "query": [{"key": "purpose", "value": "support"}]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Lookup",
+      "item": [
+        {
+          "name": "Lookup by email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/lookup",
+            "body": {"mode": "raw", "raw": "{\"email\": \"{{demoEmail}}\"}"}
+          }
+        },
+        {
+          "name": "Lookup by phone (any of the contact's numbers)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/lookup",
+            "body": {"mode": "raw", "raw": "{\"phone\": \"+38514666000\"}"}
+          }
+        },
+        {
+          "name": "Name alone is rejected (400)",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('name alone -> 400 validation', () => pm.response.to.have.status(400));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/lookup",
+            "body": {"mode": "raw", "raw": "{\"name\": \"Ana Anic\"}"}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Consent & DSR",
+      "item": [
+        {
+          "name": "Withdraw consent for a purpose",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/consent",
+            "body": {"mode": "raw", "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"support\", \"granted\": false}"}
+          }
+        },
+        {
+          "name": "Attribute read now blocked (403 consent_denied)",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('consent_denied', () => pm.response.to.have.status(403));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{credCrm}}"}],
+            "url": {
+              "raw": "{{baseUrl}}/v1/contacts/{{cid}}/attributes/email?purpose=support",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "contacts", "{{cid}}", "attributes", "email"],
+              "query": [{"key": "purpose", "value": "support"}]
+            }
+          }
+        },
+        {
+          "name": "Re-grant consent",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/consent",
+            "body": {"mode": "raw", "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"support\", \"granted\": true}"}
+          }
+        },
+        {
+          "name": "List consent decisions",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{credCrm}}"}],
+            "url": "{{baseUrl}}/v1/consent/{{cid}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Demo: call center -> ERP handoff",
+      "description": "The callcenter.sh storyline: register, look up, hand off to ERP via a one-time identifier, watch the replay bounce.",
+      "item": [
+        {
+          "name": "1. Register the customer (CRM)",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "pm.collectionVariables.set('cid', pm.response.json().cid);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/contacts",
+            "body": {"mode": "raw", "raw": "{\"email\": \"{{demoEmail}}\", \"phone\": \"+385 91 123 4567\", \"name\": \"Ana Anic\"}"}
+          }
+        },
+        {
+          "name": "2. Issue OTI for the ERP (5 min, single use)",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "pm.collectionVariables.set('otiToken', pm.response.json().token);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/oti",
+            "body": {"mode": "raw", "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"create_order\", \"audience\": \"erp\"}"}
+          }
+        },
+        {
+          "name": "3. ERP verifies -> gets ITS OWN pseudonym",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "const erpCid = pm.response.json().cid;",
+            "pm.collectionVariables.set('erpCid', erpCid);",
+            "pm.test('unlinkable: ERP CID differs from CRM CID', () =>",
+            "  pm.expect(erpCid).to.not.eql(pm.collectionVariables.get('cid')));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credErp}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/oti/verify",
+            "body": {"mode": "raw", "raw": "{\"token\": \"{{otiToken}}\", \"purpose\": \"create_order\", \"audience\": \"erp\"}"}
+          }
+        },
+        {
+          "name": "4. Replay the same token -> 409 token_used",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('replay bounces with 409', () => pm.response.to.have.status(409));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credErp}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/oti/verify",
+            "body": {"mode": "raw", "raw": "{\"token\": \"{{otiToken}}\", \"purpose\": \"create_order\", \"audience\": \"erp\"}"}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Demo: delayed escalation e-mail",
+      "description": "The escalation.sh storyline: hand off with share_attributes, fetch the e-mail just-in-time hours later, and watch a consent withdrawal block the next send.",
+      "item": [
+        {
+          "name": "1. Ticket opened - register customer (CRM)",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "pm.collectionVariables.set('cid', pm.response.json().cid);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/contacts",
+            "body": {"mode": "raw", "raw": "{\"email\": \"{{demoEmail}}\", \"name\": \"Ana Anic\", \"attributes\": {\"ticket\": \"T-1001\"}}"}
+          }
+        },
+        {
+          "name": "2. Handoff sharing ONLY the e-mail",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('201', () => pm.response.to.have.status(201));",
+            "pm.collectionVariables.set('otiToken', pm.response.json().token);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/oti",
+            "body": {"mode": "raw", "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"escalation_notify\", \"audience\": \"notifier\", \"share_attributes\": [\"email\"]}"}
+          }
+        },
+        {
+          "name": "3. Notifier verifies NOW (token lives 5 min)",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('200', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('notifierCid', pm.response.json().cid);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credNotifier}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/oti/verify",
+            "body": {"mode": "raw", "raw": "{\"token\": \"{{otiToken}}\", \"purpose\": \"escalation_notify\", \"audience\": \"notifier\"}"}
+          }
+        },
+        {
+          "name": "4. Hours later: just-in-time e-mail fetch",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('shared e-mail is readable', () => pm.response.to.have.status(200));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{credNotifier}}"}],
+            "url": {
+              "raw": "{{baseUrl}}/v1/contacts/{{notifierCid}}/attributes/email?purpose=escalation_notify",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "contacts", "{{notifierCid}}", "attributes", "email"],
+              "query": [{"key": "purpose", "value": "escalation_notify"}]
+            }
+          }
+        },
+        {
+          "name": "5. Unshared attribute is absent (404)",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('name was not shared', () => pm.response.to.have.status(404));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{credNotifier}}"}],
+            "url": {
+              "raw": "{{baseUrl}}/v1/contacts/{{notifierCid}}/attributes/name?purpose=escalation_notify",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "contacts", "{{notifierCid}}", "attributes", "name"],
+              "query": [{"key": "purpose", "value": "escalation_notify"}]
+            }
+          }
+        },
+        {
+          "name": "6. Customer unsubscribes (consent withdrawn)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{credNotifier}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "url": "{{baseUrl}}/v1/consent",
+            "body": {"mode": "raw", "raw": "{\"cid\": \"{{notifierCid}}\", \"purpose\": \"escalation_notify\", \"granted\": false}"}
+          }
+        },
+        {
+          "name": "7. Next escalation blocked (403 consent_denied)",
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('consent_denied', () => pm.response.to.have.status(403));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{credNotifier}}"}],
+            "url": {
+              "raw": "{{baseUrl}}/v1/contacts/{{notifierCid}}/attributes/email?purpose=escalation_notify",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "contacts", "{{notifierCid}}", "attributes", "email"],
+              "query": [{"key": "purpose", "value": "escalation_notify"}]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

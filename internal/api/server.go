@@ -13,6 +13,7 @@ import (
 	"os"
 	"time"
 
+	apispec "github.com/fvisic/sunder/api"
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/crypto"
@@ -65,6 +66,12 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 	}
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
+	// The service serves its own API contract (also in the repo under
+	// api/openapi.yaml; point any Swagger UI / Redoc at this endpoint).
+	s.mux.HandleFunc("GET /openapi.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml")
+		_, _ = w.Write(apispec.OpenAPI)
+	})
 	// Per-client counters reveal client ids and activity; an optional token
 	// gates the scrape endpoint where network isolation is not enough.
 	metricsHandler := http.Handler(s.Metrics)
