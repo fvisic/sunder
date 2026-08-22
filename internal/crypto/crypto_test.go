@@ -130,7 +130,8 @@ func TestPIIRoundtripTamperAndTransplant(t *testing.T) {
 	ctx := context.Background()
 	box := NewPIIBox(fileKS(t))
 	attrs := map[string]string{"email": "filip@example.com", "name": "Filip"}
-	blob, keyID, err := box.Encrypt(ctx, "CID-A", attrs)
+	const keyID = "v1"
+	blob, err := box.Encrypt(ctx, "CID-A", keyID, attrs)
 	if err != nil {
 		t.Fatal(err)
 	}

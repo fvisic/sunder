@@ -94,16 +94,25 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 	}
 	token = crypto.PasetoSign(sk, payload)
 
-	if _, err := o.Pool.Exec(ctx,
+	// Row + audit in one transaction: an issued token always has both.
+	tx, err := o.Pool.Begin(ctx)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO oti (jti, cid, purpose, audience, expires_at) VALUES ($1,$2,$3,$4,$5)`,
 		claims.JTI, cid, purpose, audience, expiresAt); err != nil {
 		return "", time.Time{}, err
 	}
-	if err := audit.Append(ctx, o.Pool, audit.Entry{
+	if err := audit.AppendTx(ctx, tx, audit.Entry{
 		ClientID: client.ID, Action: "oti.issue", CID: cid,
 		Detail: map[string]any{"jti": claims.JTI, "purpose": purpose, "audience": audience},
 	}); err != nil {
 		return "", time.Time{}, fmt.Errorf("audit append: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", time.Time{}, err
 	}
 	return token, expiresAt, nil
 }
@@ -114,6 +123,11 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, audience string) (string, error) {
 	if !client.Can(auth.ActOTIVerify) {
 		return "", ErrForbidden
+	}
+	// The purpose cap applies to the verifier too: revoking a purpose from a
+	// client must also stop it consuming tokens for that purpose.
+	if !client.CanUse(purpose) {
+		return "", ErrPurposeNotAllowed
 	}
 	// You can only verify tokens addressed to you.
 	if audience != client.Scope {
@@ -135,12 +149,25 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 	if err != nil {
 		return "", err
 	}
-	known := false
-	for _, v := range live {
-		known = known || v == claims.KeyID
+	isLive := func() bool {
+		for _, v := range live {
+			if v == claims.KeyID {
+				return true
+			}
+		}
+		return false
 	}
-	if !known {
-		return "", ErrTokenInvalid
+	if !isLive() {
+		// A freshly rotated key may not be in this replica's 30s cache yet;
+		// refresh once before rejecting (only on the unknown-kid path, so
+		// forged kids cannot turn this into a cache-busting vector at scale).
+		o.Ring.Invalidate()
+		if live, err = o.Ring.Versions(ctx, crypto.SigningKeyName); err != nil {
+			return "", err
+		}
+		if !isLive() {
+			return "", ErrTokenInvalid
+		}
 	}
 	_, pk, err := o.signingKey(ctx, claims.KeyID)
 	if err != nil {
@@ -163,20 +190,34 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 		return "", ErrTokenExpired
 	}
 
-	// Atomic single-use transition — the replay guard (no TOCTOU).
+	// One transaction end to end: a failure anywhere rolls the row back to
+	// VALID (no burned-but-undelivered handoffs) and the audit record commits
+	// with the consumption or not at all.
+	tx, err := o.Pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Atomic single-use transition — the replay guard (no TOCTOU). The row's
+	// cid/purpose/audience are matched against the SIGNED claims as defense
+	// in depth: even with a compromised signing key, a crafted token cannot
+	// consume a jti bound to different parameters.
 	var issuerCID string
-	err = o.Pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`UPDATE oti SET status='USED', used_at=now(), used_by=$2
-		 WHERE jti=$1 AND status='VALID' AND expires_at > now()
-		 RETURNING cid`, claims.JTI, client.ID).Scan(&issuerCID)
+		 WHERE jti=$1 AND cid=$3 AND purpose=$4 AND audience=$5
+		   AND status='VALID' AND expires_at > now()
+		 RETURNING cid`, claims.JTI, client.ID, claims.CID, purpose, audience).Scan(&issuerCID)
 	if err == pgx.ErrNoRows {
 		var status string
 		var expiresAt time.Time
-		serr := o.Pool.QueryRow(ctx,
-			`SELECT status, expires_at FROM oti WHERE jti=$1`, claims.JTI).Scan(&status, &expiresAt)
+		serr := tx.QueryRow(ctx,
+			`SELECT status, expires_at FROM oti WHERE jti=$1 AND cid=$2 AND purpose=$3 AND audience=$4`,
+			claims.JTI, claims.CID, purpose, audience).Scan(&status, &expiresAt)
 		switch {
 		case serr == pgx.ErrNoRows:
-			return "", ErrTokenInvalid // signed but never persisted: treat as forged
+			return "", ErrTokenInvalid // signed but never persisted (or claims differ from the row): treat as forged
 		case serr != nil:
 			return "", serr
 		case status == "USED":
@@ -191,19 +232,22 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 
 	// Map to the verifier's scope: same person, the verifier's own pseudonym.
 	var personID string
-	if err := o.Pool.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT person_id FROM cids WHERE cid=$1`, issuerCID).Scan(&personID); err != nil {
 		return "", err
 	}
-	verifierCID, err := ensureCID(ctx, o.Pool, personID, client.Scope)
+	verifierCID, err := ensureCID(ctx, tx, personID, client.Scope)
 	if err != nil {
 		return "", err
 	}
-	if err := audit.Append(ctx, o.Pool, audit.Entry{
+	if err := audit.AppendTx(ctx, tx, audit.Entry{
 		ClientID: client.ID, Action: "oti.verify", CID: verifierCID,
 		Detail: map[string]any{"jti": claims.JTI, "purpose": purpose, "audience": audience},
 	}); err != nil {
 		return "", fmt.Errorf("audit append: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
 	}
 	return verifierCID, nil
 }

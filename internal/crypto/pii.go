@@ -37,23 +37,24 @@ func (p *PIIBox) gcm(ctx context.Context, keyID string) (cipher.AEAD, error) {
 
 func aad(boundTo, keyID string) []byte { return []byte(boundTo + "\x00" + keyID) }
 
-// Encrypt seals attrs as nonce||ciphertext bound to boundTo (the CID) and
-// reports the key id used, stored alongside so rotation can decrypt old rows.
-func (p *PIIBox) Encrypt(ctx context.Context, boundTo string, attrs map[string]string) (blob []byte, keyID string, err error) {
-	keyID = "v1"
+// Encrypt seals attrs as nonce||ciphertext bound to boundTo (the CID) under
+// the given key version (the caller passes the keyring's newest pii-kek —
+// hardcoding a version here would silently turn rotation into a no-op).
+// The key id is stored alongside so rotation can decrypt old rows.
+func (p *PIIBox) Encrypt(ctx context.Context, boundTo, keyID string, attrs map[string]string) (blob []byte, err error) {
 	g, err := p.gcm(ctx, keyID)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	plain, err := json.Marshal(attrs)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	nonce := make([]byte, g.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return g.Seal(nonce, nonce, plain, aad(boundTo, keyID)), keyID, nil
+	return g.Seal(nonce, nonce, plain, aad(boundTo, keyID)), nil
 }
 
 // Decrypt opens a blob produced by Encrypt for the same boundTo/keyID.

@@ -17,6 +17,7 @@ import (
 type Limiter struct {
 	mu      sync.Mutex
 	entries map[string]*entry
+	ops     int
 	now     func() time.Time // injectable for tests
 }
 
@@ -40,6 +41,9 @@ func (l *Limiter) Allow(key string, limit int) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
+	if l.ops++; l.ops%gcEvery == 0 {
+		gc(l.entries, now, window)
+	}
 	e := l.entries[key]
 	if e == nil {
 		e = &entry{windowStart: now.Truncate(window)}
@@ -63,12 +67,25 @@ func (l *Limiter) Allow(key string, limit int) bool {
 	return true
 }
 
-// Detector tracks lookup misses per client. A burst of misses is the
-// signature of enumeration (dialing phone numbers to see what exists);
-// Exceeded flips once misses in the current 10-minute window pass threshold.
+// gcEvery bounds memory: every N operations, entries idle for two or more
+// full windows are evicted (their weight is zero anyway).
+const gcEvery = 4096
+
+func gc(entries map[string]*entry, now time.Time, span time.Duration) {
+	for k, e := range entries {
+		if now.Sub(e.windowStart) >= 2*span {
+			delete(entries, k)
+		}
+	}
+}
+
+// Detector tracks lookup misses per client with the same weighted
+// sliding-window scheme as the limiter — a fixed wall-clock window would let
+// a paced attacker straddle the boundary and never trigger the alert.
 type Detector struct {
 	mu     sync.Mutex
 	misses map[string]*entry
+	ops    int
 	now    func() time.Time
 }
 
@@ -78,18 +95,29 @@ func NewDetector() *Detector {
 	return &Detector{misses: map[string]*entry{}, now: time.Now}
 }
 
-// Miss records a lookup that matched nothing and returns the running count
-// for the current window.
+// Miss records a lookup that matched nothing and returns the weighted miss
+// count over the sliding 10-minute window.
 func (d *Detector) Miss(key string) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := d.now()
+	if d.ops++; d.ops%gcEvery == 0 {
+		gc(d.misses, now, detectWindow)
+	}
 	e := d.misses[key]
 	start := now.Truncate(detectWindow)
-	if e == nil || !start.Equal(e.windowStart) {
+	if e == nil {
 		e = &entry{windowStart: start}
 		d.misses[key] = e
 	}
+	switch {
+	case start.Equal(e.windowStart):
+	case start.Sub(e.windowStart) == detectWindow:
+		e.prev, e.curr, e.windowStart = e.curr, 0, start
+	default:
+		e.prev, e.curr, e.windowStart = 0, 0, start
+	}
 	e.curr++
-	return e.curr
+	frac := 1 - float64(now.Sub(start))/float64(detectWindow)
+	return e.curr + int(frac*float64(e.prev))
 }

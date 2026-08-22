@@ -17,7 +17,10 @@ import (
 
 const pasetoHeader = "v4.public."
 
-var b64 = base64.RawURLEncoding
+// Strict: non-canonical trailing bits are rejected, so a signed token has
+// exactly one valid string encoding (no malleability for anything that might
+// ever key on the token string, e.g. a future replay cache).
+var b64 = base64.RawURLEncoding.Strict()
 
 // pae is PASETO's Pre-Authentication Encoding: an unambiguous serialization
 // of the signed pieces (count, then length-prefixed items, little-endian).

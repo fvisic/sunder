@@ -135,13 +135,6 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 		}
 		return "", err
 	}
-	// Fail closed: an unaudited mutation must not report success.
-	if err := audit.Append(ctx, c.Pool, audit.Entry{
-		ClientID: client.ID, Action: "contacts.register", CID: cid,
-		Detail: map[string]any{"scope": client.Scope},
-	}); err != nil {
-		return "", fmt.Errorf("audit append: %w", err)
-	}
 	return cid, nil
 }
 
@@ -231,12 +224,26 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailTok
 		}
 		attrs = old
 	}
-	blob, keyID, err := c.PII.Encrypt(ctx, cid, attrs)
+	// Always re-encrypt under the newest ACTIVE pii-kek: rotation completes
+	// on touch, and old rows stay decryptable via their stored pii_key_id.
+	keyID, err := c.Ring.Newest(ctx, crypto.KeyPIIKEK)
+	if err != nil {
+		return "", err
+	}
+	blob, err := c.PII.Encrypt(ctx, cid, keyID, attrs)
 	if err != nil {
 		return "", err
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3 WHERE cid=$1`, cid, blob, keyID); err != nil {
+		return "", err
+	}
+	// Audit inside the same transaction: the registration and its record
+	// commit together (fail closed).
+	if err := audit.AppendTx(ctx, tx, audit.Entry{
+		ClientID: client.ID, Action: "contacts.register", CID: cid,
+		Detail: map[string]any{"scope": client.Scope},
+	}); err != nil {
 		return "", err
 	}
 	return cid, tx.Commit(ctx)
@@ -298,15 +305,23 @@ func (c *Contacts) IssueScopedCid(ctx context.Context, client *auth.Client, cid,
 	if err != nil {
 		return "", err
 	}
-	newCID, err := ensureCID(ctx, c.Pool, personID, targetScope)
+	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return "", err
 	}
-	if err := audit.Append(ctx, c.Pool, audit.Entry{
+	defer func() { _ = tx.Rollback(ctx) }()
+	newCID, err := ensureCID(ctx, tx, personID, targetScope)
+	if err != nil {
+		return "", err
+	}
+	if err := audit.AppendTx(ctx, tx, audit.Entry{
 		ClientID: client.ID, Action: "scopes.issue", CID: cid,
 		Detail: map[string]any{"target_scope": targetScope},
 	}); err != nil {
 		return "", fmt.Errorf("audit append: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
 	}
 	return newCID, nil
 }

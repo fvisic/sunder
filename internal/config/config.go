@@ -20,6 +20,7 @@ type Config struct {
 	VaultToken   string // SUNDER_VAULT_TOKEN
 	VaultMount   string // SUNDER_VAULT_MOUNT: KV v2 mount, default "secret"
 	TSAURL       string // SUNDER_TSA_URL; the freetsa.org default suits pilots — production should point at a qualified or internal TSA
+	MetricsToken string // SUNDER_METRICS_TOKEN: when set, /metrics requires this bearer token (per-client counters reveal client ids and activity)
 }
 
 func getenv(key, def string) string {
@@ -43,6 +44,7 @@ func FromEnv() (Config, error) {
 		VaultToken:   os.Getenv("SUNDER_VAULT_TOKEN"),
 		VaultMount:   getenv("SUNDER_VAULT_MOUNT", "secret"),
 		TSAURL:       getenv("SUNDER_TSA_URL", "https://freetsa.org/tsr"),
+		MetricsToken: os.Getenv("SUNDER_METRICS_TOKEN"),
 	}
 	if c.DBURL == "" {
 		return c, fmt.Errorf("SUNDER_DB_URL is required")

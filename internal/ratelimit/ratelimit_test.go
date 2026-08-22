@@ -57,7 +57,7 @@ func TestLimiterZeroLimit(t *testing.T) {
 	}
 }
 
-func TestDetectorCountsPerWindow(t *testing.T) {
+func TestDetectorSlidingWindow(t *testing.T) {
 	d := NewDetector()
 	base := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 	now := base
@@ -67,8 +67,15 @@ func TestDetectorCountsPerWindow(t *testing.T) {
 			t.Fatalf("miss %d counted as %d", i, got)
 		}
 	}
+	// Right after the boundary the previous window still weighs ~1.0: a
+	// paced attacker straddling the boundary cannot reset the count.
 	now = base.Add(detectWindow)
+	if got := d.Miss("crm"); got != 4 {
+		t.Fatalf("boundary miss should carry previous window, got %d", got)
+	}
+	// Two idle windows later everything decays away.
+	now = base.Add(3 * detectWindow)
 	if got := d.Miss("crm"); got != 1 {
-		t.Fatalf("new window should reset count, got %d", got)
+		t.Fatalf("stale window should reset, got %d", got)
 	}
 }

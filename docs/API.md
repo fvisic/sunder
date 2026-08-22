@@ -1,9 +1,11 @@
 # API
 
 All `/v1/*` endpoints require authentication. Errors are JSON:
-`{"error": "<code>"}` with optional `detail`. Codes: `unauthorized`,
-`forbidden`, `purpose_not_allowed`, `not_found`, `validation`, `bad_json`,
-`rate_limited`, `internal`.
+`{"error": "<code>"}` with optional `detail`. Codes: `unauthorized` (401),
+`forbidden` / `purpose_not_allowed` / `audience_mismatch` (403),
+`not_found` (404), `validation` / `bad_json` / `token_invalid` (400),
+`token_used` (409), `token_expired` (410), `rate_limited` (429),
+`internal` (500).
 
 ## Authentication
 
@@ -60,8 +62,9 @@ returned; every fetch is written to the audit chain.
 
 ### POST /v1/lookup — find a contact without exposing PII
 Action: `lookup`. Rate-limited per client (429 `rate_limited` beyond the
-client's per-minute limit); misses feed the enumeration detector (warning
-log + `sunder_lookup_misses_total` metric at 100 misses/10 min).
+client's per-minute limit); every miss increments
+`sunder_lookup_misses_total` and feeds a sliding 10-minute enumeration
+detector that logs a warning when a client crosses 100 weighted misses.
 
 Valid key combinations:
 
@@ -73,9 +76,12 @@ Valid key combinations:
 ```
 
 Name alone is rejected (400) — a name is a narrowing key, never an
-identifier. Identifiers are normalized, HMAC-tokenized under every active
-key version (rotation window) and matched against the token indexes; no PII
-is compared or stored in plaintext anywhere on this path.
+identifier. The primary identifier is email (priority) or phone; extra
+identifiers narrow *softly*: they must match when the person has that token,
+but a person registered without it is not excluded. Identifiers are
+normalized, HMAC-tokenized under every live (ACTIVE + RETIRING) key version
+(rotation window) and matched against the token indexes; no PII is compared
+or stored in plaintext anywhere on this path.
 
 `200 {"cid": "CID-..."}` — the pseudonym in the caller's scope.
 `404 not_found` — no match, **including** the case where the person exists
@@ -131,6 +137,15 @@ touched by a registration. `sunder keys list` shows the ring.
 
 ## Audit
 
-Actions `contacts.register`, `scopes.issue` and `attributes.read` append to
-the hash-chained audit log (client, action, CID, purpose — never attribute
-values). See docs/ARCHITECTURE.md.
+Actions `contacts.register`, `scopes.issue`, `attributes.read`, `lookup`
+(hits and misses), `oti.issue` and `oti.verify` append to the hash-chained
+audit log (client, action, CID, purpose/jti — never attribute values or raw
+identifiers), inside the same transaction as the operation they record.
+See docs/ARCHITECTURE.md and docs/THREAT-MODEL.md.
+
+## Operational notes
+
+- `GET /metrics` exposes per-client counters; set `SUNDER_METRICS_TOKEN`
+  to require a bearer token where network isolation is not enough.
+- Anchoring: schedule `sunder anchor` (cron, daily); `sunder verify-audit
+  -ca <tsa-ca.pem>` verifies the chain and every TSA token offline.

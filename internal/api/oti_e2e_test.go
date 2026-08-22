@@ -19,10 +19,13 @@ func otiEnv(t *testing.T) (*e2eEnv, string) {
 		 WHERE client_id='crm'`); err != nil {
 		t.Fatal(err)
 	}
+	// "refund" is granted so a purpose-mismatch test can distinguish
+	// claims-vs-request mismatch (token_invalid) from a missing grant
+	// (purpose_not_allowed, tested separately).
 	credERP, err := auth.Create(ctx, e.srv.Store.Pool, auth.Client{
 		ID: "erp", Name: "ERP", Scope: "erp",
 		AllowedActions:  []string{auth.ActOTIVerify},
-		AllowedPurposes: []string{"create_order"}, RateLimit: 100,
+		AllowedPurposes: []string{"create_order", "refund"}, RateLimit: 100,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +79,8 @@ func TestOTIBindingChecks(t *testing.T) {
 		return out["token"]
 	}
 
-	// Wrong purpose at verification.
+	// Wrong purpose at verification (granted to the verifier, but the token
+	// is bound to create_order): claims mismatch -> token_invalid.
 	rec, out := e.do(t, credERP, "POST", "/v1/oti/verify", map[string]string{
 		"token": issue(), "purpose": "refund", "audience": "erp"})
 	if rec.Code != 400 || out["error"] != "token_invalid" {

@@ -65,20 +65,23 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 		}
 	}
 
+	// The primary identifier is email (priority) or phone; any additional
+	// identifier narrows SOFTLY: it must match when the person has that
+	// token, but a person registered without it is not excluded (otherwise a
+	// contact registered email-only could never be found by email+phone).
 	by := "email"
 	q := `SELECT id FROM persons WHERE email_token = ANY($1)`
 	args := []any{emailToks}
-	switch {
-	case in.Phone != "" && in.Email == "":
+	if in.Email == "" {
 		by, q, args = "phone", `SELECT id FROM persons WHERE phone_token = ANY($1)`, []any{phoneToks}
-	case in.Phone != "" && in.Email != "":
-		by = "email+phone"
-		q = `SELECT id FROM persons WHERE email_token = ANY($1) AND phone_token = ANY($2)`
-		args = []any{emailToks, phoneToks}
+	} else if in.Phone != "" {
+		by += "+phone"
+		q += fmt.Sprintf(" AND (phone_token = ANY($%d) OR phone_token IS NULL)", len(args)+1)
+		args = append(args, phoneToks)
 	}
 	if in.Name != "" {
 		by += "+name"
-		q += fmt.Sprintf(" AND name_token = ANY($%d)", len(args)+1)
+		q += fmt.Sprintf(" AND (name_token = ANY($%d) OR name_token IS NULL)", len(args)+1)
 		args = append(args, nameToks)
 	}
 
@@ -89,15 +92,19 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 		return "", err
 	}
 
+	// The scope query always runs (with an impossible person id on a miss) so
+	// "person does not exist" and "person exists in another scope" burn the
+	// same work — no timing oracle for cross-scope enumeration.
+	if !matched {
+		personID = "00000000-0000-0000-0000-000000000000"
+	}
 	cid := ""
-	if matched {
-		err = c.Pool.QueryRow(ctx,
-			`SELECT cid FROM cids WHERE person_id=$1 AND scope=$2`, personID, client.Scope).Scan(&cid)
-		if err == pgx.ErrNoRows {
-			matched, cid = false, ""
-		} else if err != nil {
-			return "", err
-		}
+	err = c.Pool.QueryRow(ctx,
+		`SELECT cid FROM cids WHERE person_id=$1 AND scope=$2`, personID, client.Scope).Scan(&cid)
+	if err == pgx.ErrNoRows {
+		matched, cid = false, ""
+	} else if err != nil {
+		return "", err
 	}
 	// Fail closed: a lookup that cannot be audited must not answer.
 	if err := audit.Append(ctx, c.Pool, audit.Entry{

@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -59,7 +60,19 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 	}
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
-	s.mux.Handle("GET /metrics", s.Metrics)
+	// Per-client counters reveal client ids and activity; an optional token
+	// gates the scrape endpoint where network isolation is not enough.
+	metricsHandler := http.Handler(s.Metrics)
+	if cfg.MetricsToken != "" {
+		metricsHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+cfg.MetricsToken)) != 1 {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			s.Metrics.ServeHTTP(w, r)
+		})
+	}
+	s.mux.Handle("GET /metrics", metricsHandler)
 
 	if st != nil {
 		ks := OpenKeystore(cfg)

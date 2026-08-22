@@ -149,7 +149,7 @@ func verifyAuditCmd(ctx context.Context, st *store.Store, args []string) error {
 // keysCmd implements `sunder keys rotate -kind <kind>` and `sunder keys list`.
 func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: sunder keys rotate -kind <kind> | sunder keys list")
+		return fmt.Errorf("usage: sunder keys rotate -kind <kind> | keys retire -kind <kind> -version <v> | keys list")
 	}
 	if err := st.Migrate(ctx); err != nil {
 		return err
@@ -169,7 +169,31 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		if err != nil {
 			return err
 		}
-		fmt.Printf("rotated %s to %s (previous versions RETIRING; old tokens keep matching, re-key happens on touch)\n", *kind, version)
+		note := map[string]string{
+			"hmac-email": "old tokens keep matching, rows re-key on touch",
+			"hmac-phone": "old tokens keep matching, rows re-key on touch",
+			"hmac-name":  "old tokens keep matching, rows re-key on touch",
+			"pii-kek":    "old blobs stay decryptable via stored pii_key_id, re-encrypt on touch",
+			"oti-sign":   "tokens signed by previous versions keep verifying until you `keys retire` them",
+		}[*kind]
+		fmt.Printf("rotated %s to %s (previous versions RETIRING; %s)\n", *kind, version, note)
+		fmt.Println("running servers pick up the change within 30s (keyring cache TTL)")
+		return nil
+	case "retire":
+		fs := flag.NewFlagSet("keys retire", flag.ContinueOnError)
+		kind := fs.String("kind", "", "key kind")
+		version := fs.String("version", "", "version to retire (e.g. v1)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *kind == "" || *version == "" {
+			return fmt.Errorf("-kind and -version are required")
+		}
+		if err := ring.Retire(ctx, *kind, *version); err != nil {
+			return err
+		}
+		fmt.Printf("retired %s/%s - it no longer matches lookups nor verifies tokens\n", *kind, *version)
+		fmt.Println("(for hmac kinds: rows still stored under this version stop matching; re-key first)")
 		return nil
 	case "list":
 		rows, err := st.Pool.Query(ctx, `SELECT key_id, status, created_at FROM keys ORDER BY kind, created_at`)

@@ -40,18 +40,14 @@ func canonical(prevHash string, ts time.Time, e Entry, detailJSON []byte) string
 	return string(b)
 }
 
-// Append writes one chained record in its own transaction.
-func Append(ctx context.Context, pool *pgxpool.Pool, e Entry) error {
+// AppendTx writes one chained record inside the caller's transaction, so a
+// business mutation and its audit record commit or roll back together —
+// the log can never record what did not happen, nor miss what did.
+func AppendTx(ctx context.Context, tx pgx.Tx, e Entry) error {
 	detailJSON, err := json.Marshal(e.Detail)
 	if err != nil {
 		return err
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, appendLockKey); err != nil {
 		return err
 	}
@@ -73,10 +69,21 @@ func Append(ctx context.Context, pool *pgxpool.Pool, e Entry) error {
 	if e.CID != "" {
 		cidCol = e.CID
 	}
-	if _, err := tx.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`INSERT INTO audit (ts, client_id, action, cid, detail, prev_hash, hash)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		ts, e.ClientID, e.Action, cidCol, detailJSON, prevCol, hash); err != nil {
+		ts, e.ClientID, e.Action, cidCol, detailJSON, prevCol, hash)
+	return err
+}
+
+// Append writes one chained record in its own transaction.
+func Append(ctx context.Context, pool *pgxpool.Pool, e Entry) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := AppendTx(ctx, tx, e); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
