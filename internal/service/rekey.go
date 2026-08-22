@@ -95,7 +95,7 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 
 func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[string]string, newestKEK string, reencryptPII bool, stats *RekeyStats) error {
 	rows, err := c.Pool.Query(ctx,
-		`SELECT cid, COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1')
+		`SELECT cid, COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm')
 		 FROM cids WHERE person_id=$1`, personID)
 	if err != nil {
 		return err
@@ -104,11 +104,12 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 		cid   string
 		blob  []byte
 		keyID string
+		alg   string
 	}
 	var blobs []blobRow
 	for rows.Next() {
 		var b blobRow
-		if err := rows.Scan(&b.cid, &b.blob, &b.keyID); err != nil {
+		if err := rows.Scan(&b.cid, &b.blob, &b.keyID, &b.alg); err != nil {
 			rows.Close()
 			return err
 		}
@@ -128,7 +129,7 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 		if len(b.blob) == 0 {
 			continue
 		}
-		attrs, err := c.PII.Decrypt(ctx, b.cid, b.blob, b.keyID)
+		attrs, err := c.PII.Decrypt(ctx, b.cid, b.blob, b.keyID, b.alg)
 		if err != nil {
 			stats.Skipped++
 			continue
@@ -147,13 +148,17 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 				}
 			}
 		}
-		if reencryptPII && b.keyID != newestKEK {
+		// Re-encrypt when the key OR the algorithm is stale: the same sweep
+		// that completes a key rotation also migrates the fleet to a newly
+		// configured AEAD (docs/RUNBOOK-ALG-MIGRATION.md).
+		if reencryptPII && (b.keyID != newestKEK || b.alg != c.PII.Algorithm()) {
 			fresh, err := c.PII.Encrypt(ctx, b.cid, newestKEK, attrs)
 			if err != nil {
 				return err
 			}
 			if _, err := c.Pool.Exec(ctx,
-				`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3 WHERE cid=$1`, b.cid, fresh, newestKEK); err != nil {
+				`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4 WHERE cid=$1`,
+				b.cid, fresh, newestKEK, c.PII.Algorithm()); err != nil {
 				return err
 			}
 			stats.BlobsReenc++

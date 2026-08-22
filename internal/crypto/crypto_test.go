@@ -138,17 +138,17 @@ func TestPIIRoundtripTamperAndTransplant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := box.Decrypt(ctx, "CID-A", blob, keyID)
+	got, err := box.Decrypt(ctx, "CID-A", blob, keyID, AlgAES256GCM)
 	if err != nil || got["email"] != attrs["email"] {
 		t.Fatalf("roundtrip failed: %v %v", got, err)
 	}
 	// Transplant: the same ciphertext moved under another CID must fail
 	// authentication (AAD binding).
-	if _, err := box.Decrypt(ctx, "CID-B", blob, keyID); err == nil {
+	if _, err := box.Decrypt(ctx, "CID-B", blob, keyID, AlgAES256GCM); err == nil {
 		t.Fatal("blob transplanted to another CID decrypted without error")
 	}
 	blob[len(blob)-1] ^= 0xFF
-	if _, err := box.Decrypt(ctx, "CID-A", blob, keyID); err == nil {
+	if _, err := box.Decrypt(ctx, "CID-A", blob, keyID, AlgAES256GCM); err == nil {
 		t.Fatal("tampered blob decrypted without error")
 	}
 }
@@ -232,11 +232,11 @@ func TestPIIBoxRejectsBadKeyMaterial(t *testing.T) {
 	if _, err := box.Encrypt(ctx, "CID-A", "v1", map[string]string{"a": "b"}); err == nil {
 		t.Fatal("encrypt with a 4-byte KEK must error")
 	}
-	if _, err := box.Decrypt(ctx, "CID-A", []byte("blob"), "v1"); err == nil {
+	if _, err := box.Decrypt(ctx, "CID-A", []byte("blob"), "v1", AlgAES256GCM); err == nil {
 		t.Fatal("decrypt with a 4-byte KEK must error")
 	}
 	good := NewPIIBox(fileKS(t))
-	if _, err := good.Decrypt(ctx, "CID-A", []byte("x"), "v1"); err == nil {
+	if _, err := good.Decrypt(ctx, "CID-A", []byte("x"), "v1", AlgAES256GCM); err == nil {
 		t.Fatal("blob shorter than the nonce must error")
 	}
 }

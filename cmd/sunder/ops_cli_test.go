@@ -91,13 +91,13 @@ func TestRetentionAndDSRCmds(t *testing.T) {
 	if err := retentionCmd(ctx, st, []string{"huh"}); err == nil {
 		t.Fatal("unknown subcommand must error")
 	}
-	if err := dsrCmd(ctx, st, []string{"deliver"}); err != nil {
+	if err := dsrCmd(ctx, config.Config{}, st, []string{"deliver"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := dsrCmd(ctx, st, []string{"events"}); err != nil {
+	if err := dsrCmd(ctx, config.Config{}, st, []string{"events"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := dsrCmd(ctx, st, []string{"wat"}); err == nil {
+	if err := dsrCmd(ctx, config.Config{}, st, []string{"wat"}); err == nil {
 		t.Fatal("unknown subcommand must error")
 	}
 }
@@ -200,10 +200,10 @@ func TestCLIBranchSweep(t *testing.T) {
 		`INSERT INTO erasure_events (erasure_id, scope, cid) SELECT id, 'crm', 'CID-X' FROM erasures LIMIT 1`); err != nil {
 		t.Fatal(err)
 	}
-	if err := dsrCmd(ctx, st, []string{"deliver"}); err != nil {
+	if err := dsrCmd(ctx, config.Config{}, st, []string{"deliver"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := dsrCmd(ctx, st, []string{"events"}); err != nil {
+	if err := dsrCmd(ctx, config.Config{}, st, []string{"events"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -254,10 +254,10 @@ func TestOpsCmdsOnDeadPool(t *testing.T) {
 	if err := retentionCmd(ctx, st, []string{"set", "-scope", "s", "-days", "1"}); err == nil {
 		t.Fatal("retention set on dead pool")
 	}
-	if err := dsrCmd(ctx, st, []string{"deliver"}); err == nil {
+	if err := dsrCmd(ctx, config.Config{}, st, []string{"deliver"}); err == nil {
 		t.Fatal("dsr deliver on dead pool")
 	}
-	if err := dsrCmd(ctx, st, []string{"events"}); err == nil {
+	if err := dsrCmd(ctx, config.Config{}, st, []string{"events"}); err == nil {
 		t.Fatal("dsr events on dead pool")
 	}
 	if err := anchorCmd(ctx, config.Config{TSAURL: "http://x"}, st, nil); err == nil {

@@ -95,9 +95,12 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		if err := ring.EnsureAll(context.Background(), ks); err != nil {
 			return nil, fmt.Errorf("keystore bootstrap: %w", err)
 		}
-		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: crypto.NewPIIBox(ks), Ring: ring}
-		s.OTI = &service.OTI{Pool: st.Pool, KS: ks, Ring: ring, Contacts: s.Contacts}
-		s.GDPR = &service.GDPR{Pool: st.Pool, Contacts: s.Contacts}
+		pii := crypto.NewPIIBox(ks)
+		pii.Alg = cfg.PIIAlg
+		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: pii, Ring: ring}
+		s.OTI = &service.OTI{Pool: st.Pool, KS: ks, Ring: ring, Contacts: s.Contacts, TTL: cfg.OTITTL}
+		s.GDPR = &service.GDPR{Pool: st.Pool, Contacts: s.Contacts,
+			HTTPTimeout: cfg.WebhookTimeout, MaxAttempts: cfg.WebhookMaxAttempts}
 		s.Auth = &auth.Authenticator{Pool: st.Pool}
 
 		if cfg.RedisAddr != "" {
@@ -204,11 +207,15 @@ func (s *Server) Run(ctx context.Context) error {
 		srv.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 
-	// Erasure webhook delivery worker: retries PENDING events every minute
-	// (Erase also attempts an immediate delivery inline).
+	// Erasure webhook delivery worker: retries PENDING events on the
+	// configured cadence (Erase also attempts an immediate delivery inline).
 	if s.GDPR != nil {
+		interval := s.Cfg.DeliverInterval
+		if interval <= 0 {
+			interval = time.Minute
+		}
 		go func() {
-			ticker := time.NewTicker(time.Minute)
+			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
 				select {

@@ -35,6 +35,26 @@ app.kubernetes.io/instance: {{ .Release.Name }}
       key: SUNDER_REDIS_PASSWORD
 {{- end }}
 {{- end }}
+{{- if .Values.tunables.otiTtl }}
+- name: SUNDER_OTI_TTL
+  value: {{ .Values.tunables.otiTtl | quote }}
+{{- end }}
+{{- if .Values.tunables.piiAlg }}
+- name: SUNDER_PII_ALG
+  value: {{ .Values.tunables.piiAlg | quote }}
+{{- end }}
+{{- if .Values.tunables.webhookTimeout }}
+- name: SUNDER_WEBHOOK_TIMEOUT
+  value: {{ .Values.tunables.webhookTimeout | quote }}
+{{- end }}
+{{- if .Values.tunables.webhookMaxAttempts }}
+- name: SUNDER_WEBHOOK_MAX_ATTEMPTS
+  value: {{ .Values.tunables.webhookMaxAttempts | quote }}
+{{- end }}
+{{- if .Values.tunables.deliverInterval }}
+- name: SUNDER_DELIVER_INTERVAL
+  value: {{ .Values.tunables.deliverInterval | quote }}
+{{- end }}
 {{- if .Values.metrics.existingSecret }}
 - name: SUNDER_METRICS_TOKEN
   valueFrom:

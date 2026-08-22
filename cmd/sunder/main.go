@@ -87,7 +87,7 @@ func run(cmd string, args []string) error {
 	case "retention":
 		return retentionCmd(ctx, st, args)
 	case "dsr":
-		return dsrCmd(ctx, st, args)
+		return dsrCmd(ctx, cfg, st, args)
 	default:
 		return clientCmd(ctx, st, args)
 	}
@@ -195,7 +195,7 @@ func retentionCmd(ctx context.Context, st *store.Store, args []string) error {
 }
 
 // dsrCmd operates the erasure delivery queue.
-func dsrCmd(ctx context.Context, st *store.Store, args []string) error {
+func dsrCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: sunder dsr deliver | dsr events")
 	}
@@ -204,7 +204,7 @@ func dsrCmd(ctx context.Context, st *store.Store, args []string) error {
 	}
 	switch args[0] {
 	case "deliver":
-		g := &service.GDPR{Pool: st.Pool}
+		g := &service.GDPR{Pool: st.Pool, HTTPTimeout: cfg.WebhookTimeout, MaxAttempts: cfg.WebhookMaxAttempts}
 		n, err := g.DeliverPending(ctx)
 		if err != nil {
 			return err
@@ -420,7 +420,9 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		if err := ring.EnsureAll(ctx, ks); err != nil {
 			return err
 		}
-		contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: crypto.NewPIIBox(ks), Ring: ring}
+		pii := crypto.NewPIIBox(ks)
+		pii.Alg = cfg.PIIAlg
+		contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: pii, Ring: ring}
 		stats, err := contacts.Rekey(ctx, *reenc, *batch)
 		if err != nil {
 			return err

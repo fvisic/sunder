@@ -25,7 +25,10 @@ var (
 	ErrAudienceMismatch = errors.New("audience mismatch")
 )
 
-// OTITTL is the maximum one-time-identifier lifetime (docs/DESIGN.md).
+// OTITTL is the default one-time-identifier lifetime (docs/DESIGN.md).
+// Configurable per deployment via SUNDER_OTI_TTL: shorter for same-network
+// handoffs, longer where the receiving system polls slowly — but a token is
+// a bearer credential, so longer TTLs widen the interception window.
 const OTITTL = 5 * time.Minute
 
 // OTI issues and verifies one-time identifiers — the only identity currency
@@ -37,6 +40,15 @@ type OTI struct {
 	KS       crypto.Keystore
 	Ring     *KeyRing
 	Contacts *Contacts
+	// TTL overrides the token lifetime; zero means OTITTL.
+	TTL time.Duration
+}
+
+func (o *OTI) ttl() time.Duration {
+	if o.TTL <= 0 {
+		return OTITTL
+	}
+	return o.TTL
 }
 
 type otiClaims struct {
@@ -97,7 +109,7 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 	}
 
 	now := time.Now().UTC()
-	expiresAt = now.Add(OTITTL)
+	expiresAt = now.Add(o.ttl())
 	claims := otiClaims{
 		JTI: newUUID(), CID: cid, Purpose: purpose, Audience: audience,
 		IssuedAt: now.Format(time.RFC3339), Expires: expiresAt.Format(time.RFC3339), KeyID: version,
@@ -289,29 +301,29 @@ func (o *OTI) shareIntoScope(ctx context.Context, tx pgx.Tx, issuerCID, verifier
 		return shared, nil
 	}
 	var srcBlob []byte
-	var srcKey string
+	var srcKey, srcAlg string
 	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1') FROM cids WHERE cid=$1`,
-		issuerCID).Scan(&srcBlob, &srcKey); err != nil {
+		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1`,
+		issuerCID).Scan(&srcBlob, &srcKey, &srcAlg); err != nil {
 		return nil, err
 	}
 	if len(srcBlob) == 0 {
 		return shared, nil
 	}
-	src, err := o.Contacts.PII.Decrypt(ctx, issuerCID, srcBlob, srcKey)
+	src, err := o.Contacts.PII.Decrypt(ctx, issuerCID, srcBlob, srcKey, srcAlg)
 	if err != nil {
 		return nil, err
 	}
 	var dstBlob []byte
-	var dstKey string
+	var dstKey, dstAlg string
 	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1') FROM cids WHERE cid=$1`,
-		verifierCID).Scan(&dstBlob, &dstKey); err != nil {
+		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1`,
+		verifierCID).Scan(&dstBlob, &dstKey, &dstAlg); err != nil {
 		return nil, err
 	}
 	dst := map[string]string{}
 	if len(dstBlob) > 0 {
-		if dst, err = o.Contacts.PII.Decrypt(ctx, verifierCID, dstBlob, dstKey); err != nil {
+		if dst, err = o.Contacts.PII.Decrypt(ctx, verifierCID, dstBlob, dstKey, dstAlg); err != nil {
 			return nil, err
 		}
 	}
@@ -333,8 +345,8 @@ func (o *OTI) shareIntoScope(ctx context.Context, tx pgx.Tx, issuerCID, verifier
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, updated_at=now() WHERE cid=$1`,
-		verifierCID, fresh, newKey); err != nil {
+		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4, updated_at=now() WHERE cid=$1`,
+		verifierCID, fresh, newKey, o.Contacts.PII.Algorithm()); err != nil {
 		return nil, err
 	}
 	return shared, nil

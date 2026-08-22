@@ -68,8 +68,9 @@ go test ./...
 go run ./cmd/sunder serve
 ```
 
-Configuration is environment-only; see `internal/config/config.go` for the
-full `SUNDER_*` list. Documentation lives in `docs/`.
+Configuration is environment-only; see `docs/CONFIG.md` for the full
+`SUNDER_*` reference (deployment tunables — OTI TTL, PII encryption
+algorithm, webhook delivery caps — included). Documentation lives in `docs/`.
 
 Test coverage is gated at **>= 88%** in CI (currently ~90% across the
 server and CLI — the uncovered remainder is almost entirely defensive

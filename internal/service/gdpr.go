@@ -32,15 +32,24 @@ var ErrConsentDenied = errors.New("consent denied")
 type GDPR struct {
 	Pool     *pgxpool.Pool
 	Contacts *Contacts
-	HTTP     *http.Client // webhook delivery; nil -> 5s-timeout default
+	HTTP     *http.Client // webhook delivery; nil -> hardened default with HTTPTimeout
+	// HTTPTimeout bounds each webhook POST; zero means DefaultWebhookTimeout.
+	HTTPTimeout time.Duration
+	// MaxAttempts is the failed-delivery cap before FAILED; zero means
+	// DefaultWebhookMaxAttempts.
+	MaxAttempts int
 }
 
 func (g *GDPR) client() *http.Client {
 	if g.HTTP != nil {
 		return g.HTTP
 	}
+	t := g.HTTPTimeout
+	if t <= 0 {
+		t = DefaultWebhookTimeout
+	}
 	return &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: t,
 		// Never follow redirects: a hostile/compromised webhook receiver
 		// must not be able to steer the signed POST at internal addresses.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -169,7 +178,7 @@ func (g *GDPR) Access(ctx context.Context, client *auth.Client, cid string) (map
 		return nil, err
 	}
 	rows, err := g.Pool.Query(ctx,
-		`SELECT cid, scope, pii_encrypted, COALESCE(pii_key_id,'v1') FROM cids WHERE person_id=$1 ORDER BY scope`, personID)
+		`SELECT cid, scope, pii_encrypted, COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE person_id=$1 ORDER BY scope`, personID)
 	if err != nil {
 		return nil, err
 	}
@@ -179,13 +188,13 @@ func (g *GDPR) Access(ctx context.Context, client *auth.Client, cid string) (map
 	for rows.Next() {
 		var sd ScopeData
 		var blob []byte
-		var keyID string
-		if err := rows.Scan(&sd.CID, &sd.Scope, &blob, &keyID); err != nil {
+		var keyID, alg string
+		if err := rows.Scan(&sd.CID, &sd.Scope, &blob, &keyID, &alg); err != nil {
 			return nil, err
 		}
 		sd.Attributes = map[string]string{}
 		if len(blob) > 0 {
-			if sd.Attributes, err = g.Contacts.PII.Decrypt(ctx, sd.CID, blob, keyID); err != nil {
+			if sd.Attributes, err = g.Contacts.PII.Decrypt(ctx, sd.CID, blob, keyID, alg); err != nil {
 				return nil, err
 			}
 		}
@@ -238,14 +247,14 @@ func (g *GDPR) Export(ctx context.Context, client *auth.Client, cid string) (*Sc
 	}
 	sd := &ScopeData{Scope: client.Scope, CID: cid, Attributes: map[string]string{}}
 	var blob []byte
-	var keyID string
+	var keyID, alg string
 	err := g.Pool.QueryRow(ctx,
-		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1') FROM cids WHERE cid=$1`, cid).Scan(&blob, &keyID)
+		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1`, cid).Scan(&blob, &keyID, &alg)
 	if err != nil {
 		return nil, err
 	}
 	if len(blob) > 0 {
-		if sd.Attributes, err = g.Contacts.PII.Decrypt(ctx, cid, blob, keyID); err != nil {
+		if sd.Attributes, err = g.Contacts.PII.Decrypt(ctx, cid, blob, keyID, alg); err != nil {
 			return nil, err
 		}
 	}
@@ -323,7 +332,7 @@ func (g *GDPR) Erase(ctx context.Context, client *auth.Client, cid string) (eras
 		}
 	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE cids SET pii_encrypted=NULL, pii_key_id=NULL WHERE person_id=$1`, personID); err != nil {
+		`UPDATE cids SET pii_encrypted=NULL, pii_key_id=NULL, pii_alg='aes256gcm' WHERE person_id=$1`, personID); err != nil {
 		return 0, 0, err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM person_tokens WHERE person_id=$1`, personID); err != nil {
@@ -367,9 +376,20 @@ type erasePayload struct {
 	TS        string `json:"ts"`
 }
 
-// maxDeliveryAttempts bounds retries: after this many failures the event is
-// marked FAILED (audited) so one dead endpoint cannot starve the queue.
-const maxDeliveryAttempts = 10
+// Delivery defaults; overridable via SUNDER_WEBHOOK_TIMEOUT and
+// SUNDER_WEBHOOK_MAX_ATTEMPTS (the attempts cap keeps one dead endpoint from
+// starving the queue; every terminal transition is audited).
+const (
+	DefaultWebhookTimeout     = 5 * time.Second
+	DefaultWebhookMaxAttempts = 10
+)
+
+func (g *GDPR) maxAttempts() int {
+	if g.MaxAttempts <= 0 {
+		return DefaultWebhookMaxAttempts
+	}
+	return g.MaxAttempts
+}
 
 // DeliverPending pushes queued erasure events to their scopes' webhooks.
 // Events for scopes without a webhook are marked NO_WEBHOOK; failures stay
@@ -454,7 +474,7 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 			`UPDATE erasure_events SET attempts=attempts+1 WHERE id=$1 RETURNING attempts`, e.id).Scan(&attempts); err != nil {
 			continue
 		}
-		if attempts >= maxDeliveryAttempts {
+		if attempts >= g.maxAttempts() {
 			// terminal() adds one more attempt in its UPDATE; compensate by
 			// marking FAILED directly here with an audited record.
 			tx, err := g.Pool.Begin(ctx)

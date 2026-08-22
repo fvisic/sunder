@@ -6,10 +6,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/store"
+	"github.com/fvisic/sunder/internal/testutil"
 )
 
 func TestOpenKeystoreDrivers(t *testing.T) {
@@ -85,5 +87,28 @@ func TestRunListenError(t *testing.T) {
 	s := mustNew(t, config.Config{Listen: l.Addr().String()})
 	if err := s.Run(context.Background()); err == nil {
 		t.Fatal("binding an occupied port must error")
+	}
+}
+
+func TestTunablesReachServices(t *testing.T) {
+	e := newE2E(t) // sanity: default construction still works
+	_ = e
+	st := testutil.NewDB(t)
+	s, err := New(config.Config{
+		Listen: ":0", Keystore: "file", KeystorePath: t.TempDir(),
+		OTITTL: 90 * time.Second, PIIAlg: crypto.AlgXChaCha20,
+		WebhookTimeout: 30 * time.Second, WebhookMaxAttempts: 3,
+	}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.OTI.TTL != 90*time.Second {
+		t.Fatalf("OTI TTL not wired: %s", s.OTI.TTL)
+	}
+	if s.Contacts.PII.Algorithm() != crypto.AlgXChaCha20 {
+		t.Fatalf("PII alg not wired: %s", s.Contacts.PII.Algorithm())
+	}
+	if s.GDPR.HTTPTimeout != 30*time.Second || s.GDPR.MaxAttempts != 3 {
+		t.Fatalf("webhook tunables not wired: %s %d", s.GDPR.HTTPTimeout, s.GDPR.MaxAttempts)
 	}
 }

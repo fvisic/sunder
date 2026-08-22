@@ -54,11 +54,17 @@ own contacts.
   attacks over the small email/phone space; the key never leaves the
   service. `LOOKUP != AUTHENTICATION`: a lookup hit returns a pseudonym,
   never proves you are talking to that person.
-- **Attributes** — AES-256-GCM blobs stored **per scope** on the CID row,
+- **Attributes** — AEAD blobs (AES-256-GCM by default, XChaCha20-Poly1305
+  selectable via `SUNDER_PII_ALG`) stored **per scope** on the CID row,
   AAD-bound to the CID (no cross-row ciphertext transplant). Per-scope
   storage means dedup onto a shared person never exposes attributes another
   scope stored. Reads are field-level, purpose-checked, consent-checked and
   audited; encryption keys never leave the service.
+- **Algorithm agility** — each blob records its algorithm (`cids.pii_alg`);
+  reads follow the stored value, writes use the configured one, and the
+  `keys rekey` sweep converts the backlog. Should the current AEAD ever be
+  deprecated, the migration is a config change plus one idempotent sweep —
+  no downtime (docs/RUNBOOK-ALG-MIGRATION.md).
 
 ## 3. Client model
 

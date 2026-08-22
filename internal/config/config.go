@@ -4,6 +4,10 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"time"
+
+	"github.com/fvisic/sunder/internal/crypto"
 )
 
 // Config holds all runtime settings. TLS is optional for local development
@@ -28,6 +32,14 @@ type Config struct {
 	RedisAddr       string // SUNDER_REDIS_ADDR (host:port)
 	RedisPassword   string // SUNDER_REDIS_PASSWORD
 	RedisFailClosed bool   // SUNDER_REDIS_FAIL_CLOSED=true blocks lookups when Redis is unreachable (default: fail open)
+
+	// Tunables. Defaults match the documented v1 behaviour; see docs/CONFIG.md
+	// before changing them — several are security trade-offs, not preferences.
+	OTITTL             time.Duration // SUNDER_OTI_TTL: one-time-identifier lifetime, default "5m", range [30s, 24h]
+	PIIAlg             string        // SUNDER_PII_ALG: AEAD for NEW blobs, "aes256gcm" (default) or "xchacha20poly1305"; reads follow each blob's stored algorithm
+	WebhookTimeout     time.Duration // SUNDER_WEBHOOK_TIMEOUT: per-delivery HTTP timeout, default "5s", range [1s, 5m]
+	WebhookMaxAttempts int           // SUNDER_WEBHOOK_MAX_ATTEMPTS: failed deliveries before FAILED, default 10, min 1
+	DeliverInterval    time.Duration // SUNDER_DELIVER_INTERVAL: background webhook retry cadence, default "1m", range [5s, 1h]
 }
 
 func getenv(key, def string) string {
@@ -35,6 +47,19 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// getdur parses an env duration with a default and inclusive bounds.
+func getdur(key, def string, min, max time.Duration) (time.Duration, error) {
+	raw := getenv(key, def)
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %q is not a duration (e.g. \"5m\", \"90s\")", key, raw)
+	}
+	if d < min || d > max {
+		return 0, fmt.Errorf("%s: %s is outside [%s, %s]", key, d, min, max)
+	}
+	return d, nil
 }
 
 // FromEnv builds a Config from the environment, validating required values.
@@ -74,6 +99,25 @@ func FromEnv() (Config, error) {
 	}
 	if c.Keystore == "vault" && (c.VaultAddr == "" || c.VaultToken == "") {
 		return c, fmt.Errorf("vault keystore requires SUNDER_VAULT_ADDR and SUNDER_VAULT_TOKEN")
+	}
+
+	var err error
+	if c.OTITTL, err = getdur("SUNDER_OTI_TTL", "5m", 30*time.Second, 24*time.Hour); err != nil {
+		return c, err
+	}
+	if c.WebhookTimeout, err = getdur("SUNDER_WEBHOOK_TIMEOUT", "5s", time.Second, 5*time.Minute); err != nil {
+		return c, err
+	}
+	if c.DeliverInterval, err = getdur("SUNDER_DELIVER_INTERVAL", "1m", 5*time.Second, time.Hour); err != nil {
+		return c, err
+	}
+	c.PIIAlg = getenv("SUNDER_PII_ALG", crypto.AlgAES256GCM)
+	if !crypto.KnownAlg(c.PIIAlg) {
+		return c, fmt.Errorf("SUNDER_PII_ALG must be %q or %q", crypto.AlgAES256GCM, crypto.AlgXChaCha20)
+	}
+	raw := getenv("SUNDER_WEBHOOK_MAX_ATTEMPTS", "10")
+	if c.WebhookMaxAttempts, err = strconv.Atoi(raw); err != nil || c.WebhookMaxAttempts < 1 {
+		return c, fmt.Errorf("SUNDER_WEBHOOK_MAX_ATTEMPTS: %q must be an integer >= 1", raw)
 	}
 	return c, nil
 }

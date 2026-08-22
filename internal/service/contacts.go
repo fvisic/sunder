@@ -268,14 +268,14 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet
 
 	// Merge into the caller-scope blob: new values win, old ones survive.
 	var oldBlob []byte
-	var oldKeyID string
+	var oldKeyID, oldAlg string
 	err = tx.QueryRow(ctx,
-		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1') FROM cids WHERE cid=$1`, cid).Scan(&oldBlob, &oldKeyID)
+		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1`, cid).Scan(&oldBlob, &oldKeyID, &oldAlg)
 	if err != nil {
 		return "", err
 	}
 	if len(oldBlob) > 0 {
-		old, err := c.PII.Decrypt(ctx, cid, oldBlob, oldKeyID)
+		old, err := c.PII.Decrypt(ctx, cid, oldBlob, oldKeyID, oldAlg)
 		if err != nil {
 			return "", err
 		}
@@ -295,7 +295,8 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet
 		return "", err
 	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, updated_at=now() WHERE cid=$1`, cid, blob, keyID); err != nil {
+		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4, updated_at=now() WHERE cid=$1`,
+		cid, blob, keyID, c.PII.Algorithm()); err != nil {
 		return "", err
 	}
 	// Audit inside the same transaction: the registration and its record
@@ -424,10 +425,10 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 	// caller-supplied CID, or the 403/404 split becomes an oracle revealing
 	// that a foreign CID exists and what its consent state is.
 	var blob []byte
-	var keyID string
+	var keyID, alg string
 	err := c.Pool.QueryRow(ctx,
-		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1') FROM cids WHERE cid=$1 AND scope=$2`,
-		cid, client.Scope).Scan(&blob, &keyID)
+		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1 AND scope=$2`,
+		cid, client.Scope).Scan(&blob, &keyID, &alg)
 	if err == pgx.ErrNoRows {
 		return "", ErrNotFound
 	}
@@ -451,7 +452,7 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 	if len(blob) == 0 {
 		return "", ErrNotFound
 	}
-	attrs, err := c.PII.Decrypt(ctx, cid, blob, keyID)
+	attrs, err := c.PII.Decrypt(ctx, cid, blob, keyID, alg)
 	if err != nil {
 		return "", err
 	}

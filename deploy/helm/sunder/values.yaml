@@ -39,6 +39,15 @@ metrics:
   # Optional bearer token protecting /metrics (key SUNDER_METRICS_TOKEN).
   existingSecret: ""
 
+# Deployment tunables (docs/CONFIG.md). Empty = server default. These are
+# security trade-offs, not preferences — read the docs before changing.
+tunables:
+  otiTtl: ""             # SUNDER_OTI_TTL, e.g. "90s" (default 5m; bearer-token window!)
+  piiAlg: ""             # SUNDER_PII_ALG: aes256gcm (default) | xchacha20poly1305
+  webhookTimeout: ""     # SUNDER_WEBHOOK_TIMEOUT, e.g. "30s" (default 5s)
+  webhookMaxAttempts: "" # SUNDER_WEBHOOK_MAX_ATTEMPTS (default 10)
+  deliverInterval: ""    # SUNDER_DELIVER_INTERVAL, e.g. "30s" (default 1m)
+
 anchor:
   enabled: true
   schedule: "17 2 * * *"       # daily; only a 32-byte digest leaves the cluster
