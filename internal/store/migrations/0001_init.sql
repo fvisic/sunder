@@ -51,7 +51,9 @@ CREATE TABLE audit (
     client_id TEXT,
     action    TEXT NOT NULL,
     cid       TEXT,
-    detail    JSONB,
+    -- TEXT, not JSONB: the hash covers this exact byte string, and JSONB
+    -- round-trips normalize whitespace/key order, which would break the chain.
+    detail    TEXT,
     prev_hash TEXT,
     hash      TEXT NOT NULL
 );
@@ -71,3 +73,16 @@ CREATE TABLE keys (
     status     TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Defense in depth: the application never updates or deletes audit rows, so
+-- block it at the database layer too. A privileged attacker can drop the
+-- trigger, but the hash chain plus external anchoring still expose that.
+CREATE FUNCTION audit_append_only() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'audit log is append-only';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER audit_no_update BEFORE UPDATE OR DELETE ON audit
+    FOR EACH ROW EXECUTE FUNCTION audit_append_only();
+

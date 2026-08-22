@@ -12,18 +12,35 @@ import (
 	"os"
 	"time"
 
+	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
+	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/metrics"
+	"github.com/fvisic/sunder/internal/service"
 	"github.com/fvisic/sunder/internal/store"
 )
 
 // Server holds shared dependencies for all handlers.
 type Server struct {
-	Cfg     config.Config
-	Store   *store.Store
-	Metrics *metrics.Registry
-	Log     *slog.Logger
-	mux     *http.ServeMux
+	Cfg      config.Config
+	Store    *store.Store
+	Metrics  *metrics.Registry
+	Log      *slog.Logger
+	Contacts *service.Contacts
+	Auth     *auth.Authenticator
+	mux      *http.ServeMux
+}
+
+// OpenKeystore builds the configured keystore driver (decision D7).
+func OpenKeystore(cfg config.Config) crypto.Keystore {
+	switch cfg.Keystore {
+	case "vault":
+		return &crypto.VaultKeystore{Addr: cfg.VaultAddr, Token: cfg.VaultToken, Mount: cfg.VaultMount}
+	case "pkcs11":
+		return &crypto.PKCS11Keystore{}
+	default:
+		return &crypto.FileKeystore{Dir: cfg.KeystorePath}
+	}
 }
 
 // New builds the server and registers routes.
@@ -38,6 +55,18 @@ func New(cfg config.Config, st *store.Store) *Server {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.Handle("GET /metrics", s.Metrics)
+
+	if st != nil {
+		ks := OpenKeystore(cfg)
+		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: crypto.NewPIIBox(ks)}
+		s.Auth = &auth.Authenticator{Pool: st.Pool}
+
+		v1 := http.NewServeMux()
+		v1.HandleFunc("POST /v1/contacts", s.handleContactsRegister)
+		v1.HandleFunc("POST /v1/contacts/{cid}/scopes", s.handleScopesIssue)
+		v1.HandleFunc("GET /v1/contacts/{cid}/attributes/{name}", s.handleAttributeGet)
+		s.mux.Handle("/v1/", s.Auth.Middleware(v1))
+	}
 	return s
 }
 
@@ -100,6 +129,9 @@ func (s *Server) Run(ctx context.Context) error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	if s.Cfg.TLSCert != "" {
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13}
+	}
 	if s.Cfg.MTLSCA != "" {
 		caPEM, err := os.ReadFile(s.Cfg.MTLSCA)
 		if err != nil {
@@ -109,11 +141,10 @@ func (s *Server) Run(ctx context.Context) error {
 		if !pool.AppendCertsFromPEM(caPEM) {
 			return errors.New("mTLS CA file contains no certificates")
 		}
-		srv.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS13,
-			ClientCAs:  pool,
-			ClientAuth: tls.VerifyClientCertIfGiven,
-		}
+		srv.TLSConfig.ClientCAs = pool
+		// A configured client CA means mTLS, fully: connections without a
+		// valid client certificate are refused, not merely unverified.
+		srv.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 
 	errCh := make(chan error, 1)
