@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/fvisic/sunder/internal/api"
+	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/service"
@@ -36,10 +37,10 @@ func main() {
 
 func run(cmd string, args []string) error {
 	switch cmd {
-	case "serve", "migrate", "client", "keys":
+	case "serve", "migrate", "client", "keys", "anchor", "verify-audit":
 	default:
 		// Fail on typos before requiring config or a live database.
-		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys)", cmd)
+		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit)", cmd)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -69,9 +70,80 @@ func run(cmd string, args []string) error {
 		return st.Migrate(ctx)
 	case "keys":
 		return keysCmd(ctx, cfg, st, args)
+	case "anchor":
+		return anchorCmd(ctx, cfg, st)
+	case "verify-audit":
+		return verifyAuditCmd(ctx, st, args)
 	default:
 		return clientCmd(ctx, st, args)
 	}
+}
+
+// anchorCmd stamps the current audit-chain head at the configured TSA.
+// Run it from cron (daily); only a 32-byte digest leaves the system.
+func anchorCmd(ctx context.Context, cfg config.Config, st *store.Store) error {
+	if err := st.Migrate(ctx); err != nil {
+		return err
+	}
+	root, stampedAt, err := audit.Anchor(ctx, st.Pool, cfg.TSAURL)
+	if err != nil {
+		return err
+	}
+	if root == "" {
+		fmt.Println("audit log is empty - nothing to anchor")
+		return nil
+	}
+	fmt.Printf("anchored chain head %s...\n  TSA: %s\n  stamped at: %s\n", root[:16], cfg.TSAURL, stampedAt)
+	return nil
+}
+
+// verifyAuditCmd recomputes the whole hash chain and, with -ca, verifies
+// every stored TSA token offline. Non-zero exit on any failure.
+func verifyAuditCmd(ctx context.Context, st *store.Store, args []string) error {
+	fs := flag.NewFlagSet("verify-audit", flag.ContinueOnError)
+	caFile := fs.String("ca", "", "TSA root CA bundle for offline token verification (optional)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := st.Migrate(ctx); err != nil {
+		return err
+	}
+	broken, reason, err := audit.Verify(ctx, st.Pool)
+	if err != nil {
+		return err
+	}
+	if broken != 0 {
+		return fmt.Errorf("audit chain BROKEN at seq %d: %s", broken, reason)
+	}
+	fmt.Println("audit chain: intact")
+
+	anchors, err := audit.VerifyAnchors(ctx, st.Pool, *caFile)
+	if err != nil {
+		return err
+	}
+	bad := 0
+	for _, a := range anchors {
+		status := "in-chain"
+		if !a.InChain {
+			status, bad = "ROOT NOT IN CHAIN (history rewritten?)", bad+1
+		}
+		token := "token: not checked (pass -ca)"
+		if *caFile != "" {
+			if a.TokenOK {
+				token = "token: OK"
+			} else {
+				token, bad = "token: INVALID", bad+1
+			}
+		}
+		fmt.Printf("anchor #%d %s... (%s) %s; %s\n", a.ID, a.Root[:16], a.StampedAt, status, token)
+	}
+	if bad > 0 {
+		return fmt.Errorf("%d anchor check(s) failed", bad)
+	}
+	if len(anchors) == 0 {
+		fmt.Println("no anchors stored yet - schedule `sunder anchor` in cron")
+	}
+	return nil
 }
 
 // keysCmd implements `sunder keys rotate -kind <kind>` and `sunder keys list`.
