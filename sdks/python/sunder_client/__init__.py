@@ -204,7 +204,7 @@ class SunderClient:
         enforced client-side: at least one of email/phone is required.
         """
         if email is None and phone is None:
-            raise ValueError("lookup_by_name requires email or phone as a second factor")
+            raise ValidationError("validation", None, "lookup_by_name requires email or phone as a second factor")
         body: dict = {"name": name}
         if email is not None:
             body["email"] = email
@@ -250,7 +250,7 @@ class SunderClient:
         except urllib.error.HTTPError as e:
             raise _map_error(e.code, e.read()) from None
         except (urllib.error.URLError, OSError, TimeoutError) as e:
-            raise ServiceUnavailableError("network", None, str(e)) from e
+            raise ServiceUnavailableError("service_unavailable", None, f"network failure: {e}") from e
 
     # -- transport ----------------------------------------------------------
 
@@ -285,7 +285,7 @@ class SunderClient:
         except urllib.error.HTTPError as e:
             raise _map_error(e.code, e.read()) from None
         except (urllib.error.URLError, OSError, TimeoutError) as e:
-            raise ServiceUnavailableError("network", None, str(e)) from e
+            raise ServiceUnavailableError("service_unavailable", None, f"network failure: {e}") from e
         try:
             parsed = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):

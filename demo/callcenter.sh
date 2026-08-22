@@ -29,12 +29,12 @@ Missing SUNDER_CRED_CRM and/or SUNDER_CRED_ERP.
 Create the two demo clients (each command prints the credential exactly once —
 copy the "client_id.secret" line it outputs):
 
-  docker compose exec sunder /sunder client create \
+  docker compose -f deploy/docker-compose.yml exec sunder /sunder client create \
       -id crm -name "Call-center CRM" -scope crm \
       -actions contacts.register,lookup,attributes.read,oti.issue \
       -purposes support,create_order
 
-  docker compose exec sunder /sunder client create \
+  docker compose -f deploy/docker-compose.yml exec sunder /sunder client create \
       -id erp -name "Order ERP" -scope erp \
       -actions oti.verify \
       -purposes create_order

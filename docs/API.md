@@ -155,5 +155,11 @@ See docs/ARCHITECTURE.md and docs/THREAT-MODEL.md.
 
 - `GET /metrics` exposes per-client counters; set `SUNDER_METRICS_TOKEN`
   to require a bearer token where network isolation is not enough.
-- Anchoring: schedule `sunder anchor` (cron, daily); `sunder verify-audit
-  -ca <tsa-ca.pem>` verifies the chain and every TSA token offline.
+- Anchoring: schedule `sunder anchor -out <dir>` (cron, daily) and sync
+  `<dir>` to write-once storage OFF the database host — anchors kept only in
+  the database are circular against a privileged attacker. `sunder
+  verify-audit -anchors <dir>` verifies the chain, every TSA token offline
+  (CA resolved from `-ca`, `SUNDER_TSA_CACERT`, or the vendored FreeTSA
+  bundle) and cross-checks exported files against the database; it refuses
+  to report success when anchors exist but cannot be cryptographically
+  verified.

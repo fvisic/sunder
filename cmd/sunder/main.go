@@ -71,21 +71,46 @@ func run(cmd string, args []string) error {
 	case "keys":
 		return keysCmd(ctx, cfg, st, args)
 	case "anchor":
-		return anchorCmd(ctx, cfg, st)
+		return anchorCmd(ctx, cfg, st, args)
 	case "verify-audit":
-		return verifyAuditCmd(ctx, st, args)
+		return verifyAuditCmd(ctx, cfg, st, args)
 	default:
 		return clientCmd(ctx, st, args)
 	}
 }
 
+// vendoredCA is the fallback TSA root bundle shipped in the repo.
+const vendoredCA = "deploy/freetsa/cacert.pem"
+
+// resolveCA picks the TSA CA bundle: explicit flag > SUNDER_TSA_CACERT >
+// vendored file (when present).
+func resolveCA(flagVal string, cfg config.Config) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if cfg.TSACA != "" {
+		return cfg.TSACA
+	}
+	if _, err := os.Stat(vendoredCA); err == nil {
+		return vendoredCA
+	}
+	return ""
+}
+
 // anchorCmd stamps the current audit-chain head at the configured TSA.
 // Run it from cron (daily); only a 32-byte digest leaves the system.
-func anchorCmd(ctx context.Context, cfg config.Config, st *store.Store) error {
+func anchorCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
+	fs := flag.NewFlagSet("anchor", flag.ContinueOnError)
+	out := fs.String("out", cfg.AnchorDir, "directory to export the .tsr token to (sync it to write-once storage OFF this host)")
+	ca := fs.String("ca", "", "TSA root CA bundle to verify the fresh token before storing (default: SUNDER_TSA_CACERT or the vendored FreeTSA CA)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
-	root, stampedAt, err := audit.Anchor(ctx, st.Pool, cfg.TSAURL)
+	caFile := resolveCA(*ca, cfg)
+	root, stampedAt, err := audit.Anchor(ctx, st.Pool, cfg.TSAURL, caFile, *out)
 	if err != nil {
 		return err
 	}
@@ -94,14 +119,26 @@ func anchorCmd(ctx context.Context, cfg config.Config, st *store.Store) error {
 		return nil
 	}
 	fmt.Printf("anchored chain head %s...\n  TSA: %s\n  stamped at: %s\n", root[:16], cfg.TSAURL, stampedAt)
+	if caFile == "" {
+		fmt.Println("WARNING: fresh token NOT verified (no CA bundle available)")
+	}
+	if *out == "" {
+		fmt.Println("WARNING: token stored only in the database - a database-level attacker can delete it.")
+		fmt.Println("         Pass -out (or set SUNDER_ANCHOR_DIR) and sync that directory to write-once storage.")
+	} else {
+		fmt.Printf("  exported: %s\n", *out+"/"+root+".tsr")
+	}
 	return nil
 }
 
-// verifyAuditCmd recomputes the whole hash chain and, with -ca, verifies
-// every stored TSA token offline. Non-zero exit on any failure.
-func verifyAuditCmd(ctx context.Context, st *store.Store, args []string) error {
+// verifyAuditCmd recomputes the whole hash chain, verifies every stored TSA
+// token offline, and cross-checks exported .tsr files when -anchors is
+// given. Non-zero exit on any failure, and on anchors that exist but cannot
+// be cryptographically verified — success must mean something.
+func verifyAuditCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
 	fs := flag.NewFlagSet("verify-audit", flag.ContinueOnError)
-	caFile := fs.String("ca", "", "TSA root CA bundle for offline token verification (optional)")
+	caFlag := fs.String("ca", "", "TSA root CA bundle (default: SUNDER_TSA_CACERT or the vendored FreeTSA CA)")
+	anchorsDir := fs.String("anchors", "", "directory of exported .tsr files to cross-check against the database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -117,31 +154,51 @@ func verifyAuditCmd(ctx context.Context, st *store.Store, args []string) error {
 	}
 	fmt.Println("audit chain: intact")
 
-	anchors, err := audit.VerifyAnchors(ctx, st.Pool, *caFile)
+	caFile := resolveCA(*caFlag, cfg)
+	if *anchorsDir == "" && cfg.AnchorDir != "" {
+		*anchorsDir = cfg.AnchorDir
+	}
+	anchors, err := audit.VerifyAnchors(ctx, st.Pool, caFile, *anchorsDir)
 	if err != nil {
 		return err
 	}
+	if len(anchors) == 0 {
+		fmt.Println("no anchors stored yet - schedule `sunder anchor` in cron")
+		return nil
+	}
+	if caFile == "" {
+		return fmt.Errorf("%d anchor(s) exist but no TSA CA bundle is available - pass -ca (or set SUNDER_TSA_CACERT); refusing to report success without cryptographic verification", len(anchors))
+	}
 	bad := 0
 	for _, a := range anchors {
-		status := "in-chain"
-		if !a.InChain {
-			status, bad = "ROOT NOT IN CHAIN (history rewritten?)", bad+1
+		var parts []string
+		if !a.InDB {
+			parts, bad = append(parts, "MISSING FROM DATABASE (anchor row deleted?)"), bad+1
 		}
-		token := "token: not checked (pass -ca)"
-		if *caFile != "" {
-			if a.TokenOK {
-				token = "token: OK"
-			} else {
-				token, bad = "token: INVALID", bad+1
+		if a.InChain {
+			parts = append(parts, "in-chain")
+		} else {
+			parts, bad = append(parts, "ROOT NOT IN CHAIN (history rewritten?)"), bad+1
+		}
+		if a.TokenOK {
+			parts = append(parts, "token: OK")
+		} else {
+			parts, bad = append(parts, "token: INVALID"), bad+1
+		}
+		if *anchorsDir != "" && a.InDB {
+			switch a.FileState {
+			case "ok":
+				parts = append(parts, "file: OK")
+			case "missing":
+				parts, bad = append(parts, "file: MISSING from export dir"), bad+1
+			case "mismatch":
+				parts, bad = append(parts, "file: MISMATCH with database"), bad+1
 			}
 		}
-		fmt.Printf("anchor #%d %s... (%s) %s; %s\n", a.ID, a.Root[:16], a.StampedAt, status, token)
+		fmt.Printf("anchor #%d %s... (%s) %s\n", a.ID, a.Root[:16], a.StampedAt, strings.Join(parts, "; "))
 	}
 	if bad > 0 {
 		return fmt.Errorf("%d anchor check(s) failed", bad)
-	}
-	if len(anchors) == 0 {
-		fmt.Println("no anchors stored yet - schedule `sunder anchor` in cron")
 	}
 	return nil
 }

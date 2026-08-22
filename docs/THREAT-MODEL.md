@@ -27,7 +27,7 @@ Section numbers reference docs/PLAN.md.
 | Stolen Sunder DB, no keys | HMAC tokens (keyed — no dictionary attacks), encrypted blobs, audit chain | Keys live outside the DB (keystore/Vault) |
 | Stolen bearer credential | Only that client's actions/purposes/rate, fully audited | `allowed_actions`/`allowed_purposes`, rate limits, enumeration detection |
 | Network attacker replaying an OTI | Nothing: single-use CAS, 5-minute TTL, audience+purpose binding | Atomic VALID->USED; PASETO v4 signature |
-| Insider/DBA rewriting history | Chain break at a provable position; full-chain rewrite leaves orphaned TSA anchors | Hash chain + append-only triggers + RFC 3161 anchoring (`sunder verify-audit -ca ...`) |
+| Insider/DBA rewriting history | Chain break at a provable position; a full-chain rewrite orphans TSA anchors, and deleted anchor rows are exposed by the exported `.tsr` files | Hash chain + append-only triggers on `audit` AND `audit_anchor` + RFC 3161 anchoring **with off-host export**: `sunder anchor -out <dir>` and sync that directory to write-once storage the DB attacker cannot reach; `sunder verify-audit -anchors <dir>` cross-checks. Anchors kept only in the database are circular and defeat nobody privileged. |
 | Compromised service process | Working keys in RAM — game over for that instance's crypto | The honest limit: minimize dependencies (§8.1), consider process split (v2), Vault audit trail for key access |
 
 ## Deliberate non-goals (v1)

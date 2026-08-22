@@ -324,7 +324,7 @@ test("lookup retries once on a network failure", async (t) => {
   });
   const err = await expectSunderError(
     () => client.lookupByEmail("filip@example.com"),
-    "NetworkError",
+    "ServiceUnavailable",
   );
   assert.equal(err.status, 0);
 });

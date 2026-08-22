@@ -384,7 +384,11 @@ paths:
       tags: [ops]
       operationId: metrics
       summary: Prometheus metrics
-      description: Prometheus text exposition format. No authentication — protect at the network layer.
+      description: |
+        Prometheus text exposition format. Unauthenticated by default —
+        protect at the network layer. When `SUNDER_METRICS_TOKEN` is set the
+        endpoint requires `Authorization: Bearer <token>` (per-client
+        counters reveal client ids and activity) and returns 401 otherwise.
       security: []
       responses:
         '200':
@@ -393,6 +397,16 @@ paths:
             text/plain:
               schema:
                 type: string
+        '401':
+          description: Returned only when SUNDER_METRICS_TOKEN is configured and the bearer token is missing or wrong.
+          headers:
+            WWW-Authenticate:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
 components:
   securitySchemes:

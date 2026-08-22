@@ -112,7 +112,7 @@ class ClientTest(unittest.TestCase):
                          {"name": "A B", "email": "a@b.c"})
 
     def test_lookup_by_name_requires_second_factor(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises(sunder_client.ValidationError):
             self.client.lookup_by_name("A B")
         self.assertEqual(self.server.requests, [])
 
@@ -221,7 +221,7 @@ class ClientTest(unittest.TestCase):
                                           credential="c.s", timeout=1)
         with self.assertRaises(sunder_client.ServiceUnavailableError) as ctx:
             dead.lookup_by_email("a@b.c")
-        self.assertEqual(ctx.exception.code, "network")
+        self.assertEqual(ctx.exception.code, "service_unavailable")
 
     def test_verify_network_error_maps_without_retry(self):
         dead = sunder_client.SunderClient(url="http://127.0.0.1:1",

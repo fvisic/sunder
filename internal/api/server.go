@@ -66,7 +66,8 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 	if cfg.MetricsToken != "" {
 		metricsHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+cfg.MetricsToken)) != 1 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 				return
 			}
 			s.Metrics.ServeHTTP(w, r)

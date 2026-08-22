@@ -18,15 +18,28 @@ export type SunderErrorCode =
   | "PurposeNotAllowed"
   | "AudienceMismatch"
   | "NotFound"
-  | "Ambiguous"
   | "Validation"
   | "TokenInvalid"
   | "TokenUsed"
   | "TokenExpired"
   | "RateLimited"
+  // Also raised (status 0) on network-level failures — identical taxonomy
+  // and trigger conditions across all Sunder SDKs.
   | "ServiceUnavailable"
-  | "NetworkError"
   | "Unknown";
+
+/** Manual composition of abort signals for runtimes without AbortSignal.any. */
+function combineSignals(signals: AbortSignal[]): AbortSignal {
+  const controller = new AbortController();
+  for (const s of signals) {
+    if (s.aborted) {
+      controller.abort(s.reason);
+      break;
+    }
+    s.addEventListener("abort", () => controller.abort(s.reason), { once: true });
+  }
+  return controller.signal;
+}
 
 /** Error thrown by every SunderClient method on a non-success outcome. */
 export class SunderError extends Error {
@@ -330,7 +343,18 @@ export class SunderClient {
 
   /** Liveness check (unauthenticated GET /healthz). */
   async health(options?: RequestOptions): Promise<HealthResult> {
-    const res = await this.fetchOnce("GET", "/healthz", undefined, options);
+    let res: Response;
+    try {
+      res = await this.fetchOnce("GET", "/healthz", undefined, options);
+    } catch (err) {
+      // Same contract as every other method: network failures surface as
+      // SunderError, never as raw fetch exceptions.
+      throw new SunderError(
+        "ServiceUnavailable",
+        `network failure calling GET /healthz: ${String(err)}`,
+        0,
+      );
+    }
     const text = await res.text();
     if (!res.ok) {
       throw new SunderError(
@@ -353,7 +377,7 @@ export class SunderClient {
         res = await this.fetchOnce(call.method, call.path, call.body, call.options);
       } catch (err) {
         lastError = new SunderError(
-          "NetworkError",
+          "ServiceUnavailable",
           `network failure calling ${call.method} ${call.path}: ${String(err)}`,
           0,
         );
@@ -388,6 +412,14 @@ export class SunderClient {
   ): Promise<Response> {
     const signals: AbortSignal[] = [AbortSignal.timeout(this.timeoutMs)];
     if (options?.signal) signals.push(options.signal);
+    // AbortSignal.any() only exists since Node 20.3; compose manually below
+    // it so the documented Node 18+ support actually holds.
+    const combined =
+      signals.length === 1
+        ? signals[0]
+        : typeof AbortSignal.any === "function"
+          ? AbortSignal.any(signals)
+          : combineSignals(signals);
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.credential}`,
       Accept: "application/json",
@@ -395,7 +427,7 @@ export class SunderClient {
     const init: RequestInit = {
       method,
       headers,
-      signal: AbortSignal.any(signals),
+      signal: combined,
     };
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";

@@ -75,10 +75,12 @@ export const options = {
   thresholds: {
     // PLAN section 2 p99 targets (ms). On a laptop these are indicative;
     // the binding measurement is on the PLAN 9.2 reference deployment.
-    'http_req_duration{scenario:lookup_hit}': ['p(99)<10'],
+    'http_req_duration{scenario:lookup_hit}': ['p(99)<15'],
     'http_req_duration{scenario:attribute_read}': ['p(99)<15'],
     'http_req_duration{op:oti_issue}': ['p(99)<20'],
-    'http_req_duration{op:oti_verify}': ['p(99)<20'],
+    'http_req_duration{op:oti_verify}': ['p(99)<10'],
+    // constant-arrival-rate silently under-delivers when VUs run out:
+    'dropped_iterations': ['count<10'],
     // Status-code checks must essentially always pass.
     'checks{scenario:lookup_hit}': ['rate>0.999'],
     'checks{scenario:attribute_read}': ['rate>0.999'],

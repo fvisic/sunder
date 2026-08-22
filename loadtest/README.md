@@ -29,25 +29,26 @@ The script needs two credentials (printed once by `sunder client create`):
 # Source system: registers the seed contacts, looks them up, reads
 # attributes and issues OTIs. The default lookup rate limit is 60/min —
 # far below the test rate — so raise it explicitly.
-sunder client create -id loadtest -name "Load test" -scope webshop \
+docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id loadtest -name "Load test" -scope webshop \
   -actions contacts.register,lookup,attributes.read,oti.issue \
   -purposes loadtest -rate 100000
 
 # Target system: verifies OTIs. Its scope MUST be "erp" — a client can only
 # verify tokens addressed to its own scope, and the script issues tokens
 # with audience "erp".
-sunder client create -id loadtest-verify -name "Load test verifier" -scope erp \
+docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id loadtest-verify -name "Load test verifier" -scope erp \
   -actions oti.verify -purposes loadtest
 ```
 
 ## 2. Run
 
-Via Docker (no local k6 install; `--network host` so `localhost` reaches
-the service, `-i` because the script is piped on stdin):
+Via Docker (no local k6 install; `-i` because the script is piped on
+stdin). On Docker Desktop (macOS/Windows) `host.docker.internal` reaches the
+host; on Linux replace it with `--network host` + `localhost`:
 
 ```sh
-docker run --rm -i --network host \
-  -e BASE_URL=http://localhost:8080 \
+docker run --rm -i \
+  -e BASE_URL=http://host.docker.internal:8080 \
   -e CRED='loadtest.<secret>' \
   -e CRED_VERIFY='loadtest-verify.<secret>' \
   grafana/k6 run - <loadtest/lookup.js

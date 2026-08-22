@@ -45,12 +45,12 @@ docker compose -f deploy/docker-compose.yml up --build
 Create the two demo clients (each prints its credential **exactly once**):
 
 ```sh
-docker compose exec sunder /sunder client create \
+docker compose -f deploy/docker-compose.yml exec sunder /sunder client create \
     -id crm -name "Call-center CRM" -scope crm \
     -actions contacts.register,lookup,attributes.read,oti.issue \
     -purposes support,create_order
 
-docker compose exec sunder /sunder client create \
+docker compose -f deploy/docker-compose.yml exec sunder /sunder client create \
     -id erp -name "Order ERP" -scope erp \
     -actions oti.verify \
     -purposes create_order

@@ -1,12 +1,17 @@
+# Patterns are root-anchored by default: use **/ so nested build artifacts
+# (sdks/typescript/node_modules, dist, __pycache__) stay out of the context.
 .git
 .env
-keystore/
-*.tsr
-*.key
-dist/
-node_modules/
-__pycache__/
-.venv/
+**/keystore/
+**/*.tsr
+**/*.key
+**/dist/
+**/node_modules/
+**/__pycache__/
+**/.venv/
 coverage.out
 deploy/
 docs/
+sdks/
+demo/
+loadtest/

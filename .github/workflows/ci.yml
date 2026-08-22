@@ -68,3 +68,21 @@ jobs:
       - name: Test
         working-directory: sdks/python
         run: python3 -m unittest discover -s tests -v
+
+  e2e-demo:
+    # Builds the real image, boots the compose stack, and runs the demo
+    # script — which asserts every expected status code, so it doubles as a
+    # smoke test of the whole API surface.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Boot stack
+        run: docker compose -f deploy/docker-compose.yml up --build -d --wait
+      - name: Create demo clients
+        run: |
+          echo "SUNDER_CRED_CRM=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id crm -name CRM -scope crm -actions contacts.register,lookup,attributes.read,oti.issue -purposes support,create_order -rate 1000 | tail -1)" >> "$GITHUB_ENV"
+          echo "SUNDER_CRED_ERP=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id erp -name ERP -scope erp -actions oti.verify -purposes create_order | tail -1)" >> "$GITHUB_ENV"
+      - name: Run demo
+        run: bash demo/callcenter.sh
+      - name: Verify audit chain
+        run: docker compose -f deploy/docker-compose.yml exec sunder /sunder verify-audit

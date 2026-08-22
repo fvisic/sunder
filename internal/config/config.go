@@ -21,6 +21,8 @@ type Config struct {
 	VaultMount   string // SUNDER_VAULT_MOUNT: KV v2 mount, default "secret"
 	TSAURL       string // SUNDER_TSA_URL; the freetsa.org default suits pilots — production should point at a qualified or internal TSA
 	MetricsToken string // SUNDER_METRICS_TOKEN: when set, /metrics requires this bearer token (per-client counters reveal client ids and activity)
+	TSACA        string // SUNDER_TSA_CACERT: TSA root CA bundle; falls back to the vendored deploy/freetsa/cacert.pem when present
+	AnchorDir    string // SUNDER_ANCHOR_DIR: directory where `sunder anchor` exports .tsr files — sync it to write-once storage off this host
 }
 
 func getenv(key, def string) string {
@@ -45,6 +47,8 @@ func FromEnv() (Config, error) {
 		VaultMount:   getenv("SUNDER_VAULT_MOUNT", "secret"),
 		TSAURL:       getenv("SUNDER_TSA_URL", "https://freetsa.org/tsr"),
 		MetricsToken: os.Getenv("SUNDER_METRICS_TOKEN"),
+		TSACA:        os.Getenv("SUNDER_TSA_CACERT"),
+		AnchorDir:    os.Getenv("SUNDER_ANCHOR_DIR"),
 	}
 	if c.DBURL == "" {
 		return c, fmt.Errorf("SUNDER_DB_URL is required")
