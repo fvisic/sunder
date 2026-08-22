@@ -24,8 +24,13 @@ jobs:
           --health-interval 2s
           --health-timeout 2s
           --health-retries 15
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
     env:
       SUNDER_TEST_DB_URL: postgres://sunder:sunder@localhost:5432/sunder_test
+      SUNDER_TEST_REDIS_ADDR: 127.0.0.1:6379
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
