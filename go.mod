@@ -2,6 +2,8 @@ module github.com/fvisic/sunder
 
 go 1.25.0
 
+toolchain go1.26.7
+
 require github.com/jackc/pgx/v5 v5.10.0
 
 require (
