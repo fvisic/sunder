@@ -163,7 +163,7 @@ func TestDeliverPendingDefaultHTTPClient(t *testing.T) {
 	cid := e.register(t)
 
 	// First attempt (the erase-time immediate delivery) fails with 500, the
-	// retry from DeliverPending succeeds — covering the stay-PENDING branch
+	// retry from DeliverPending succeeds - covering the stay-PENDING branch
 	// and the default (nil-HTTP) hardened client construction.
 	var calls int
 	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

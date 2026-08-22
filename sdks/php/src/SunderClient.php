@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Sunder;
 
 /**
- * Sunder PHP SDK — a thin client for the Sunder pseudonymous identity API.
+ * Sunder PHP SDK - a thin client for the Sunder pseudonymous identity API.
  *
  * Implements the canonical CidProviderClient interface (docs/DESIGN.md, SDK design rules):
  * transport, auth, timeouts, retries and error mapping only. Zero
@@ -13,10 +13,10 @@ namespace Sunder;
  *
  * Retry policy (baked in, the SDK design rules (docs/DESIGN.md)):
  *  - lookups and issueOti retry once on 5xx / network errors (safe);
- *  - verifyOti is NEVER blind-retried (single-use token — a retry after an
+ *  - verifyOti is NEVER blind-retried (single-use token - a retry after an
  *    ambiguous network failure would legitimately return TokenUsed).
  *
- * Remember: LOOKUP != AUTHENTICATION — a lookup hit never proves the caller
+ * Remember: LOOKUP != AUTHENTICATION - a lookup hit never proves the caller
  * is talking to that person.
  */
 final class SunderClient
@@ -99,7 +99,7 @@ final class SunderClient
     }
 
     /**
-     * Issues the same person's CID in another scope. Linkage-capable —
+     * Issues the same person's CID in another scope. Linkage-capable -
      * grant sparingly; prefer OTIs for cross-system handoff.
      */
     public function issueScopedCid(string $cid, string $scope): string

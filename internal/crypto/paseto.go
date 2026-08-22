@@ -10,7 +10,7 @@ import (
 )
 
 // Minimal PASETO v4.public implementation (sign/verify, empty footer and
-// implicit assertion) — stdlib-only per the "stdlib first" policy, validated
+// implicit assertion) - stdlib-only per the "stdlib first" policy, validated
 // against the official PASETO test vectors in paseto_test.go. PASETO is used
 // instead of JWT to eliminate the algorithm-confusion class of bugs: the
 // version pins the algorithm (Ed25519), there is no negotiable "alg" header.

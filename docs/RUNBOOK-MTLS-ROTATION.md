@@ -15,12 +15,12 @@ rotate via `sunder client create` + config swap on the client side.
 
 1. Obtain the new cert/key (same SAN/hostname).
 2. Replace the files (or the Kubernetes TLS secret) and restart/roll the
-   replicas — the files are read at listener start.
+   replicas - the files are read at listener start.
 3. Clients verify against their trust store, so nothing changes for them as
    long as the issuing CA is already trusted. If you are ALSO changing the
    issuing CA, update client trust stores first, server cert second.
 
-## 2. Rotating the client CA (the mTLS trust anchor) — zero downtime
+## 2. Rotating the client CA (the mTLS trust anchor) - zero downtime
 
 The `SUNDER_MTLS_CA` file may contain multiple CA certificates; the server
 accepts a client cert chaining to ANY of them. Rotation is therefore a
@@ -39,7 +39,7 @@ three-step overlap, never a flag-day:
    at the TLS handshake.
 
 How to see who is still on the old CA: mTLS failures happen before HTTP, so
-they are not in Sunder's request log — watch the connection errors on the
+they are not in Sunder's request log - watch the connection errors on the
 client side, or stand the old CA down in a staging bundle first.
 
 ## 3. Rotating one client's certificate
@@ -59,4 +59,4 @@ audit trail. Rotate both on personnel changes.)
 - Keep CA lifetimes >> client-cert lifetimes so step 2 of the CA rotation
   never races expiry.
 - After ANY bundle change run the demo flow (`demo/callcenter.sh`) against
-  the environment — it exercises the full authenticated path.
+  the environment - it exercises the full authenticated path.

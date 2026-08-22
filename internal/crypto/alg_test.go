@@ -89,7 +89,7 @@ func TestAlgorithmDefault(t *testing.T) {
 }
 
 // A blob written before the alg column existed (legacy two-part AAD) must
-// still decrypt when read back as aes256gcm — the migration default.
+// still decrypt when read back as aes256gcm - the migration default.
 func TestLegacyBlobStaysReadable(t *testing.T) {
 	ctx := context.Background()
 	box := NewPIIBox(fileKS(t))

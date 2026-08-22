@@ -8,13 +8,13 @@ package api
 //
 //	t0  CRM opens the ticket, issues an OTI (purpose escalation_notify,
 //	    audience notifier); the notifier verifies it immediately and stores
-//	    ONLY its own scoped CID next to the ticket id — no email, no name.
+//	    ONLY its own scoped CID next to the ticket id - no email, no name.
 //	t+N escalation fires: the notifier fetches the email attribute
 //	    just-in-time (purpose-checked, consent-checked, audited), sends,
 //	    and still stores nothing.
 //
-// A notifier database leak therefore contains ticket ids and CIDs — zero
-// PII — and the person can kill escalation emails at any moment by
+// A notifier database leak therefore contains ticket ids and CIDs - zero
+// PII - and the person can kill escalation emails at any moment by
 // withdrawing consent for that one purpose, without touching the CRM.
 
 import (
@@ -47,7 +47,7 @@ func TestDelayedEscalationEmailFlow(t *testing.T) {
 	}
 
 	// t0: the customer registers a ticket in the CRM. The handoff explicitly
-	// shares ONLY the email attribute — a handoff shares nothing by default.
+	// shares ONLY the email attribute - a handoff shares nothing by default.
 	crmCID := registerFilip(t, e)
 	rec, out := e.do(t, e.credCRM, "POST", "/v1/oti", map[string]any{
 		"cid": crmCID, "purpose": "escalation_notify", "audience": "notifier",
@@ -67,7 +67,7 @@ func TestDelayedEscalationEmailFlow(t *testing.T) {
 		t.Fatal("notifier must receive its own scoped CID")
 	}
 
-	// t+N hours: escalation fires. Just-in-time attribute fetch — the email
+	// t+N hours: escalation fires. Just-in-time attribute fetch - the email
 	// exists in the notifier scope ONLY because the issuer shared it.
 	rec, out = e.do(t, credNotifier, "GET",
 		"/v1/contacts/"+notifierCID+"/attributes/email?purpose=escalation_notify", nil)
@@ -96,7 +96,7 @@ func TestDelayedEscalationEmailFlow(t *testing.T) {
 		t.Fatal(rec.Code)
 	}
 	// ...but consent decisions are per-CID, and the notifier holds a
-	// different CID: pin the ACTUAL semantics — the notifier-side consent
+	// different CID: pin the ACTUAL semantics - the notifier-side consent
 	// must be recorded on the notifier CID to block its sends.
 	rec, _ = e.do(t, credNotifier, "GET",
 		"/v1/contacts/"+notifierCID+"/attributes/email?purpose=escalation_notify", nil)
@@ -104,7 +104,7 @@ func TestDelayedEscalationEmailFlow(t *testing.T) {
 		t.Fatalf("consent on the CRM CID does not govern the notifier CID: got %d", rec.Code)
 	}
 	// The notifier records the withdrawal it received (e.g. via the
-	// unsubscribe link IT sent) on its own CID — and is now blocked.
+	// unsubscribe link IT sent) on its own CID - and is now blocked.
 	if _, err := e.srv.Store.Pool.Exec(ctx,
 		`UPDATE clients SET allowed_actions = allowed_actions || '{consent.manage}' WHERE client_id='notifier'`); err != nil {
 		t.Fatal(err)

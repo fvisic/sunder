@@ -6,11 +6,11 @@ package audit
 // an attacker with full DB access can rewrite the whole chain consistently.
 // Anchoring defeats that: the chain head is signed by an external Time Stamp
 // Authority, so rewriting history would require forging every previously
-// issued TSA token as well. Only the 32-byte digest ever leaves the system —
+// issued TSA token as well. Only the 32-byte digest ever leaves the system -
 // no audit content, no PII.
 //
 // Implementation shells out to the openssl `ts` CLI (zero Go dependencies;
-// requires openssl on the host/image that runs `sunder anchor` — typically a
+// requires openssl on the host/image that runs `sunder anchor` - typically a
 // cron job, not the API service).
 
 import (
@@ -87,11 +87,11 @@ func TokenTime(tsr []byte) (string, error) {
 }
 
 // VerifyToken reports whether tsr is a valid TSA signature over exactly
-// rootHex under the given CA bundle — fully offline (works in front of an
+// rootHex under the given CA bundle - fully offline (works in front of an
 // auditor or court).
 //
 // A verification failure returns (false, nil); an ENVIRONMENT failure
-// (openssl missing, unreadable CA file, malformed root) returns an error —
+// (openssl missing, unreadable CA file, malformed root) returns an error -
 // an auditor must never read "openssl is not installed" as "tampered".
 func VerifyToken(tsr []byte, rootHex, caFile string) (bool, error) {
 	if !hexRoot.MatchString(rootHex) {
@@ -126,11 +126,11 @@ func VerifyToken(tsr []byte, rootHex, caFile string) (bool, error) {
 // Anchor stamps the current chain head at the TSA and stores the token.
 // A no-op on an empty log.
 //
-// When caFile is given, the fresh token is verified BEFORE persisting — a
+// When caFile is given, the fresh token is verified BEFORE persisting - a
 // misconfigured or hostile TSA endpoint must not plant a worthless anchor.
 // When outDir is given, the token is also exported as a .tsr file: exporting
 // anchors OFF the database host (write-once storage, another machine) is
-// what makes them evidence against a privileged database attacker — tokens
+// what makes them evidence against a privileged database attacker - tokens
 // living only in the same database are circular.
 func Anchor(ctx context.Context, pool *pgxpool.Pool, tsaURL, caFile, outDir string) (root string, stampedAt string, err error) {
 	root, err = Head(ctx, pool)
@@ -154,7 +154,7 @@ func Anchor(ctx context.Context, pool *pgxpool.Pool, tsaURL, caFile, outDir stri
 			return "", "", err
 		}
 		if !ok {
-			return "", "", fmt.Errorf("anchor: TSA %s returned a token that does not verify over the chain head — not stored", tsaURL)
+			return "", "", fmt.Errorf("anchor: TSA %s returned a token that does not verify over the chain head - not stored", tsaURL)
 		}
 	}
 	stampedAt, err = TokenTime(tsr)
@@ -192,7 +192,7 @@ type AnchorResult struct {
 // present in the chain (a full-chain rewrite leaves orphaned anchors); when
 // caFile is given, the TSA token must verify offline; when anchorsDir is
 // given, each DB anchor is cross-checked against its exported .tsr file AND
-// exported files with no matching DB row are reported (InDB=false) — that is
+// exported files with no matching DB row are reported (InDB=false) - that is
 // the check a database-level attacker cannot silence, because the export
 // lives outside their reach.
 func VerifyAnchors(ctx context.Context, pool *pgxpool.Pool, caFile, anchorsDir string) ([]AnchorResult, error) {

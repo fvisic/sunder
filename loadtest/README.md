@@ -15,7 +15,7 @@ Each scenario also asserts on status codes (`checks` rate > 99.9%).
 dedup-idempotent, so repeated runs reuse the same persons.
 
 > **Indicative vs. contractual numbers.** Results measured on a laptop
-> (single container, k6 on the same machine) are *indicative only* — they
+> (single container, k6 on the same machine) are *indicative only* - they
 > show trends and regressions. The contractual numbers are measured on the
 > reference deployment described in docs/DESIGN.md (LB + 2-3 stateless replicas +
 > PostgreSQL with the token indexes in RAM + PgBouncer), with Prometheus
@@ -27,13 +27,13 @@ The script needs two credentials (printed once by `sunder client create`):
 
 ```sh
 # Source system: registers the seed contacts, looks them up, reads
-# attributes and issues OTIs. The default lookup rate limit is 60/min —
-# far below the test rate — so raise it explicitly.
+# attributes and issues OTIs. The default lookup rate limit is 60/min -
+# far below the test rate - so raise it explicitly.
 docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id loadtest -name "Load test" -scope webshop \
   -actions contacts.register,lookup,attributes.read,oti.issue \
   -purposes loadtest -rate 100000
 
-# Target system: verifies OTIs. Its scope MUST be "erp" — a client can only
+# Target system: verifies OTIs. Its scope MUST be "erp" - a client can only
 # verify tokens addressed to its own scope, and the script issues tokens
 # with audience "erp".
 docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id loadtest-verify -name "Load test verifier" -scope erp \
@@ -66,9 +66,9 @@ k6 exits non-zero when any threshold fails, so the same invocation works in CI.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BASE_URL` | — (required) | Base URL of the running instance |
-| `CRED` | — (required) | `<client_id>.<secret>` of the source client (step 1) |
-| `CRED_VERIFY` | — (required) | `<client_id>.<secret>` of the verifier client (step 1) |
+| `BASE_URL` | - (required) | Base URL of the running instance |
+| `CRED` | - (required) | `<client_id>.<secret>` of the source client (step 1) |
+| `CRED_VERIFY` | - (required) | `<client_id>.<secret>` of the verifier client (step 1) |
 | `SEED_COUNT` | `2000` | Contacts registered in `setup()` |
 | `RATE` | `200` | Total target request rate (rps), split 70/20/10 |
 | `DURATION` | `1m` | Length of the measurement window |

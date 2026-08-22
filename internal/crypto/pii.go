@@ -81,7 +81,7 @@ func aad(boundTo, keyID, alg string) []byte {
 }
 
 // Encrypt seals attrs as nonce||ciphertext bound to boundTo (the CID) under
-// the given key version (the caller passes the keyring's newest pii-kek —
+// the given key version (the caller passes the keyring's newest pii-kek -
 // hardcoding a version here would silently turn rotation into a no-op) and
 // the box's configured algorithm. Key id and algorithm are stored alongside
 // the blob so rotation and algorithm migration can decrypt old rows.

@@ -3,7 +3,7 @@
 When to use this: the current AEAD is deprecated by policy or weakened by
 research, or a compliance regime mandates a specific cipher. Sunder stores
 each blob's algorithm alongside it (`cids.pii_alg`), so old and new
-algorithms coexist during the migration — **no downtime, no big-bang
+algorithms coexist during the migration - **no downtime, no big-bang
 re-encryption window**.
 
 Supported algorithms: `aes256gcm` (default), `xchacha20poly1305`.
@@ -32,7 +32,7 @@ Supported algorithms: `aes256gcm` (default), `xchacha20poly1305`.
    SUNDER_PII_ALG=xchacha20poly1305
    ```
 
-   Restart replicas (rolling restart is fine — replicas on the old setting
+   Restart replicas (rolling restart is fine - replicas on the old setting
    keep writing the old algorithm, which stays readable forever). From this
    point every new or touched blob uses the new AEAD under the new key.
 
@@ -44,7 +44,7 @@ Supported algorithms: `aes256gcm` (default), `xchacha20poly1305`.
 
    The sweep decrypts each blob with its stored key/algorithm and re-encrypts
    under the newest key and the configured algorithm. It is idempotent and
-   resumable — rerun until `blob(s) re-encrypted` reports `0`.
+   resumable - rerun until `blob(s) re-encrypted` reports `0`.
 
 4. **Verify:**
 

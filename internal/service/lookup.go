@@ -12,7 +12,7 @@ import (
 )
 
 // LookupInput carries search identifiers. Valid combinations: email alone,
-// phone alone, or name plus one of email/phone (name never stands alone —
+// phone alone, or name plus one of email/phone (name never stands alone -
 // it is a narrowing key; docs/DESIGN.md). LOOKUP != AUTHENTICATION: a match
 // returns a pseudonym, never asserts the caller talked to that person.
 type LookupInput struct {
@@ -22,7 +22,7 @@ type LookupInput struct {
 }
 
 // Lookup resolves identifiers to the caller-scope CID. Misses and hits are
-// both audited; a person without a CID in the caller's scope is a miss —
+// both audited; a person without a CID in the caller's scope is a miss -
 // auto-issuing here would let one scope enumerate another scope's contacts.
 func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInput) (string, error) {
 	if !client.Can(auth.ActLookup) {
@@ -102,7 +102,7 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 
 	// The scope query always runs (with an impossible person id on a miss) so
 	// "person does not exist" and "person exists in another scope" burn the
-	// same work — no timing oracle for cross-scope enumeration.
+	// same work - no timing oracle for cross-scope enumeration.
 	if !matched {
 		personID = "00000000-0000-0000-0000-000000000000"
 	}

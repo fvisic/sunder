@@ -23,10 +23,10 @@ type Config struct {
 	VaultAddr    string // SUNDER_VAULT_ADDR
 	VaultToken   string // SUNDER_VAULT_TOKEN
 	VaultMount   string // SUNDER_VAULT_MOUNT: KV v2 mount, default "secret"
-	TSAURL       string // SUNDER_TSA_URL; the freetsa.org default suits pilots — production should point at a qualified or internal TSA
+	TSAURL       string // SUNDER_TSA_URL; the freetsa.org default suits pilots - production should point at a qualified or internal TSA
 	MetricsToken string // SUNDER_METRICS_TOKEN: when set, /metrics requires this bearer token (per-client counters reveal client ids and activity)
 	TSACA        string // SUNDER_TSA_CACERT: TSA root CA bundle; falls back to the vendored deploy/freetsa/cacert.pem when present
-	AnchorDir    string // SUNDER_ANCHOR_DIR: directory where `sunder anchor` exports .tsr files — sync it to write-once storage off this host
+	AnchorDir    string // SUNDER_ANCHOR_DIR: directory where `sunder anchor` exports .tsr files - sync it to write-once storage off this host
 	// Shared rate-limit counters for multi-replica deployments; unset =
 	// in-memory per-replica windows.
 	RedisAddr       string // SUNDER_REDIS_ADDR (host:port)
@@ -34,7 +34,7 @@ type Config struct {
 	RedisFailClosed bool   // SUNDER_REDIS_FAIL_CLOSED=true blocks lookups when Redis is unreachable (default: fail open)
 
 	// Tunables. Defaults match the documented v1 behaviour; see docs/CONFIG.md
-	// before changing them — several are security trade-offs, not preferences.
+	// before changing them - several are security trade-offs, not preferences.
 	OTITTL             time.Duration // SUNDER_OTI_TTL: one-time-identifier lifetime, default "5m", range [30s, 24h]
 	PIIAlg             string        // SUNDER_PII_ALG: AEAD for NEW blobs, "aes256gcm" (default) or "xchacha20poly1305"; reads follow each blob's stored algorithm
 	WebhookTimeout     time.Duration // SUNDER_WEBHOOK_TIMEOUT: per-delivery HTTP timeout, default "5s", range [1s, 5m]

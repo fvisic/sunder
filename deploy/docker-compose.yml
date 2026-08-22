@@ -8,7 +8,7 @@ services:
     volumes:
       # Persist data: recreating the stack must not invalidate issued
       # credentials and registered contacts (the keystore volume already
-      # persists keys — losing one but not the other splits the state).
+      # persists keys - losing one but not the other splits the state).
       - pgdata:/var/lib/postgresql/data
     ports:
       # Loopback only: never expose the dev database on all interfaces.

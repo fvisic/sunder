@@ -66,5 +66,5 @@ jobs:
 
   # Packagist tracks the git repository itself (submit the repo URL once at
   # packagist.org, tags become versions). Maven Central requires the Sonatype
-  # OSSRH onboarding + GPG signing; the pom.xml is release-ready — see
+  # OSSRH onboarding + GPG signing; the pom.xml is release-ready - see
   # RELEASING.md for the manual steps.

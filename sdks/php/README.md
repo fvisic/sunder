@@ -1,7 +1,7 @@
 # sunder-client (PHP)
 
 PHP SDK for [Sunder](../../README.md), a pseudonymous identity provider.
-Thin client only — transport, auth, timeouts, retries and error mapping.
+Thin client only - transport, auth, timeouts, retries and error mapping.
 Zero cryptography, zero runtime dependencies (plain PHP streams), PHP 8.1+.
 
 ## Install
@@ -24,7 +24,7 @@ use Sunder\SunderClient;
 $crm = new SunderClient(url: 'http://localhost:8080', credential: 'crm_client.secret');
 $erp = new SunderClient(url: 'http://localhost:8080', credential: 'erp_client.secret');
 
-// 1. Register a contact — you get a pseudonym (CID), never store the PII yourself
+// 1. Register a contact - you get a pseudonym (CID), never store the PII yourself
 $cid = $crm->registerContact(['email' => 'filip@example.com',
                               'name' => 'Filip Visic',
                               'attributes' => ['loyalty_tier' => 'gold']]);
@@ -35,7 +35,7 @@ $cid = $crm->lookupByEmail('filip@example.com');
 // 3. Hand the person to another system with a one-time identifier
 $oti = $crm->issueOti($cid, purpose: 'create_order', audience: 'erp');
 
-// 4. The other system verifies it and gets its OWN scoped CID —
+// 4. The other system verifies it and gets its OWN scoped CID -
 //    the two pseudonyms are unlinkable without the Sunder instance
 $erpCid = $erp->verifyOti($oti['token'], purpose: 'create_order', audience: 'erp');
 echo $erpCid, PHP_EOL;
@@ -53,7 +53,7 @@ All failures throw a subclass of `Sunder\SunderException` (with public
 ## Retry policy (baked in)
 
 Lookups and `issueOti` retry once on 5xx/network errors. `verifyOti` is
-**never** blind-retried — the token is single-use, and a retry after an
+**never** blind-retried - the token is single-use, and a retry after an
 ambiguous network failure would legitimately return `TokenUsedException`;
 the SDK surfaces that distinctly so your code can decide.
 

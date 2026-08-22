@@ -5,12 +5,12 @@ package io.sunderid.client;
  *
  * <p>Carries the unified error taxonomy shared by every Sunder SDK:
  * <ul>
- *   <li>{@code code}   — machine-readable error code (the API's JSON
+ *   <li>{@code code}   - machine-readable error code (the API's JSON
  *       {@code "error"} field, or a synthetic code such as
  *       {@code "service_unavailable"});</li>
- *   <li>{@code status} — HTTP status code, or {@code null} for pure
+ *   <li>{@code status} - HTTP status code, or {@code null} for pure
  *       network-level failures;</li>
- *   <li>{@code detail} — optional human-readable detail from the API.</li>
+ *   <li>{@code detail} - optional human-readable detail from the API.</li>
  * </ul>
  */
 public class SunderException extends RuntimeException {

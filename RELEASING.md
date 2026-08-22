@@ -24,7 +24,7 @@ shasum -a 256 -c SHA256SUMS
 
 Bump the version in the SDK manifests, then run the `release-sdks` workflow
 (manual dispatch). Each registry job is gated twice: a repository **variable**
-enables it and a **secret** authenticates it — nothing publishes until both
+enables it and a **secret** authenticates it - nothing publishes until both
 exist.
 
 | Registry | Enable (variable) | Credential (secret) | Notes |
@@ -32,8 +32,8 @@ exist.
 | npm | `PUBLISH_NPM=true` | `NPM_TOKEN` | register the `@sunder-id` scope first; publishes with provenance |
 | PyPI | `PUBLISH_PYPI=true` | `PYPI_API_TOKEN` | project name `sunder-client` |
 | NuGet | `PUBLISH_NUGET=true` | `NUGET_API_KEY` | package `SunderId.Client` |
-| Packagist | — | — | submit the repo URL once at packagist.org; git tags become versions |
-| Maven Central | — | — | manual: Sonatype OSSRH onboarding for `io.sunderid` + GPG signing; `sdks/java/pom.xml` is release-ready |
+| Packagist | - | - | submit the repo URL once at packagist.org; git tags become versions |
+| Maven Central | - | - | manual: Sonatype OSSRH onboarding for `io.sunderid` + GPG signing; `sdks/java/pom.xml` is release-ready |
 
 ## Versioning
 

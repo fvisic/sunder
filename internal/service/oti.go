@@ -27,11 +27,11 @@ var (
 
 // OTITTL is the default one-time-identifier lifetime (docs/DESIGN.md).
 // Configurable per deployment via SUNDER_OTI_TTL: shorter for same-network
-// handoffs, longer where the receiving system polls slowly — but a token is
+// handoffs, longer where the receiving system polls slowly - but a token is
 // a bearer credential, so longer TTLs widen the interception window.
 const OTITTL = 5 * time.Minute
 
-// OTI issues and verifies one-time identifiers — the only identity currency
+// OTI issues and verifies one-time identifiers - the only identity currency
 // systems exchange (docs/DESIGN.md). Tokens are PASETO v4.public, bound to
 // one purpose and one audience, single-use enforced by an atomic DB
 // transition (not just the signature).
@@ -73,7 +73,7 @@ func (o *OTI) signingKey(ctx context.Context, version string) (ed25519.PrivateKe
 // audience (target scope) and one purpose.
 //
 // shareAttrs lists attributes from the ISSUER's scope blob that the
-// verifier's scope receives at verification (copied into its own blob) —
+// verifier's scope receives at verification (copied into its own blob) -
 // the mechanism behind delayed flows like escalation e-mails: the verifier
 // stores no PII itself and fetches just-in-time, yet a handoff shares
 // nothing unless the issuer explicitly says so.
@@ -147,7 +147,7 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 }
 
 // Verify checks signature, purpose, audience and expiry, atomically marks
-// the token USED, and returns the VERIFIER'S OWN scoped CID for the person —
+// the token USED, and returns the VERIFIER'S OWN scoped CID for the person -
 // the issuer's pseudonym never crosses the scope boundary (docs/DESIGN.md).
 func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, audience string) (string, error) {
 	if !client.Can(auth.ActOTIVerify) {
@@ -172,7 +172,7 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 		return "", ErrTokenInvalid
 	}
 	// kid is read pre-verification (necessarily), but only key versions the
-	// ring lists as live are ever tried — an attacker cannot point at
+	// ring lists as live are ever tried - an attacker cannot point at
 	// arbitrary key names.
 	live, err := o.Ring.Versions(ctx, crypto.SigningKeyName)
 	if err != nil {
@@ -228,7 +228,7 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Atomic single-use transition — the replay guard (no TOCTOU). The row's
+	// Atomic single-use transition - the replay guard (no TOCTOU). The row's
 	// cid/purpose/audience are matched against the SIGNED claims as defense
 	// in depth: even with a compromised signing key, a crafted token cannot
 	// consume a jti bound to different parameters.

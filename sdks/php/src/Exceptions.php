@@ -14,52 +14,52 @@ class SunderException extends SunderError
 {
 }
 
-/** 401 `unauthorized` — missing/invalid credential. */
+/** 401 `unauthorized` - missing/invalid credential. */
 class UnauthorizedException extends SunderException
 {
 }
 
-/** 403 `forbidden` — action not in the client's allowed actions. */
+/** 403 `forbidden` - action not in the client's allowed actions. */
 class ForbiddenException extends SunderException
 {
 }
 
-/** 403 `purpose_not_allowed` — purpose not in the client's allowed purposes. */
+/** 403 `purpose_not_allowed` - purpose not in the client's allowed purposes. */
 class PurposeNotAllowedException extends SunderException
 {
 }
 
-/** 403 `audience_mismatch` — OTI addressed to a different audience. */
+/** 403 `audience_mismatch` - OTI addressed to a different audience. */
 class AudienceMismatchException extends SunderException
 {
 }
 
-/** 404 `not_found` — no match, including CIDs of foreign scopes. */
+/** 404 `not_found` - no match, including CIDs of foreign scopes. */
 class NotFoundException extends SunderException
 {
 }
 
-/** 400 `validation` / `bad_json` — invalid request (also raised locally). */
+/** 400 `validation` / `bad_json` - invalid request (also raised locally). */
 class ValidationException extends SunderException
 {
 }
 
-/** 400 `token_invalid` — bad OTI signature, purpose or shape. */
+/** 400 `token_invalid` - bad OTI signature, purpose or shape. */
 class TokenInvalidException extends SunderException
 {
 }
 
-/** 409 `token_used` — the single-use OTI was already consumed. */
+/** 409 `token_used` - the single-use OTI was already consumed. */
 class TokenUsedException extends SunderException
 {
 }
 
-/** 410 `token_expired` — the OTI outlived its 5-minute window. */
+/** 410 `token_expired` - the OTI outlived its 5-minute window. */
 class TokenExpiredException extends SunderException
 {
 }
 
-/** 429 `rate_limited` — per-client lookup rate limit exceeded. */
+/** 429 `rate_limited` - per-client lookup rate limit exceeded. */
 class RateLimitedException extends SunderException
 {
 }

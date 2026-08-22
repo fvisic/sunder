@@ -35,7 +35,7 @@ type Contacts struct {
 }
 
 // tokensAllVersions computes the token under every live version of kind,
-// newest first — writes use [0], matches use the whole set (rotation window).
+// newest first - writes use [0], matches use the whole set (rotation window).
 func (c *Contacts) tokensAllVersions(ctx context.Context, kind, normalized string,
 	f func(ctx context.Context, version, normalized string) (string, error)) ([]string, error) {
 	versions, err := c.Ring.Versions(ctx, kind)
@@ -126,7 +126,7 @@ func (c *Contacts) buildIdents(ctx context.Context, kind string, values []string
 // PII blobs are stored per (person, scope) on the cids row: a scope reads
 // exactly the attributes it stored itself. Global blobs would let any client
 // with contacts.register dedup onto a person another scope registered and
-// then read that scope's attributes — a cross-scope enrichment oracle.
+// then read that scope's attributes - a cross-scope enrichment oracle.
 
 // Register creates (or reuses) a person and returns the caller-scope CID.
 // Dedup matches email token first, then phone (deterministic priority).
@@ -246,7 +246,7 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet
 	}
 	// Insert newest-version token rows for every identifier. ON CONFLICT DO
 	// NOTHING covers both "row already there" and "identifier owned by
-	// another person" — an existing owner is never silently stolen.
+	// another person" - an existing owner is never silently stolen.
 	for _, ins := range []struct {
 		kind string
 		set  identSet
@@ -350,7 +350,7 @@ func ensureCID(ctx context.Context, q execQuerier, personID, scope string) (stri
 
 // IssueScopedCid gives the same person a pseudonym in another scope.
 //
-// SECURITY NOTE: this is deliberately a linkage-capable privilege — the
+// SECURITY NOTE: this is deliberately a linkage-capable privilege - the
 // caller learns the target scope's CID for a person it knows. Grant
 // scopes.issue only to trusted integration components; day-to-day
 // cross-system handoff should use OTIs instead (docs/DESIGN.md), where the
@@ -388,7 +388,7 @@ func (c *Contacts) IssueScopedCid(ctx context.Context, client *auth.Client, cid,
 }
 
 // personForClientCID resolves cid to its person, enforcing that the CID
-// belongs to the caller's scope — a client can never reference another
+// belongs to the caller's scope - a client can never reference another
 // scope's pseudonyms (that unlinkability is the whole point).
 func (c *Contacts) personForClientCID(ctx context.Context, client *auth.Client, cid string) (string, error) {
 	var personID, scope string
@@ -409,7 +409,7 @@ func (c *Contacts) personForClientCID(ctx context.Context, client *auth.Client, 
 
 // GetAttribute returns exactly one decrypted field: purpose is
 // mandatory, checked against the caller's allowed purposes, the blob is the
-// caller-scope one, and the read is audited BEFORE the value is released —
+// caller-scope one, and the read is audited BEFORE the value is released -
 // an unaudited disclosure must not happen (fail closed).
 func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, name, purpose string) (string, error) {
 	if !client.Can(auth.ActAttributesRead) {

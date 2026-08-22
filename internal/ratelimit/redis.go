@@ -12,7 +12,7 @@ package ratelimit
 //	GET  rl:{key}:{start-1}     -> weighted sum decides
 //
 // Failure mode is configurable fail-open/fail-closed; the default is
-// fail-open with a warning counter (rate limiting is abuse control — an
+// fail-open with a warning counter (rate limiting is abuse control - an
 // unreachable Redis should degrade protection, not availability).
 
 import (
@@ -154,7 +154,7 @@ func (r *RedisClient) cmd(args ...string) (any, error) {
 type RedisLimiter struct {
 	Client *RedisClient
 	// FailClosed blocks requests when Redis is unreachable. Default false:
-	// degrade the abuse control, not availability — but count the failures.
+	// degrade the abuse control, not availability - but count the failures.
 	FailClosed bool
 
 	mu       sync.Mutex

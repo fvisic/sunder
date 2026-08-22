@@ -1,7 +1,7 @@
 package api
 
 // Fault-injection coverage: the failure branches that never fire in happy
-// e2e runs — broken key material, corrupted ciphertext, and a database that
+// e2e runs - broken key material, corrupted ciphertext, and a database that
 // dies mid-flight. Every operation must fail CLOSED with an error, never
 // return partial data.
 

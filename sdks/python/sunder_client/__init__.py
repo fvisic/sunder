@@ -1,4 +1,4 @@
-"""Sunder Python SDK — a thin client for the Sunder pseudonymous identity API.
+"""Sunder Python SDK - a thin client for the Sunder pseudonymous identity API.
 
 Implements the canonical CidProviderClient interface (docs/DESIGN.md, SDK design rules):
 transport, auth, timeouts, retries and error mapping only. Zero cryptography,
@@ -6,7 +6,7 @@ zero third-party dependencies (stdlib urllib).
 
 Retry policy (baked in, the SDK design rules (docs/DESIGN.md)):
   - lookups and issue_oti retry once on 5xx / network errors (safe);
-  - verify_oti is NEVER blind-retried (single-use token — a retry after an
+  - verify_oti is NEVER blind-retried (single-use token - a retry after an
     ambiguous network failure would legitimately return TokenUsed).
 """
 

@@ -74,7 +74,7 @@ func TestVerifyAnchorsDetectsRewrittenHistory(t *testing.T) {
 	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "lookup"}); err != nil {
 		t.Fatal(err)
 	}
-	// Simulate an anchor whose root no longer exists in the chain — exactly
+	// Simulate an anchor whose root no longer exists in the chain - exactly
 	// what a full-chain rewrite leaves behind.
 	orphan := "beef000000000000000000000000000000000000000000000000000000000000"
 	if _, err := s.Pool.Exec(ctx,

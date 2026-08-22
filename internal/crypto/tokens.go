@@ -54,7 +54,7 @@ func (t *Tokenizer) NameToken(ctx context.Context, v, normalized string) (string
 }
 
 // NewCID returns a fresh pseudonym: "CID-" + 26 base32 chars of 16 random
-// bytes. Random, never derived from PII — nothing to reverse (docs/DESIGN.md).
+// bytes. Random, never derived from PII - nothing to reverse (docs/DESIGN.md).
 func NewCID() (string, error) {
 	raw := make([]byte, 16)
 	if _, err := randRead(raw); err != nil {
@@ -79,4 +79,4 @@ func HashSecret(secret string) []byte {
 }
 
 // Which key versions are live is decided by the keys table via the service
-// KeyRing (DB-driven, dual-key rotation window) — not hardcoded here.
+// KeyRing (DB-driven, dual-key rotation window) - not hardcoded here.

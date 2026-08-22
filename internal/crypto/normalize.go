@@ -12,7 +12,7 @@ import (
 var e164 = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
 
 // clean applies Unicode NFKC (so visually-identical composed/decomposed or
-// fullwidth forms produce the same HMAC token — otherwise a deliberate
+// fullwidth forms produce the same HMAC token - otherwise a deliberate
 // variant bypasses dedup) and rejects control characters.
 func clean(s string) (string, error) {
 	s = norm.NFKC.String(s)

@@ -6,14 +6,14 @@ info:
   description: |
     Sunder is a pseudonymous identity provider. Each API client lives in a
     **scope** (a CID namespace) and can only ever reference CIDs of its own
-    scope — foreign CIDs are indistinguishable from nonexistent ones (404).
+    scope - foreign CIDs are indistinguishable from nonexistent ones (404).
     Attributes are stored in per-(person, scope) encrypted blobs: a scope
     reads exactly the attributes it stored itself (**scope isolation**).
 
     Key security semantics:
-    - **LOOKUP != AUTHENTICATION** — a lookup hit returns a pseudonym; it
+    - **LOOKUP != AUTHENTICATION** - a lookup hit returns a pseudonym; it
       never proves the caller is talking to that person.
-    - **OTIs are single-use** — a one-time identifier is valid for 5 minutes,
+    - **OTIs are single-use** - a one-time identifier is valid for 5 minutes,
       one use, one audience, one purpose; single use is enforced by an atomic
       VALID -> USED database transition, not just the signature.
     - Every client has a scope, allowed actions, and allowed purposes;
@@ -60,10 +60,10 @@ paths:
         AES-256-GCM blob.
 
         Dedup: an existing person is matched by email token first, then
-        phone, and reused — re-registering returns the same scoped CID and
+        phone, and reused - re-registering returns the same scoped CID and
         merges new attributes into the caller's blob (new values win).
         Attributes stored by other scopes are never readable through dedup
-        (per-scope blobs — scope isolation).
+        (per-scope blobs - scope isolation).
       requestBody:
         required: true
         content:
@@ -95,7 +95,7 @@ paths:
         Action `scopes.issue`. Returns a different pseudonym for the same
         person, in the target scope.
 
-        **Grant sparingly**: this action is linkage-capable — the caller
+        **Grant sparingly**: this action is linkage-capable - the caller
         learns the target scope's pseudonym. It exists for trusted
         integration components; regular cross-system handoff should use
         OTIs, where the verifier learns its own CID and the issuer learns
@@ -142,7 +142,7 @@ paths:
         caller's allowed purposes. Decryption is server-side only; exactly
         one field is returned per call; every fetch is written to the audit
         chain. Only attributes stored by the caller's own scope are readable
-        (scope isolation — per-scope encrypted blobs).
+        (scope isolation - per-scope encrypted blobs).
       parameters:
         - $ref: '#/components/parameters/Cid'
         - name: name
@@ -188,17 +188,17 @@ paths:
       description: |
         Action `lookup`. Valid key combinations: `email` alone, `phone`
         alone, `name` + `email`, or `name` + `phone`. **Name alone is
-        rejected (400)** — a name is a narrowing key, never an identifier.
+        rejected (400)** - a name is a narrowing key, never an identifier.
         Identifiers are normalized, HMAC-tokenized under every active key
         version and matched against token indexes; no PII is compared or
         stored in plaintext on this path.
 
         A 404 covers both "no such person" and "person exists but has no CID
-        in the caller's scope" — anything else would let one scope enumerate
+        in the caller's scope" - anything else would let one scope enumerate
         another's customer base. Every lookup, hit or miss, is audited;
         misses feed the enumeration detector.
 
-        **LOOKUP != AUTHENTICATION** — a hit never proves the caller is
+        **LOOKUP != AUTHENTICATION** - a hit never proves the caller is
         talking to that person.
 
         Rate-limited per client: requests beyond the client's per-minute
@@ -272,7 +272,7 @@ paths:
       summary: Verify and consume a one-time identifier
       description: |
         Action `oti.verify`. The caller's scope must equal the token's
-        `audience` — you can only verify tokens addressed to you
+        `audience` - you can only verify tokens addressed to you
         (403 `audience_mismatch` otherwise).
 
         On success, returns **the verifier's own scoped CID** for the person
@@ -280,7 +280,7 @@ paths:
         scope boundary. **Single use** is enforced by an atomic
         VALID -> USED database transition, not just the signature: a second
         verification of the same token returns 409 `token_used`. Do not
-        blind-retry this call after an ambiguous network failure — the retry
+        blind-retry this call after an ambiguous network failure - the retry
         can legitimately return `token_used`.
       requestBody:
         required: true
@@ -296,7 +296,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/CidResponse'
         '400':
-          description: Bad JSON body, validation failure, or an invalid token (bad signature, wrong purpose, malformed shape) — `error` is `bad_json`, `validation` or `token_invalid`.
+          description: Bad JSON body, validation failure, or an invalid token (bad signature, wrong purpose, malformed shape) - `error` is `bad_json`, `validation` or `token_invalid`.
           content:
             application/json:
               schema:
@@ -309,7 +309,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          description: Caller lacks the action, the purpose is not allowed, or the caller's scope does not equal the token audience — `error` is `forbidden`, `purpose_not_allowed` or `audience_mismatch`.
+          description: Caller lacks the action, the purpose is not allowed, or the caller's scope does not equal the token audience - `error` is `forbidden`, `purpose_not_allowed` or `audience_mismatch`.
           content:
             application/json:
               schema:
@@ -320,7 +320,7 @@ paths:
                 forbidden:
                   value: {"error": "forbidden"}
         '409':
-          description: The token was already used (single-use, atomic VALID -> USED transition) — `error` is `token_used`.
+          description: The token was already used (single-use, atomic VALID -> USED transition) - `error` is `token_used`.
           content:
             application/json:
               schema:
@@ -329,7 +329,7 @@ paths:
                 token_used:
                   value: {"error": "token_used"}
         '410':
-          description: The token expired (5-minute validity) — `error` is `token_expired`.
+          description: The token expired (5-minute validity) - `error` is `token_expired`.
           content:
             application/json:
               schema:
@@ -412,7 +412,7 @@ paths:
       operationId: dsrAccess
       summary: GDPR right of access (org-wide)
       description: |
-        Action `dsr.access` — high-privilege and linkage-capable (privacy
+        Action `dsr.access` - high-privilege and linkage-capable (privacy
         officer only): returns every scope's data for the person plus the
         audit trail of who touched them. Audited.
       parameters:
@@ -540,7 +540,7 @@ paths:
       operationId: metrics
       summary: Prometheus metrics
       description: |
-        Prometheus text exposition format. Unauthenticated by default —
+        Prometheus text exposition format. Unauthenticated by default -
         protect at the network layer. When `SUNDER_METRICS_TOKEN` is set the
         endpoint requires `Authorization: Bearer <token>` (per-client
         counters reveal client ids and activity) and returns 401 otherwise.
@@ -570,7 +570,7 @@ components:
       scheme: bearer
       bearerFormat: client_id.secret
       description: |
-        `Authorization: Bearer <client_id>.<secret>` — credentials issued
+        `Authorization: Bearer <client_id>.<secret>` - credentials issued
         once by `sunder client create`; only a hash is stored server-side.
         Every client has a scope (CID namespace), allowed actions and
         allowed purposes. With mTLS configured, the listener additionally
@@ -622,7 +622,7 @@ components:
       description: |
         At least one email or phone is required. A contact can carry several
         searchable emails/phones: the singular field is the primary, the
-        plural lists add more — all are searchable and dedup-relevant.
+        plural lists add more - all are searchable and dedup-relevant.
         Normalized identifiers are stored as attributes `email`, `email_2`,
         …, `phone`, `phone_2`, ….
       properties:
@@ -677,7 +677,7 @@ components:
           examples: ['+385911234567']
         name:
           type: string
-          description: Narrowing key only — must be accompanied by email or phone.
+          description: Narrowing key only - must be accompanied by email or phone.
           examples: [Filip Visic]
       anyOf:
         - required: [email]
@@ -728,7 +728,7 @@ components:
           examples: [create_order]
         audience:
           type: string
-          description: Must equal the caller's own scope — you can only verify tokens addressed to you.
+          description: Must equal the caller's own scope - you can only verify tokens addressed to you.
           examples: [erp]
 
     Error:
@@ -757,7 +757,7 @@ components:
 
   responses:
     Unauthorized:
-      description: Missing or invalid `Authorization` bearer credentials — `error` is `unauthorized`.
+      description: Missing or invalid `Authorization` bearer credentials - `error` is `unauthorized`.
       headers:
         WWW-Authenticate:
           schema:
@@ -772,7 +772,7 @@ components:
               value: {"error": "unauthorized"}
 
     Forbidden:
-      description: The client is not allowed to perform this action — `error` is `forbidden`.
+      description: The client is not allowed to perform this action - `error` is `forbidden`.
       content:
         application/json:
           schema:
@@ -782,7 +782,7 @@ components:
               value: {"error": "forbidden"}
 
     ForbiddenOrPurpose:
-      description: The client is not allowed to perform this action, or the declared purpose is not in the client's allowed purposes — `error` is `forbidden` or `purpose_not_allowed`.
+      description: The client is not allowed to perform this action, or the declared purpose is not in the client's allowed purposes - `error` is `forbidden` or `purpose_not_allowed`.
       content:
         application/json:
           schema:
@@ -794,7 +794,7 @@ components:
               value: {"error": "purpose_not_allowed"}
 
     NotFound:
-      description: No such CID in the caller's scope, or no match. Foreign-scope and nonexistent resources are deliberately indistinguishable — `error` is `not_found`.
+      description: No such CID in the caller's scope, or no match. Foreign-scope and nonexistent resources are deliberately indistinguishable - `error` is `not_found`.
       content:
         application/json:
           schema:
@@ -804,7 +804,7 @@ components:
               value: {"error": "not_found"}
 
     Validation:
-      description: Request failed validation — `error` is `validation`, with a `detail` message.
+      description: Request failed validation - `error` is `validation`, with a `detail` message.
       content:
         application/json:
           schema:
@@ -814,7 +814,7 @@ components:
               value: {"error": "validation", "detail": "purpose required"}
 
     BadRequest:
-      description: Malformed JSON body or failed validation — `error` is `bad_json` or `validation` (validation carries a `detail` message).
+      description: Malformed JSON body or failed validation - `error` is `bad_json` or `validation` (validation carries a `detail` message).
       content:
         application/json:
           schema:
@@ -826,7 +826,7 @@ components:
               value: {"error": "validation", "detail": "email or phone required"}
 
     RateLimited:
-      description: The client exceeded its per-minute lookup limit — `error` is `rate_limited`. Misses also feed the enumeration detector.
+      description: The client exceeded its per-minute lookup limit - `error` is `rate_limited`. Misses also feed the enumeration detector.
       content:
         application/json:
           schema:
@@ -836,7 +836,7 @@ components:
               value: {"error": "rate_limited"}
 
     Internal:
-      description: Internal server error — `error` is `internal`. Clients should map any 5xx to ServiceUnavailable.
+      description: Internal server error - `error` is `internal`. Clients should map any 5xx to ServiceUnavailable.
       content:
         application/json:
           schema:

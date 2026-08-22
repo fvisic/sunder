@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Sunder;
 
 /**
- * Root error type for all Sunder API failures — same taxonomy and trigger
+ * Root error type for all Sunder API failures - same taxonomy and trigger
  * conditions as every other Sunder SDK (Python's SunderError, TS's
  * SunderError). Catch this to catch everything the client can throw.
  *

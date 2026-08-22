@@ -1,5 +1,5 @@
 // Fake HttpMessageHandler: replays queued responses and records every request
-// it serves. No sockets involved — HttpClient never connects anywhere.
+// it serves. No sockets involved - HttpClient never connects anywhere.
 
 using System;
 using System.Collections.Generic;

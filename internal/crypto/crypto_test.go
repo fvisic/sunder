@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// autoKS wraps FileKeystore to create keys on demand — ONLY for tests; the
+// autoKS wraps FileKeystore to create keys on demand - ONLY for tests; the
 // production keystore is strict and keys are created at bootstrap.
 type autoKS struct{ inner *FileKeystore }
 
@@ -85,7 +85,7 @@ func TestTokenizerDeterministicAndKeySeparated(t *testing.T) {
 	// Same input under a different attribute key must differ (per-attribute keys).
 	c, _ := tk.NameToken(ctx, "v1", "filip@example.com")
 	if a == c {
-		t.Fatal("email and name keys produce identical tokens — keys not separated")
+		t.Fatal("email and name keys produce identical tokens - keys not separated")
 	}
 	// Different key versions must differ (rotation window).
 	d, _ := tk.EmailToken(ctx, "v2", "filip@example.com")

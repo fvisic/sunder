@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Sunder API",
-    "description": "Pseudonymous identity provider. Set the collection variables first:\n\n- `baseUrl` (default http://localhost:8080)\n- `credCrm` — client credential with actions contacts.register,lookup,attributes.read,oti.issue,consent.manage and purposes support,create_order,escalation_notify\n- `credErp` — scope erp, action oti.verify, purpose create_order\n- `credNotifier` — scope notifier, actions oti.verify,attributes.read,consent.manage, purpose escalation_notify\n\nCreate credentials with `sunder client create` (see README). The folders 'Demo' are ordered flows: run them top-to-bottom (or via the Collection Runner) — test scripts pass cid/token between steps automatically.",
+    "description": "Pseudonymous identity provider. Set the collection variables first:\n\n- `baseUrl` (default http://localhost:8080)\n- `credCrm` - client credential with actions contacts.register,lookup,attributes.read,oti.issue,consent.manage and purposes support,create_order,escalation_notify\n- `credErp` - scope erp, action oti.verify, purpose create_order\n- `credNotifier` - scope notifier, actions oti.verify,attributes.read,consent.manage, purpose escalation_notify\n\nCreate credentials with `sunder client create` (see README). The folders 'Demo' are ordered flows: run them top-to-bottom (or via the Collection Runner) - test scripts pass cid/token between steps automatically.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [

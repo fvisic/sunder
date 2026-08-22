@@ -1,12 +1,12 @@
 /**
- * Sunder TypeScript SDK — a thin client for the Sunder pseudonymous
+ * Sunder TypeScript SDK - a thin client for the Sunder pseudonymous
  * identity provider (v1 API).
  *
  * Design rules (docs/DESIGN.md, SDK design rules):
  * - Zero cryptography here: transport, auth, timeouts, retries, error mapping.
  * - Zero runtime dependencies: global fetch (Node 18+ / browsers).
  * - Per-endpoint retry policy: lookup* and issueOti retry once on 5xx or
- *   network failure; verifyOti is NEVER blind-retried (single-use token —
+ *   network failure; verifyOti is NEVER blind-retried (single-use token -
  *   a retry after an ambiguous network failure would legitimately return
  *   TokenUsed; that outcome is surfaced distinctly for the caller to decide).
  */
@@ -23,7 +23,7 @@ export type SunderErrorCode =
   | "TokenUsed"
   | "TokenExpired"
   | "RateLimited"
-  // Also raised (status 0) on network-level failures — identical taxonomy
+  // Also raised (status 0) on network-level failures - identical taxonomy
   // and trigger conditions across all Sunder SDKs.
   | "ServiceUnavailable"
   | "Unknown";
@@ -43,7 +43,7 @@ function combineSignals(signals: AbortSignal[]): AbortSignal {
 
 /** Error thrown by every SunderClient method on a non-success outcome. */
 export class SunderError extends Error {
-  /** Taxonomy code — stable across SDK languages. */
+  /** Taxonomy code - stable across SDK languages. */
   readonly code: SunderErrorCode;
   /** HTTP status of the response, or 0 for network-level failures. */
   readonly status: number;
@@ -117,7 +117,7 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
-/** Second factor for lookupByName — a name alone is never an identifier. */
+/** Second factor for lookupByName - a name alone is never an identifier. */
 export interface SecondFactor {
   email?: string;
   phone?: string;
@@ -171,7 +171,7 @@ function readEnv(name: string): string | undefined {
  * Client for the Sunder v1 API. Implements the canonical CidProviderClient
  * interface (docs/DESIGN.md, SDK design rules). All methods throw SunderError on failure.
  *
- * Remember: LOOKUP != AUTHENTICATION — a lookup hit never proves the caller
+ * Remember: LOOKUP != AUTHENTICATION - a lookup hit never proves the caller
  * is talking to that person.
  */
 export class SunderClient {
@@ -217,7 +217,7 @@ export class SunderClient {
   }
 
   /**
-   * Issues the same person's CID in another scope. Linkage-capable —
+   * Issues the same person's CID in another scope. Linkage-capable -
    * grant sparingly; prefer OTIs for cross-system handoff.
    */
   async issueScopedCid(
@@ -258,7 +258,7 @@ export class SunderClient {
   }
 
   /**
-   * Finds a contact by name plus a second factor (email or phone) — a name
+   * Finds a contact by name plus a second factor (email or phone) - a name
    * alone is a narrowing key, never an identifier, and is rejected server-side.
    */
   async lookupByName(
@@ -342,7 +342,7 @@ export class SunderClient {
       method: "POST",
       path: "/v1/oti/verify",
       body: { token, purpose, audience },
-      retryOnce: false, // single-use token — see method doc
+      retryOnce: false, // single-use token - see method doc
       options,
     });
   }

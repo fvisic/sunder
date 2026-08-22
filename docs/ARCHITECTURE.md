@@ -37,27 +37,27 @@ anchoring), `internal/ratelimit`.
 
 ## Ground rules
 
-- **No PII in logs or metrics** — the logging middleware records method,
+- **No PII in logs or metrics** - the logging middleware records method,
   route pattern, status and duration only; never query strings, bodies or
   headers.
-- **No OIB anywhere** — the schema has no column for a national identifier,
+- **No OIB anywhere** - the schema has no column for a national identifier,
   by design.
-- **Stdlib first** — a new dependency requires justification in the PR;
+- **Stdlib first** - a new dependency requires justification in the PR;
   the only runtime dependency is pgx.
-- **Postgres only (v1)** — decision D6; local development uses
+- **Postgres only (v1)** - decision D6; local development uses
   `deploy/docker-compose.yml`.
 
 ## Identity model
 
 `persons` holds one row per real person: HMAC search tokens only. Encrypted
 attributes live per-scope on the `cids` row (AES-256-GCM, AAD-bound to the
-CID), so each scope reads exactly the attributes it stored itself — dedup
+CID), so each scope reads exactly the attributes it stored itself - dedup
 onto a shared person never exposes another scope's data. `cids` maps a
 person to one pseudonym per *scope* (internal domain: crm, billing, …).
 
 Clients only ever reference CIDs of their own scope. Two deliberate,
 audited exceptions exist: the `scopes.issue` action (returns another
-scope's CID for a person — a linkage-capable privilege for trusted
+scope's CID for a person - a linkage-capable privilege for trusted
 integration components only) and OTI verification (the verifier receives
 its own scoped CID). Day-to-day cross-system handoff uses OTIs
 (docs/DESIGN.md).

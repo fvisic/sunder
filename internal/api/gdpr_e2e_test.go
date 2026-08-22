@@ -244,7 +244,7 @@ func TestDSREraseOrgWideWithSignedWebhook(t *testing.T) {
 	}
 }
 
-// A foreign-scope CID with a withdrawn consent must read as 404, not 403 —
+// A foreign-scope CID with a withdrawn consent must read as 404, not 403 -
 // otherwise the 403/404 split is an oracle for foreign-CID existence and
 // consent state.
 func TestConsentHookNoForeignCIDOracle(t *testing.T) {

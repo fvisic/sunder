@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compiles the SDK and its test suite with plain javac and runs the
-# main-method test runner — no Maven, no dependencies (Java 17+).
+# main-method test runner - no Maven, no dependencies (Java 17+).
 set -euo pipefail
 cd "$(dirname "$0")"
 

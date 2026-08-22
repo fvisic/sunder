@@ -92,7 +92,7 @@ func gc(entries map[string]*entry, now time.Time, span time.Duration) {
 }
 
 // Detector tracks lookup misses per client with the same weighted
-// sliding-window scheme as the limiter — a fixed wall-clock window would let
+// sliding-window scheme as the limiter - a fixed wall-clock window would let
 // a paced attacker straddle the boundary and never trigger the alert.
 type Detector struct {
 	mu     sync.Mutex

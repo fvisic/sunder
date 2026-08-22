@@ -1,7 +1,7 @@
 # Benchmark: Sunder vs Databunker (head-to-head)
 
 Goal: same machine, same database engine, same load tool, comparable
-operations — and Sunder at least 50% more efficient.
+operations - and Sunder at least 50% more efficient.
 
 ## Result summary (2026-08-22)
 
@@ -13,7 +13,7 @@ n=5000 requests per op, 16 concurrent clients, zero errors on both sides:
 | **lookup** (find by email) | **2,837 rps**, p50 5.38 ms, p99 9.4 ms | 1,885 rps, p50 8.13 ms, p99 20.9 ms | **+50%** | **2.2× lower** |
 | **read** (by CID / token) | **2,843 rps**, p50 5.41 ms, p99 8.4 ms | 1,811 rps, p50 8.12 ms, p99 23.9 ms | **+57%** | **2.8× lower** |
 
-Sunder clears the +50% efficiency target on every operation — while doing
+Sunder clears the +50% efficiency target on every operation - while doing
 MORE work per request than Databunker does: every Sunder operation writes a
 hash-chained audit record inside the same transaction, computes keyed-HMAC
 search tokens per identifier, and enforces per-client purpose checks.
@@ -30,7 +30,7 @@ is directional only.
   in Docker Desktop.
 - **Same engine**: PostgreSQL 16 for both (Databunker configured with its
   PGSQL backend, not the demo SQLite).
-- **Same tool**: `benchmark/bench.go` (this directory) — one Go harness,
+- **Same tool**: `benchmark/bench.go` (this directory) - one Go harness,
   worker pool, full latency capture, exact percentiles (no HDR bucketing).
 - **Same payload semantics**: create = email + phone + name + 2 custom
   fields; lookup = by email; read = by handle obtained beforehand (handles
@@ -85,7 +85,7 @@ done
 
 - Single indexed point queries on the hot paths (HMAC token = exact match).
 - `CachingKeystore`: key material is immutable per versioned name, so it is
-  cached in process memory — zero keystore I/O per request.
+  cached in process memory - zero keystore I/O per request.
 - pgx connection pooling, stdlib HTTP router, no middleware stack.
 - The audit chain's global ordering lock is held only for the final
   append+commit window of each transaction.

@@ -24,7 +24,7 @@ import (
 
 // Keystore returns 32-byte key material by logical name (e.g. "hmac-email/v1").
 //
-// Key is STRICT: a missing key is an error, never silently regenerated —
+// Key is STRICT: a missing key is an error, never silently regenerated -
 // a silently minted replacement would mask key loss (unmatchable search
 // tokens, undecryptable PII) as healthy operation. Ensure is the only
 // creation path and is called at bootstrap/rotation, not per request.
@@ -262,7 +262,7 @@ func (v *VaultKeystore) read(ctx context.Context, name string) ([]byte, error) {
 // CachingKeystore memoizes key material in process memory. Safe because a
 // key NAME's material is immutable: rotation mints new versioned names and
 // retirement only stops a name from being requested (the keyring no longer
-// lists it) — existing material never changes. Removes per-request keystore
+// lists it) - existing material never changes. Removes per-request keystore
 // I/O (file reads / Vault round trips) from the hot path.
 type CachingKeystore struct {
 	Inner Keystore

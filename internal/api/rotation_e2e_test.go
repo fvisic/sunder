@@ -177,7 +177,7 @@ func TestPIIKekRotationReEncryptsOnTouch(t *testing.T) {
 	if rec.Code != 200 || out["value"] != "gold" {
 		t.Fatalf("v1 blob unreadable after rotation: %d %s", rec.Code, rec.Body.String())
 	}
-	// A touch re-encrypts under v2 — pinned via the stored key id.
+	// A touch re-encrypts under v2 - pinned via the stored key id.
 	rec, _ = e.do(t, e.credCRM, "POST", "/v1/contacts", map[string]any{"email": "rot@example.com"})
 	if rec.Code != 201 {
 		t.Fatal(rec.Code)

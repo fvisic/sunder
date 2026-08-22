@@ -117,7 +117,7 @@ jobs:
 
   e2e-demo:
     # Builds the real image, boots the compose stack, and runs the demo
-    # script — which asserts every expected status code, so it doubles as a
+    # script - which asserts every expected status code, so it doubles as a
     # smoke test of the whole API surface.
     runs-on: ubuntu-latest
     steps:

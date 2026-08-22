@@ -1,6 +1,6 @@
 # Configuration reference
 
-Sunder is configured exclusively through `SUNDER_*` environment variables —
+Sunder is configured exclusively through `SUNDER_*` environment variables -
 no config files, no flags (except where a CLI subcommand documents one). All
 defaults match the documented v1 behaviour, so an existing deployment that
 sets none of the new variables behaves identically after an upgrade.
@@ -11,8 +11,8 @@ sets none of the new variables behaves identically after an upgrade.
 |---|---|---|
 | `SUNDER_DB_URL` | *(required)* | PostgreSQL connection URL. |
 | `SUNDER_LISTEN` | `:8080` | HTTP(S) listen address. |
-| `SUNDER_TLS_CERT` / `SUNDER_TLS_KEY` | — | Certificate/key paths; set both to enable TLS (1.3 minimum). |
-| `SUNDER_MTLS_CA` | — | Client-CA bundle path; presence enables mandatory client-certificate verification. Requires TLS. |
+| `SUNDER_TLS_CERT` / `SUNDER_TLS_KEY` | - | Certificate/key paths; set both to enable TLS (1.3 minimum). |
+| `SUNDER_MTLS_CA` | - | Client-CA bundle path; presence enables mandatory client-certificate verification. Requires TLS. |
 
 ## Keystore
 
@@ -20,7 +20,7 @@ sets none of the new variables behaves identically after an upgrade.
 |---|---|---|
 | `SUNDER_KEYSTORE` | `file` | `file`, `vault` or `pkcs11` (stub). |
 | `SUNDER_KEYSTORE_PATH` | `./keystore` | Key directory for the `file` driver. |
-| `SUNDER_VAULT_ADDR` / `SUNDER_VAULT_TOKEN` | — | Required for the `vault` driver (KV v2). |
+| `SUNDER_VAULT_ADDR` / `SUNDER_VAULT_TOKEN` | - | Required for the `vault` driver (KV v2). |
 | `SUNDER_VAULT_MOUNT` | `secret` | KV v2 mount point. |
 
 ## Audit anchoring
@@ -29,25 +29,25 @@ sets none of the new variables behaves identically after an upgrade.
 |---|---|---|
 | `SUNDER_TSA_URL` | `https://freetsa.org/tsr` | RFC 3161 timestamping endpoint. Point production at a qualified or internal TSA. |
 | `SUNDER_TSA_CACERT` | vendored FreeTSA CA | TSA root CA bundle for offline token verification. |
-| `SUNDER_ANCHOR_DIR` | — | Directory where `sunder anchor` exports `.tsr` files. Sync it to write-once storage **off this host**. |
+| `SUNDER_ANCHOR_DIR` | - | Directory where `sunder anchor` exports `.tsr` files. Sync it to write-once storage **off this host**. |
 
 ## Rate limiting
 
 | Variable | Default | Description |
 |---|---|---|
-| `SUNDER_REDIS_ADDR` | — | `host:port`; set for shared windows across replicas. Unset = in-memory per replica. |
-| `SUNDER_REDIS_PASSWORD` | — | Optional AUTH password. |
+| `SUNDER_REDIS_ADDR` | - | `host:port`; set for shared windows across replicas. Unset = in-memory per replica. |
+| `SUNDER_REDIS_PASSWORD` | - | Optional AUTH password. |
 | `SUNDER_REDIS_FAIL_CLOSED` | `false` | `true` blocks lookups when Redis is unreachable (availability trade-off). |
 
 ## Observability
 
 | Variable | Default | Description |
 |---|---|---|
-| `SUNDER_METRICS_TOKEN` | — | When set, `/metrics` requires this bearer token (per-client counters reveal client ids and activity). |
+| `SUNDER_METRICS_TOKEN` | - | When set, `/metrics` requires this bearer token (per-client counters reveal client ids and activity). |
 
 ## Tunables
 
-Every value below is a **security trade-off, not a preference** — read the
+Every value below is a **security trade-off, not a preference** - read the
 notes before changing it.
 
 | Variable | Default | Range | Description |
@@ -59,5 +59,5 @@ notes before changing it.
 | `SUNDER_DELIVER_INTERVAL` | `1m` | `5s`–`1h` | Cadence of the background webhook retry worker. `Erase` always attempts one inline delivery regardless. |
 
 Invalid values (unparseable durations, out-of-range numbers, unknown
-algorithm names) fail startup with a specific error — a typo can never
+algorithm names) fail startup with a specific error - a typo can never
 silently fall back to a default.

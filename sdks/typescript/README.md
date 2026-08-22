@@ -2,7 +2,7 @@
 
 TypeScript SDK for [Sunder](../../README.md), the pseudonymous identity
 provider. A thin client (zero runtime dependencies, global `fetch`,
-Node 18+): transport, auth, timeouts, retries and error mapping — all
+Node 18+): transport, auth, timeouts, retries and error mapping - all
 cryptography stays server-side.
 
 ## Install
@@ -25,7 +25,7 @@ import { SunderClient, SunderError } from "@sunder-id/sunder";
 
 const sunder = new SunderClient(); // reads SUNDER_URL / SUNDER_CREDENTIAL
 
-// 1. Register a contact — returns the pseudonym in YOUR scope.
+// 1. Register a contact - returns the pseudonym in YOUR scope.
 const { cid } = await sunder.registerContact({
   email: "filip@example.com",
   phone: "+385 91 123 4567",
@@ -40,7 +40,7 @@ const found = await sunder.lookupByEmail("filip@example.com");
 const oti = await sunder.issueOti(found.cid, "create_order", "erp");
 
 // 4. The "erp" system verifies with ITS OWN client and receives ITS OWN
-//    scoped CID — the issuer's pseudonym never crosses the scope boundary.
+//    scoped CID - the issuer's pseudonym never crosses the scope boundary.
 const erp = new SunderClient({ url: process.env.SUNDER_URL, credential: erpCredential });
 const order = await erp.verifyOti(oti.token, "create_order", "erp");
 console.log(order.cid); // CID in the erp scope
@@ -58,7 +58,7 @@ try {
   await sunder.lookupByEmail("nobody@example.com");
 } catch (err) {
   if (err instanceof SunderError && err.code === "NotFound") {
-    // no match in YOUR scope (the person may exist elsewhere — by design)
+    // no match in YOUR scope (the person may exist elsewhere - by design)
   }
 }
 ```

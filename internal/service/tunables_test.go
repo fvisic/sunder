@@ -177,7 +177,7 @@ func TestAlgorithmMigrationLive(t *testing.T) {
 	}
 }
 
-// Attribute sharing across an aes-era issuer and an xchacha-era verifier —
+// Attribute sharing across an aes-era issuer and an xchacha-era verifier -
 // the mixed state a deployment lives in mid-migration.
 func TestShareAcrossMixedAlgorithms(t *testing.T) {
 	e := newFaultEnv(t)

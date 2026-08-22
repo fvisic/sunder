@@ -290,7 +290,7 @@ func anchorCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 // verifyAuditCmd recomputes the whole hash chain, verifies every stored TSA
 // token offline, and cross-checks exported .tsr files when -anchors is
 // given. Non-zero exit on any failure, and on anchors that exist but cannot
-// be cryptographically verified — success must mean something.
+// be cryptographically verified - success must mean something.
 func verifyAuditCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
 	fs := flag.NewFlagSet("verify-audit", flag.ContinueOnError)
 	caFlag := fs.String("ca", "", "TSA root CA bundle (default: SUNDER_TSA_CACERT or the vendored FreeTSA CA)")

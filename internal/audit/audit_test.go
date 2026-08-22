@@ -38,7 +38,7 @@ func TestTamperDetected(t *testing.T) {
 		}
 	}
 	// A privileged attacker first removes the append-only trigger (they can),
-	// then quietly rewrites record 2 — the chain must still expose it.
+	// then quietly rewrites record 2 - the chain must still expose it.
 	if _, err := s.Pool.Exec(ctx, `ALTER TABLE audit DISABLE TRIGGER audit_no_update`); err != nil {
 		t.Fatal(err)
 	}

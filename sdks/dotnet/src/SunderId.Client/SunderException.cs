@@ -1,4 +1,4 @@
-// Unified Sunder SDK error taxonomy — identical names and identical trigger
+// Unified Sunder SDK error taxonomy - identical names and identical trigger
 // conditions across all Sunder SDKs (docs/DESIGN.md, SDK design rules).
 
 using System;
@@ -35,7 +35,7 @@ public class SunderException : Exception
     }
 }
 
-/// <summary>401 unauthorized — missing or invalid credential.</summary>
+/// <summary>401 unauthorized - missing or invalid credential.</summary>
 public sealed class SunderUnauthorizedException : SunderException
 {
     /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
@@ -43,7 +43,7 @@ public sealed class SunderUnauthorizedException : SunderException
         : base(code, status, detail) { }
 }
 
-/// <summary>403 forbidden — the client may not perform this action.</summary>
+/// <summary>403 forbidden - the client may not perform this action.</summary>
 public sealed class SunderForbiddenException : SunderException
 {
     /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
@@ -51,7 +51,7 @@ public sealed class SunderForbiddenException : SunderException
         : base(code, status, detail) { }
 }
 
-/// <summary>403 purpose_not_allowed — purpose outside the client's allowed purposes.</summary>
+/// <summary>403 purpose_not_allowed - purpose outside the client's allowed purposes.</summary>
 public sealed class SunderPurposeNotAllowedException : SunderException
 {
     /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
@@ -59,7 +59,7 @@ public sealed class SunderPurposeNotAllowedException : SunderException
         : base(code, status, detail) { }
 }
 
-/// <summary>403 audience_mismatch — the OTI is addressed to a different audience.</summary>
+/// <summary>403 audience_mismatch - the OTI is addressed to a different audience.</summary>
 public sealed class SunderAudienceMismatchException : SunderException
 {
     /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
@@ -67,7 +67,7 @@ public sealed class SunderAudienceMismatchException : SunderException
         : base(code, status, detail) { }
 }
 
-/// <summary>404 not_found — no match, including CIDs of other scopes.</summary>
+/// <summary>404 not_found - no match, including CIDs of other scopes.</summary>
 public sealed class SunderNotFoundException : SunderException
 {
     /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
@@ -75,7 +75,7 @@ public sealed class SunderNotFoundException : SunderException
         : base(code, status, detail) { }
 }
 
-/// <summary>400 validation / bad_json — invalid request (also raised locally).</summary>
+/// <summary>400 validation / bad_json - invalid request (also raised locally).</summary>
 public sealed class SunderValidationException : SunderException
 {
     /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
@@ -83,7 +83,7 @@ public sealed class SunderValidationException : SunderException
         : base(code, status, detail) { }
 }
 
-/// <summary>400 token_invalid — bad OTI signature, purpose or shape.</summary>
+/// <summary>400 token_invalid - bad OTI signature, purpose or shape.</summary>
 public sealed class SunderTokenInvalidException : SunderException
 {
     /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
@@ -91,7 +91,7 @@ public sealed class SunderTokenInvalidException : SunderException
         : base(code, status, detail) { }
 }
 
-/// <summary>409 token_used — the single-use OTI has already been consumed.</summary>
+/// <summary>409 token_used - the single-use OTI has already been consumed.</summary>
 public sealed class SunderTokenUsedException : SunderException
 {
     /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
@@ -99,7 +99,7 @@ public sealed class SunderTokenUsedException : SunderException
         : base(code, status, detail) { }
 }
 
-/// <summary>410 token_expired — the OTI's 5-minute lifetime is over.</summary>
+/// <summary>410 token_expired - the OTI's 5-minute lifetime is over.</summary>
 public sealed class SunderTokenExpiredException : SunderException
 {
     /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
@@ -107,7 +107,7 @@ public sealed class SunderTokenExpiredException : SunderException
         : base(code, status, detail) { }
 }
 
-/// <summary>429 rate_limited — the client exceeded its per-minute limit.</summary>
+/// <summary>429 rate_limited - the client exceeded its per-minute limit.</summary>
 public sealed class SunderRateLimitedException : SunderException
 {
     /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
@@ -116,7 +116,7 @@ public sealed class SunderRateLimitedException : SunderException
 }
 
 /// <summary>
-/// 5xx responses AND network-level failures (connection errors, timeouts) —
+/// 5xx responses AND network-level failures (connection errors, timeouts) -
 /// same taxonomy and trigger conditions as every other Sunder SDK.
 /// </summary>
 public sealed class SunderServiceUnavailableException : SunderException

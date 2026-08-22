@@ -2,7 +2,7 @@ package service
 
 // GDPR / data-subject rights layer (docs/DESIGN.md, GDPR layer): consent
 // management, right of access, right to erasure (orchestrated org-wide via
-// signed webhooks — the provider is the only component that knows which
+// signed webhooks - the provider is the only component that knows which
 // scopes hold a person), data portability, and per-scope retention.
 
 import (
@@ -394,7 +394,7 @@ func (g *GDPR) maxAttempts() int {
 // DeliverPending pushes queued erasure events to their scopes' webhooks.
 // Events for scopes without a webhook are marked NO_WEBHOOK; failures stay
 // PENDING until the attempts cap, then FAILED. Every terminal transition is
-// written to the audit chain — delivery confirmations are accountability
+// written to the audit chain - delivery confirmations are accountability
 // records, not operational noise.
 func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 	rows, err := g.Pool.Query(ctx,
@@ -509,7 +509,7 @@ func RunRetention(ctx context.Context, pool *pgxpool.Pool) (wiped int64, otiPrun
 	defer func() { _ = tx.Rollback(ctx) }()
 	// TTL keys off updated_at (bumped on every blob write): an actively
 	// maintained contact is never "old" just because it was first seen long
-	// ago. RETURNING captures WHICH pseudonyms lost data — a PII-destroying
+	// ago. RETURNING captures WHICH pseudonyms lost data - a PII-destroying
 	// mutation needs a per-CID accountability trail, not just a count.
 	rows, err := tx.Query(ctx,
 		`UPDATE cids c SET pii_encrypted=NULL, pii_key_id=NULL

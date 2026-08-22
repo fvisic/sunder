@@ -43,7 +43,7 @@ func versionNum(v string) int {
 }
 
 // refreshLocked reloads the ring from the keys table (mutex held).
-// Ordering is numeric on the version suffix — created_at would tie within
+// Ordering is numeric on the version suffix - created_at would tie within
 // one transaction and lexicographic order breaks at v10.
 func (k *KeyRing) refreshLocked(ctx context.Context) error {
 	live := map[string][]string{}
@@ -173,7 +173,7 @@ func (k *KeyRing) Rotate(ctx context.Context, ks crypto.Keystore, kind string) (
 	return version, nil
 }
 
-// Retire moves a RETIRING version to RETIRED — the cure for a leaked key:
+// Retire moves a RETIRING version to RETIRED - the cure for a leaked key:
 // retired versions stop matching on lookup and stop verifying OTIs.
 // The newest ACTIVE version cannot be retired (rotate first). For HMAC
 // kinds, retire only after affected rows re-keyed (they re-key on touch);

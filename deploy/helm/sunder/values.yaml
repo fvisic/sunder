@@ -40,7 +40,7 @@ metrics:
   existingSecret: ""
 
 # Deployment tunables (docs/CONFIG.md). Empty = server default. These are
-# security trade-offs, not preferences — read the docs before changing.
+# security trade-offs, not preferences - read the docs before changing.
 tunables:
   otiTtl: ""             # SUNDER_OTI_TTL, e.g. "90s" (default 5m; bearer-token window!)
   piiAlg: ""             # SUNDER_PII_ALG: aes256gcm (default) | xchacha20poly1305
@@ -53,7 +53,7 @@ anchor:
   schedule: "17 2 * * *"       # daily; only a 32-byte digest leaves the cluster
   tsaUrl: https://freetsa.org/tsr
   # PVC where exported .tsr tokens land; sync it to write-once storage OFF
-  # the database host — anchors kept only in the database are circular.
+  # the database host - anchors kept only in the database are circular.
   pvc:
     size: 1Gi
     storageClassName: ""

@@ -6,7 +6,7 @@
 //   oti_roundtrip   POST /v1/oti  then  POST /v1/oti/verify
 //
 // Thresholds encode the the design latency targets (docs/DESIGN.md). Numbers measured on
-// a laptop are indicative only — the contractual numbers come from the
+// a laptop are indicative only - the contractual numbers come from the
 // reference deployment (docs/DESIGN.md). See loadtest/README.md.
 //
 // Environment:
@@ -138,7 +138,7 @@ function randomIndex() {
   return Math.floor(Math.random() * SEED_COUNT);
 }
 
-// lookup_hit: exact-match lookup by a seeded email — always a hit, so it
+// lookup_hit: exact-match lookup by a seeded email - always a hit, so it
 // never trips the enumeration detector or pollutes the miss metric.
 export function lookupHit() {
   const res = http.post(

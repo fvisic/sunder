@@ -98,7 +98,7 @@ func TestIdentifierOwnershipNotStolen(t *testing.T) {
 	}
 
 	// An ambiguous claim (email of person A + phone of person B) resolves by
-	// the documented email-priority rule to A — and B's phone is NOT stolen.
+	// the documented email-priority rule to A - and B's phone is NOT stolen.
 	rec, out = e.do(t, e.credCRM, "POST", "/v1/contacts", map[string]any{
 		"phone": "+385920000001", "emails": []string{"owner@example.com"}})
 	if rec.Code != 201 || out["cid"] != emailOwner {

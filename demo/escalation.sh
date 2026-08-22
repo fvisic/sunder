@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# escalation.sh — Sunder demo: the delayed-notification (escalation e-mail)
+# escalation.sh - Sunder demo: the delayed-notification (escalation e-mail)
 # flow. Shows why a delayed send can never be "an OTI saved for later"
 # (tokens live five minutes) and how issuer-authorized attribute sharing +
 # just-in-time reads solve it: the notifier service stores ZERO PII, yet can
-# e-mail the customer hours later — and a consent withdrawal stops it cold.
+# e-mail the customer hours later - and a consent withdrawal stops it cold.
 #
 # Requires a running stack (deploy/docker-compose.yml) and two credentials:
 #

@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Minimal hand-rolled JSON support — deliberately no third-party dependency.
+ * Minimal hand-rolled JSON support - deliberately no third-party dependency.
  *
  * <p>The Sunder v1 payloads are flat: objects with string values, string
  * arrays, and one nested string map ({@code "attributes"}). The writer
@@ -136,7 +136,7 @@ final class Json {
         return value;
     }
 
-    /** Signals malformed JSON; internal — callers translate it to SunderException. */
+    /** Signals malformed JSON; internal - callers translate it to SunderException. */
     static final class JsonException extends RuntimeException {
         private static final long serialVersionUID = 1L;
 

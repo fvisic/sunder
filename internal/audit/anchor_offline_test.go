@@ -245,7 +245,7 @@ func TestVerifyAnchorsOrphanWithCA(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	// An orphan export whose root is the fixture digest: not in the chain,
-	// not in the DB, but the TSA token verifies — deletion evidence with a
+	// not in the DB, but the TSA token verifies - deletion evidence with a
 	// cryptographically valid receipt.
 	if err := os.WriteFile(dir+"/"+fixtureDigest+".tsr", fixture(t), 0o444); err != nil {
 		t.Fatal(err)

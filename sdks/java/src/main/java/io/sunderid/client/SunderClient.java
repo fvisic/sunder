@@ -12,7 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Sunder Java SDK — a thin client for the Sunder pseudonymous identity
+ * Sunder Java SDK - a thin client for the Sunder pseudonymous identity
  * provider (v1 API).
  *
  * <p>Implements the canonical CidProviderClient interface (docs/DESIGN.md, SDK design rules):
@@ -24,13 +24,13 @@ import java.util.Map;
  * <ul>
  *   <li>lookups and {@link #issueOti} retry once on 5xx / network errors
  *       (safe);</li>
- *   <li>{@link #verifyOti} is NEVER blind-retried (single-use token — a retry
+ *   <li>{@link #verifyOti} is NEVER blind-retried (single-use token - a retry
  *       after an ambiguous network failure would legitimately return
  *       TokenUsed; that outcome is surfaced distinctly for the caller to
  *       decide).</li>
  * </ul>
  *
- * <p>Remember: LOOKUP != AUTHENTICATION — a lookup hit never proves the
+ * <p>Remember: LOOKUP != AUTHENTICATION - a lookup hit never proves the
  * caller is talking to that person.
  */
 public final class SunderClient {
@@ -104,7 +104,7 @@ public final class SunderClient {
     }
 
     /**
-     * Issues the same person's CID in another scope. Linkage-capable — grant
+     * Issues the same person's CID in another scope. Linkage-capable - grant
      * sparingly; prefer OTIs for cross-system handoff.
      */
     public String issueScopedCid(String cid, String scope) {
@@ -196,7 +196,7 @@ public final class SunderClient {
         body.put("token", token);
         body.put("purpose", purpose);
         body.put("audience", audience);
-        // Single-use token — see method doc: never blind-retried.
+        // Single-use token - see method doc: never blind-retried.
         return requireString(request("POST", "/v1/oti/verify", body, false), "cid");
     }
 
@@ -301,7 +301,7 @@ public final class SunderClient {
                 detail = String.valueOf(d);
             }
         } catch (RuntimeException ignored) {
-            // Non-JSON error body — fall through to status-only mapping.
+            // Non-JSON error body - fall through to status-only mapping.
         }
         if (status >= 500) {
             return new ServiceUnavailableException(

@@ -2,7 +2,7 @@
 
 Per-organization identity decoupling layer: scoped pseudonyms (**CID**),
 one-time identifiers (**OTI**), HMAC-based lookup and purpose-checked
-attribute serving — so the systems inside an organization never share a
+attribute serving - so the systems inside an organization never share a
 linkable person identifier, and a leak of any one database is unjoinable
 with any other.
 
@@ -10,24 +10,24 @@ Sunder is self-hosted: every organization runs its own instance and is the
 identity provider for its own contacts. There is no central party.
 
 > **Status**: feature-complete v1 with a GDPR layer and five SDKs; see
-> `docs/DESIGN.md` for the design rationale. Pre-1.0 — interfaces may
+> `docs/DESIGN.md` for the design rationale. Pre-1.0 - interfaces may
 > still move; review the threat model before production use.
 
 ## Why
 
 A national identifier (like the Croatian OIB) or a raw email/phone used as
-a database key is a permanent, universal join key — once leaked, it is
+a database key is a permanent, universal join key - once leaked, it is
 compromised forever. Sunder replaces it inside the organization:
 
-- **CID** — a random, per-scope pseudonym: CRM, billing and analytics each
+- **CID** - a random, per-scope pseudonym: CRM, billing and analytics each
   see a different CID for the same person; only Sunder can map between them.
-- **OTI** — a signed, single-use token bound to one purpose and one
+- **OTI** - a signed, single-use token bound to one purpose and one
   audience; the only identity currency systems exchange.
-- **Lookup** — find a contact by email/phone via keyed HMAC search tokens;
+- **Lookup** - find a contact by email/phone via keyed HMAC search tokens;
   the database stores no searchable PII. `LOOKUP != AUTHENTICATION`.
-- **Attributes** — PII lives encrypted in Sunder; systems fetch single
+- **Attributes** - PII lives encrypted in Sunder; systems fetch single
   fields on demand, purpose-checked and audited.
-- **Audit** — append-only hash chain, anchored daily to an RFC 3161
+- **Audit** - append-only hash chain, anchored daily to an RFC 3161
   timestamp authority: silent tampering is provable.
 
 ## Quick start
@@ -69,11 +69,11 @@ go run ./cmd/sunder serve
 ```
 
 Configuration is environment-only; see `docs/CONFIG.md` for the full
-`SUNDER_*` reference (deployment tunables — OTI TTL, PII encryption
-algorithm, webhook delivery caps — included). Documentation lives in `docs/`.
+`SUNDER_*` reference (deployment tunables - OTI TTL, PII encryption
+algorithm, webhook delivery caps - included). Documentation lives in `docs/`.
 
 Test coverage is gated at **>= 88%** in CI (currently ~90% across the
-server and CLI — the uncovered remainder is almost entirely defensive
+server and CLI - the uncovered remainder is almost entirely defensive
 branches for mid-transaction database failures); the SDKs carry their own
 mock-server suites (TS 18, Python 22, PHP 36, Java 29, .NET xunit), and the
 CI `e2e-demo` job boots the real stack and runs the narrated demo as a
@@ -86,5 +86,5 @@ threat model and architecture decisions are in `docs/`.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache-2.0 - see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 Contributions require a DCO sign-off (`git commit -s`).

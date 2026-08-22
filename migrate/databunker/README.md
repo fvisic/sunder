@@ -40,7 +40,7 @@ default 8), `-dry-run` (read and validate only),
 | `name`, or `first` + `last` | contact name (narrowing key + attribute) |
 | every other profile field | custom attribute (values stringified) |
 | user token | `databunker_token` attribute + a row in `mapping.csv` |
-| agreements / consents | **not migrated** — map them to Sunder consent purposes per your own legal analysis (`POST /v1/consent`) |
+| agreements / consents | **not migrated** - map them to Sunder consent purposes per your own legal analysis (`POST /v1/consent`) |
 
 Records with neither email nor phone cannot be registered (nothing
 searchable) and are reported as skipped. Re-running the migration is safe:
@@ -54,5 +54,5 @@ duplicated.
    resolve via `POST /v1/lookup` at need).
 2. Spot-check: `lookup` a few migrated emails/phones, fetch a few
    attributes.
-3. Decommission Databunker only after the mapping is applied everywhere —
+3. Decommission Databunker only after the mapping is applied everywhere -
    then delete `mapping.csv` copies (they are linkage material).

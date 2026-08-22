@@ -55,7 +55,7 @@ func OpenKeystore(cfg config.Config) crypto.Keystore {
 }
 
 // New builds the server, bootstraps key material (the strict keystore never
-// creates keys per request — see crypto.Keystore) and registers routes.
+// creates keys per request - see crypto.Keystore) and registers routes.
 func New(cfg config.Config, st *store.Store) (*Server, error) {
 	s := &Server{
 		Cfg:     cfg,
@@ -134,7 +134,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 func (s *Server) Handler() http.Handler { return s.instrument(s.mux) }
 
 // instrument logs each request and records metrics. Never logs bodies,
-// query strings or headers — they can carry PII (emails, phone numbers).
+// query strings or headers - they can carry PII (emails, phone numbers).
 func (s *Server) instrument(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()

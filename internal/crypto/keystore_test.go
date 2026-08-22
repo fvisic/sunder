@@ -206,7 +206,7 @@ func TestKeystoreCorruptAndVaultFailures(t *testing.T) {
 		t.Fatal("wrong-size key must error")
 	}
 	// Ensure with an existing wrong-size file regenerates cleanly is NOT
-	// wanted — it must overwrite? No: Ensure reads, sees wrong size, and
+	// wanted - it must overwrite? No: Ensure reads, sees wrong size, and
 	// regenerates via the lock path (len check fails -> writeKey).
 	if err := ks.Ensure(ctx, "hmac-email/v1"); err != nil {
 		t.Fatal(err)

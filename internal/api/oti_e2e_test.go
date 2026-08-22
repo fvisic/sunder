@@ -55,7 +55,7 @@ func TestOTIHandoffFlow(t *testing.T) {
 		t.Fatalf("verify: %d %s", rec.Code, rec.Body.String())
 	}
 	if out["cid"] == crmCID {
-		t.Fatal("verifier received the issuer's CID — scope boundary crossed")
+		t.Fatal("verifier received the issuer's CID - scope boundary crossed")
 	}
 
 	// Single use: the second verification must report token_used.
@@ -122,7 +122,7 @@ func TestOTIExpiredToken(t *testing.T) {
 		t.Fatal(rec.Code)
 	}
 	// Expire it in the database (the DB check fires even when the embedded
-	// exp claim would still pass — the row is the authority).
+	// exp claim would still pass - the row is the authority).
 	if _, err := e.srv.Store.Pool.Exec(context.Background(),
 		`UPDATE oti SET expires_at = now() - interval '1 second'`); err != nil {
 		t.Fatal(err)

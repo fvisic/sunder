@@ -1,11 +1,11 @@
-// Sunder .NET SDK — a thin client for the Sunder pseudonymous identity
+// Sunder .NET SDK - a thin client for the Sunder pseudonymous identity
 // provider (v1 API).
 //
 // Design rules (docs/DESIGN.md, SDK design rules):
 // - Zero cryptography here: transport, auth, timeouts, retries, error mapping.
 // - Zero dependencies beyond the BCL (System.Net.Http + System.Text.Json).
 // - Per-endpoint retry policy: lookups and IssueOtiAsync retry once on 5xx or
-//   network failure; VerifyOtiAsync is NEVER blind-retried (single-use token —
+//   network failure; VerifyOtiAsync is NEVER blind-retried (single-use token -
 //   a retry after an ambiguous network failure would legitimately return
 //   TokenUsed; that outcome is surfaced distinctly for the caller to decide).
 
@@ -65,7 +65,7 @@ public sealed record OtiResult(string Token, string ExpiresAt);
 /// interface (docs/DESIGN.md, SDK design rules). All methods throw a subclass of
 /// <see cref="SunderException" /> on failure.
 ///
-/// Remember: LOOKUP != AUTHENTICATION — a lookup hit never proves the caller
+/// Remember: LOOKUP != AUTHENTICATION - a lookup hit never proves the caller
 /// is talking to that person.
 /// </summary>
 public sealed class SunderClient : IDisposable
@@ -118,7 +118,7 @@ public sealed class SunderClient : IDisposable
     }
 
     /// <summary>
-    /// Issues the same person's CID in another scope. Linkage-capable —
+    /// Issues the same person's CID in another scope. Linkage-capable -
     /// grant sparingly; prefer OTIs for cross-system handoff.
     /// </summary>
     public async Task<string> IssueScopedCidAsync(string cid, string scope)
@@ -160,7 +160,7 @@ public sealed class SunderClient : IDisposable
     }
 
     /// <summary>
-    /// Finds a contact by name plus a second factor (email or phone) — a name
+    /// Finds a contact by name plus a second factor (email or phone) - a name
     /// alone is a narrowing key, never an identifier. Exactly the API's rule
     /// is enforced client-side: at least one of email/phone is required, or a
     /// <see cref="SunderValidationException" /> is thrown without any request.
@@ -241,7 +241,7 @@ public sealed class SunderClient : IDisposable
                 ["purpose"] = purpose,
                 ["audience"] = audience,
             }),
-            retryOnce: false).ConfigureAwait(false); // single-use token — see method doc
+            retryOnce: false).ConfigureAwait(false); // single-use token - see method doc
         return GetStringField(root, "cid");
     }
 

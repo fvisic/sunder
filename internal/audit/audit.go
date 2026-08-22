@@ -22,7 +22,7 @@ import (
 const appendLockKey = 0x53554E44 // "SUND"
 
 // Entry is one auditable action. Detail must never contain raw PII or raw
-// search tokens — callers pass identifiers and outcomes only.
+// search tokens - callers pass identifiers and outcomes only.
 type Entry struct {
 	ClientID string
 	Action   string
@@ -41,7 +41,7 @@ func canonical(prevHash string, ts time.Time, e Entry, detailJSON []byte) string
 }
 
 // AppendTx writes one chained record inside the caller's transaction, so a
-// business mutation and its audit record commit or roll back together —
+// business mutation and its audit record commit or roll back together -
 // the log can never record what did not happen, nor miss what did.
 func AppendTx(ctx context.Context, tx pgx.Tx, e Entry) error {
 	detailJSON, err := json.Marshal(e.Detail)

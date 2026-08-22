@@ -1,7 +1,7 @@
 // Command migrate-databunker moves user records from a Databunker instance
 // into Sunder.
 //
-// It pages through Databunker's admin list API (POST /v1/users — requires
+// It pages through Databunker's admin list API (POST /v1/users - requires
 // `list_users: true` under `generic:` in databunker.yaml), registers each
 // record as a Sunder contact (identifiers become searchable HMAC tokens,
 // everything else lands in the caller-scope encrypted attribute blob), and

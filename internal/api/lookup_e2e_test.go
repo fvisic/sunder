@@ -28,7 +28,7 @@ func TestLookupByEmailPhoneAndName(t *testing.T) {
 	}
 	cid := registerFilip(t, e)
 
-	// Email hit — formatting differences must not matter (normalization).
+	// Email hit - formatting differences must not matter (normalization).
 	rec, out := e.do(t, e.credCRM, "POST", "/v1/lookup", map[string]string{"email": " FILIP@Example.com "})
 	if rec.Code != 200 || out["cid"] != cid {
 		t.Fatalf("email lookup: %d %s", rec.Code, rec.Body.String())

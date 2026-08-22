@@ -65,7 +65,7 @@ type Authenticator struct {
 
 // Authenticate resolves "Bearer <client_id>.<secret>". The stored hash is
 // compared in constant time; the decoy compare below narrows (but cannot
-// fully close — the DB roundtrip differs) the timing gap between unknown
+// fully close - the DB roundtrip differs) the timing gap between unknown
 // ids and bad secrets. Client ids are not secrets; the secret is.
 func (a *Authenticator) Authenticate(ctx context.Context, authorization string) (*Client, bool) {
 	raw, ok := strings.CutPrefix(authorization, "Bearer ")

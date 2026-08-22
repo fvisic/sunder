@@ -1,8 +1,8 @@
-# Sunder demo — the call-center lookup flow
+# Sunder demo - the call-center lookup flow
 
 `callcenter.sh` is the M6 demo (decision D8): it walks the adoption-wedge
-adoption storyline — *"the national identifier out of the call-center/CRM lookup in
-30 days"* — end to end against a running stack, using nothing but `curl`
+adoption storyline - *"the national identifier out of the call-center/CRM lookup in
+30 days"* - end to end against a running stack, using nothing but `curl`
 and `python3` (no jq).
 
 Two clients play the roles:
@@ -14,24 +14,24 @@ Two clients play the roles:
 
 ## The storyline
 
-1. **Register** — a customer calls for the first time; the CRM registers
+1. **Register** - a customer calls for the first time; the CRM registers
    name, email, phone and a loyalty tier, and gets back a stable pseudonym
    (CID). No searchable PII key ever lands in the CRM database.
-2. **Lookup hit** — the customer calls again; the agent finds her by phone.
+2. **Lookup hit** - the customer calls again; the agent finds her by phone.
    The identifier is HMAC-tokenized server-side; the same CID comes back.
-3. **Attribute read** — the agent fetches exactly one field (`email`) and
+3. **Attribute read** - the agent fetches exactly one field (`email`) and
    must state a purpose (`support`). The read is audited.
-4. **Name-alone rejection** — `{"name": "..."}` is a 400: a name is a
+4. **Name-alone rejection** - `{"name": "..."}` is a 400: a name is a
    narrowing key, never an identifier. No fishing for "every Ana Horvat".
-5. **Miss** — a nonexistent email is a 404; misses feed the enumeration
+5. **Miss** - a nonexistent email is a 404; misses feed the enumeration
    detector, and past the per-client rate limit lookups become 429.
-6. **OTI issue** — the customer places an order; the CRM asks for a
+6. **OTI issue** - the customer places an order; the CRM asks for a
    one-time identifier addressed to the ERP (5 minutes, one use, one
    audience, one purpose).
-7. **OTI verify** — the ERP redeems the token and receives **its own**
+7. **OTI verify** - the ERP redeems the token and receives **its own**
    scoped CID. The script prints both pseudonyms side by side: they
    differ, so leaked CRM and ERP databases cannot be joined on them.
-8. **Replay** — verifying the same token again is a 409 `token_used`:
+8. **Replay** - verifying the same token again is a 409 `token_used`:
    single use is an atomic database transition, not just a signature.
 
 ## Running it
