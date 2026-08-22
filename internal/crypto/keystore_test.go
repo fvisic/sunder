@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 )
@@ -138,5 +139,32 @@ func TestFileKeystoreConcurrentEnsure(t *testing.T) {
 	}
 	if _, err := (&FileKeystore{Dir: dir}).Key(ctx, "race/v1"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCachingKeystoreServesFromMemory(t *testing.T) {
+	dir := t.TempDir()
+	inner := &FileKeystore{Dir: dir}
+	ks := NewCachingKeystore(inner)
+	ctx := context.Background()
+	if err := ks.Ensure(ctx, "hmac-email/v1"); err != nil {
+		t.Fatal(err)
+	}
+	k1, err := ks.Key(ctx, "hmac-email/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Remove the backing file: the cache must still serve the key (and this
+	// proves the hot path no longer touches the keystore).
+	if err := os.Remove(inner.path("hmac-email/v1")); err != nil {
+		t.Fatal(err)
+	}
+	k2, err := ks.Key(ctx, "hmac-email/v1")
+	if err != nil || string(k1) != string(k2) {
+		t.Fatalf("cache miss after file removal: %v", err)
+	}
+	// Uncached names still go through the strict inner keystore.
+	if _, err := ks.Key(ctx, "hmac-email/v9"); err == nil {
+		t.Fatal("uncached missing key must error")
 	}
 }

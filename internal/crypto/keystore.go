@@ -258,6 +258,44 @@ func (v *VaultKeystore) read(ctx context.Context, name string) ([]byte, error) {
 	return key, nil
 }
 
+// --- caching wrapper ---------------------------------------------------------
+
+// CachingKeystore memoizes key material in process memory. Safe because a
+// key NAME's material is immutable: rotation mints new versioned names and
+// retirement only stops a name from being requested (the keyring no longer
+// lists it) — existing material never changes. Removes per-request keystore
+// I/O (file reads / Vault round trips) from the hot path.
+type CachingKeystore struct {
+	Inner Keystore
+	mu    sync.RWMutex
+	keys  map[string][]byte
+}
+
+func NewCachingKeystore(inner Keystore) *CachingKeystore {
+	return &CachingKeystore{Inner: inner, keys: map[string][]byte{}}
+}
+
+func (c *CachingKeystore) Key(ctx context.Context, name string) ([]byte, error) {
+	c.mu.RLock()
+	k, ok := c.keys[name]
+	c.mu.RUnlock()
+	if ok {
+		return k, nil
+	}
+	k, err := c.Inner.Key(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.keys[name] = k
+	c.mu.Unlock()
+	return k, nil
+}
+
+func (c *CachingKeystore) Ensure(ctx context.Context, name string) error {
+	return c.Inner.Ensure(ctx, name)
+}
+
 // --- pkcs11 stub (decision D7) ----------------------------------------------
 
 // PKCS11Keystore is an interface stub until the first compliance-driven demand.

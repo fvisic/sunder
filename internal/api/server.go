@@ -36,16 +36,20 @@ type Server struct {
 	mux      *http.ServeMux
 }
 
-// OpenKeystore builds the configured keystore driver (decision D7).
+// OpenKeystore builds the configured keystore driver (decision D7), wrapped
+// in an in-memory cache (key material per name is immutable, so caching is
+// safe and keeps keystore I/O off the request hot path).
 func OpenKeystore(cfg config.Config) crypto.Keystore {
+	var inner crypto.Keystore
 	switch cfg.Keystore {
 	case "vault":
-		return &crypto.VaultKeystore{Addr: cfg.VaultAddr, Token: cfg.VaultToken, Mount: cfg.VaultMount}
+		inner = &crypto.VaultKeystore{Addr: cfg.VaultAddr, Token: cfg.VaultToken, Mount: cfg.VaultMount}
 	case "pkcs11":
-		return &crypto.PKCS11Keystore{}
+		inner = &crypto.PKCS11Keystore{}
 	default:
-		return &crypto.FileKeystore{Dir: cfg.KeystorePath}
+		inner = &crypto.FileKeystore{Dir: cfg.KeystorePath}
 	}
+	return crypto.NewCachingKeystore(inner)
 }
 
 // New builds the server, bootstraps key material (the strict keystore never
