@@ -7,7 +7,7 @@ in docs/DESIGN.md.
 | # | Threat | Mitigation in Sunder | Residual risk |
 |---|---|---|---|
 | 1 | Central identity provider becomes a super-target | No central party exists: one instance per organization (docs/DESIGN.md); scoped CIDs are unlinkable across organizations by construction | The instance is still the org's crown jewel - harden per the reference deployment (docs/DESIGN.md) |
-| 2 | HMAC lookup mistaken for anonymization; stolen key regenerates tokens | Keyed HMAC per attribute, material outside the DB (keystore; Vault driver), strict no-mint keystore, dual-key rotation (`sunder keys rotate`), re-key on touch | KEK compromise: rotate + re-key; keys in RAM are readable by a compromised process (see the supply-chain notes in docs/DESIGN.md) |
+| 2 | HMAC lookup mistaken for anonymization; stolen key regenerates tokens | Keyed HMAC per attribute, material outside the DB (keystore; Vault driver), strict no-mint keystore, dual-key rotation (`sunder keys rotate`), re-key on touch | KEK compromise: rotate + re-key; keys in RAM: run the signer split (`SUNDER_SIGNER_SOCKET`) so the API process never holds key material; the supply-chain notes in docs/DESIGN.md still apply to the signer |
 | 3 | Lookup API enables enumeration (dialing numbers to see what exists) | Per-client sliding-window rate limits (429), miss counter + enumeration warning at 100 misses/10 min, every lookup audited, `LOOKUP != AUTHENTICATION` doctrine | A patient attacker under the limit; alerting must be watched |
 | 4 | Name matches too many people | Name alone rejected (400); name is only a narrowing key beside email/phone | - |
 | 5 | Social engineering of staff | Out of technical scope; audit chain makes every employee lookup attributable and tamper-evident, which deters and proves | Process controls remain the org's job |
@@ -28,7 +28,7 @@ in docs/DESIGN.md.
 | Stolen bearer credential | Only that client's actions/purposes/rate, fully audited | `allowed_actions`/`allowed_purposes`, rate limits, enumeration detection |
 | Network attacker replaying an OTI | Nothing: single-use CAS, 5-minute TTL, audience+purpose binding | Atomic VALID->USED; PASETO v4 signature |
 | Insider/DBA rewriting history | Chain break at a provable position; a full-chain rewrite orphans TSA anchors, and deleted anchor rows are exposed by the exported `.tsr` files | Hash chain + append-only triggers on `audit` AND `audit_anchor` + RFC 3161 anchoring **with off-host export**: `sunder anchor -out <dir>` and sync that directory to write-once storage the DB attacker cannot reach; `sunder verify-audit -anchors <dir>` cross-checks. Anchors kept only in the database are circular and defeat nobody privileged. |
-| Compromised service process | Working keys in RAM - game over for that instance's crypto | The honest limit: minimize dependencies, consider a process split (future work), Vault audit trail for key access |
+| Compromised service process | Working keys in RAM - game over for that instance's crypto | Mitigated by the P2.1 signer split (`SUNDER_SIGNER_SOCKET`): the API process holds no keys, only a six-operation socket; a compromised API process can still USE operations at rate, which the audit chain and rate limits bound. The signer itself stays the honest limit: minimal deps, no network, Vault audit trail |
 
 ## Deliberate non-goals
 

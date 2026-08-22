@@ -145,8 +145,7 @@ func TestKeyRotationKeepsLookupAndDedupWorking(t *testing.T) {
 
 	// Rotate the email HMAC key; the keyring cache is refreshed by Rotate.
 	ring := e.srv.Contacts.Ring
-	ks := OpenKeystore(e.srv.Cfg)
-	if v, err := ring.Rotate(ctx, ks, "hmac-email"); err != nil || v != "v2" {
+	if v, err := ring.Rotate(ctx, OpenEngine(e.srv.Cfg), "hmac-email"); err != nil || v != "v2" {
 		t.Fatalf("rotate: %v %v", v, err)
 	}
 
@@ -177,7 +176,7 @@ func TestKeyRotationKeepsLookupAndDedupWorking(t *testing.T) {
 
 func TestKeyRingUnknownKind(t *testing.T) {
 	e := newE2E(t)
-	if _, err := e.srv.Contacts.Ring.Rotate(context.Background(), OpenKeystore(e.srv.Cfg), "nope"); err == nil {
+	if _, err := e.srv.Contacts.Ring.Rotate(context.Background(), OpenEngine(e.srv.Cfg), "nope"); err == nil {
 		t.Fatal("unknown kind must be rejected")
 	}
 	if _, err := e.srv.Contacts.Ring.Versions(context.Background(), "nope"); err == nil {

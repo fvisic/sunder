@@ -54,6 +54,17 @@ func OpenKeystore(cfg config.Config) crypto.Keystore {
 	return crypto.NewCachingKeystore(inner)
 }
 
+// OpenEngine returns the crypto engine for cfg: a RemoteEngine speaking to
+// the `sunder signer` process when SUNDER_SIGNER_SOCKET is set (the main
+// process then never holds key material), otherwise an in-process
+// LocalEngine over the configured keystore.
+func OpenEngine(cfg config.Config) crypto.Engine {
+	if cfg.SignerSocket != "" {
+		return crypto.NewRemoteEngine(cfg.SignerSocket)
+	}
+	return crypto.NewLocalEngine(OpenKeystore(cfg))
+}
+
 // New builds the server, bootstraps key material (the strict keystore never
 // creates keys per request - see crypto.Keystore) and registers routes.
 func New(cfg config.Config, st *store.Store) (*Server, error) {
@@ -88,17 +99,17 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 	s.mux.Handle("GET /metrics", metricsHandler)
 
 	if st != nil {
-		ks := OpenKeystore(cfg)
+		eng := OpenEngine(cfg)
 		ring := &service.KeyRing{Pool: st.Pool}
 		// Bootstrap/rotation is the ONLY place key material comes into
 		// existence (the keystore itself is strict).
-		if err := ring.EnsureAll(context.Background(), ks); err != nil {
+		if err := ring.EnsureAll(context.Background(), eng); err != nil {
 			return nil, fmt.Errorf("keystore bootstrap: %w", err)
 		}
-		pii := crypto.NewPIIBox(ks)
+		pii := crypto.NewPIIBox(eng)
 		pii.Alg = cfg.PIIAlg
-		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: pii, Ring: ring}
-		s.OTI = &service.OTI{Pool: st.Pool, KS: ks, Ring: ring, Contacts: s.Contacts, TTL: cfg.OTITTL}
+		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: pii, Ring: ring}
+		s.OTI = &service.OTI{Pool: st.Pool, Eng: eng, Ring: ring, Contacts: s.Contacts, TTL: cfg.OTITTL}
 		s.GDPR = &service.GDPR{Pool: st.Pool, Contacts: s.Contacts,
 			HTTPTimeout: cfg.WebhookTimeout, MaxAttempts: cfg.WebhookMaxAttempts}
 		s.Auth = &auth.Authenticator{Pool: st.Pool}

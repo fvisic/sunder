@@ -39,6 +39,12 @@ metrics:
   # Optional bearer token protecting /metrics (key SUNDER_METRICS_TOKEN).
   existingSecret: ""
 
+# P2.1 signer split: run all cryptography in a sidecar that is the only
+# holder of key material; the main container then never sees keys. The
+# sidecar shares an emptyDir socket volume and runs with no service ports.
+signer:
+  enabled: false
+
 # Deployment tunables (docs/CONFIG.md). Empty = server default. These are
 # security trade-offs, not preferences - read the docs before changing.
 tunables:

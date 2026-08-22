@@ -1,0 +1,40 @@
+# P2.1 signer split overlay: run all cryptography in a dedicated container
+# that is the only holder of key material. The main container talks to it
+# over a shared Unix socket and never sees keys.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.signer.yml up
+#
+# Note: compose overlays cannot REMOVE the keystore mount the base file
+# gives the main container, so this overlay demonstrates the wiring; the
+# real security boundary needs the Helm sidecar (signer.enabled=true) or
+# separate hosts, where the main process genuinely has no keystore access.
+services:
+  sunder:
+    environment:
+      SUNDER_SIGNER_SOCKET: /signer/signer.sock
+    volumes:
+      - signer-socket:/signer
+    depends_on:
+      signer:
+        condition: service_started
+
+  signer:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: runtime
+    command: ["signer", "-socket", "/signer/signer.sock"]
+    environment:
+      SUNDER_KEYSTORE: file
+      SUNDER_KEYSTORE_PATH: /keystore
+    volumes:
+      - signer-socket:/signer
+      - keystore:/keystore
+    # The signer needs no network at all; nothing should be able to reach
+    # it except through the socket volume.
+    network_mode: none
+    restart: unless-stopped
+
+volumes:
+  signer-socket:
+  keystore:

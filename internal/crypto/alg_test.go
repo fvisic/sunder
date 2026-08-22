@@ -72,7 +72,7 @@ func TestCrossAlgorithmConfusionFails(t *testing.T) {
 	if _, err := aes.Decrypt(ctx, "CID-A", aesBlob, "v1", "rot13"); err == nil {
 		t.Fatal("unknown algorithm must error")
 	}
-	if _, err := (&PIIBox{ks: ks, Alg: "rot13"}).Encrypt(ctx, "CID-A", "v1", attrs); err == nil {
+	if _, err := (&PIIBox{eng: ks, Alg: "rot13"}).Encrypt(ctx, "CID-A", "v1", attrs); err == nil {
 		t.Fatal("encrypt with unknown algorithm must error")
 	}
 }

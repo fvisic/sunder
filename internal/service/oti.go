@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,7 +36,7 @@ const OTITTL = 5 * time.Minute
 // transition (not just the signature).
 type OTI struct {
 	Pool     *pgxpool.Pool
-	KS       crypto.Keystore
+	Eng      crypto.Engine
 	Ring     *KeyRing
 	Contacts *Contacts
 	// TTL overrides the token lifetime; zero means OTITTL.
@@ -59,14 +58,6 @@ type otiClaims struct {
 	IssuedAt string `json:"iat"`
 	Expires  string `json:"exp"`
 	KeyID    string `json:"kid"`
-}
-
-func (o *OTI) signingKey(ctx context.Context, version string) (ed25519.PrivateKey, ed25519.PublicKey, error) {
-	seed, err := o.KS.Key(ctx, crypto.SigningKeyName+"/"+version)
-	if err != nil {
-		return nil, nil, err
-	}
-	return crypto.Ed25519FromSeed(seed)
 }
 
 // Issue mints a token for a CID of the caller's own scope, addressed to one
@@ -103,11 +94,6 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	sk, _, err := o.signingKey(ctx, version)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-
 	now := time.Now().UTC()
 	expiresAt = now.Add(o.ttl())
 	claims := otiClaims{
@@ -118,7 +104,10 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	token = crypto.PasetoSign(sk, payload)
+	token, err = o.Eng.Sign(ctx, crypto.SigningKeyName+"/"+version, payload)
+	if err != nil {
+		return "", time.Time{}, err
+	}
 
 	// Row + audit in one transaction: an issued token always has both.
 	tx, err := o.Pool.Begin(ctx)
@@ -198,11 +187,7 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 			return "", ErrTokenInvalid
 		}
 	}
-	_, pk, err := o.signingKey(ctx, claims.KeyID)
-	if err != nil {
-		return "", err
-	}
-	if _, err := crypto.PasetoVerify(pk, token); err != nil {
+	if _, err := o.Eng.VerifyToken(ctx, crypto.SigningKeyName+"/"+claims.KeyID, token); err != nil {
 		return "", ErrTokenInvalid
 	}
 	if claims.Audience != audience {

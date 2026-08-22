@@ -2,7 +2,6 @@ package crypto
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
@@ -22,22 +21,21 @@ const (
 	KeyPIIKEK    = "pii-kek"
 )
 
-// Tokenizer computes keyed-HMAC search tokens. Separate keys per attribute
-// mean a leak of one key never enables dictionary attacks on the others.
+// Tokenizer computes keyed-HMAC search tokens through the Engine boundary -
+// it never sees key material. Separate keys per attribute mean a leak of one
+// key never enables dictionary attacks on the others.
 type Tokenizer struct {
-	ks Keystore
+	eng Engine
 }
 
-func NewTokenizer(ks Keystore) *Tokenizer { return &Tokenizer{ks: ks} }
+func NewTokenizer(eng Engine) *Tokenizer { return &Tokenizer{eng: eng} }
 
 func (t *Tokenizer) token(ctx context.Context, keyName, version, normalized string) (string, error) {
-	key, err := t.ks.Key(ctx, keyName+"/"+version)
+	sum, err := t.eng.MAC(ctx, keyName+"/"+version, []byte(normalized))
 	if err != nil {
 		return "", err
 	}
-	m := hmac.New(sha256.New, key)
-	m.Write([]byte(normalized))
-	return hex.EncodeToString(m.Sum(nil)), nil
+	return hex.EncodeToString(sum), nil
 }
 
 // EmailToken/PhoneToken/NameToken take ALREADY-NORMALIZED input and a key

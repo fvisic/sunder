@@ -2,12 +2,7 @@ package crypto
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"encoding/json"
-	"fmt"
-
-	"golang.org/x/crypto/chacha20poly1305"
 )
 
 // Supported PII encryption algorithms. Every blob's algorithm is stored
@@ -38,13 +33,13 @@ func KnownAlg(alg string) bool {
 // a key-id or algorithm downgrade is equally detectable. Legacy AES-256-GCM
 // blobs keep the original two-part AAD so pre-existing data stays readable.
 type PIIBox struct {
-	ks Keystore
+	eng Engine
 	// Alg is the algorithm used for NEW blobs; empty means AlgAES256GCM.
 	// Reads always follow the algorithm stored with the blob.
 	Alg string
 }
 
-func NewPIIBox(ks Keystore) *PIIBox { return &PIIBox{ks: ks} }
+func NewPIIBox(eng Engine) *PIIBox { return &PIIBox{eng: eng} }
 
 // Algorithm returns the algorithm this box writes with.
 func (p *PIIBox) Algorithm() string {
@@ -52,25 +47,6 @@ func (p *PIIBox) Algorithm() string {
 		return AlgAES256GCM
 	}
 	return p.Alg
-}
-
-func (p *PIIBox) aead(ctx context.Context, alg, keyID string) (cipher.AEAD, error) {
-	key, err := p.ks.Key(ctx, KeyPIIKEK+"/"+keyID)
-	if err != nil {
-		return nil, err
-	}
-	switch alg {
-	case AlgAES256GCM, "":
-		block, err := aes.NewCipher(key)
-		if err != nil {
-			return nil, err
-		}
-		return cipher.NewGCM(block)
-	case AlgXChaCha20:
-		return chacha20poly1305.NewX(key)
-	default:
-		return nil, fmt.Errorf("pii: unknown algorithm %q", alg)
-	}
 }
 
 func aad(boundTo, keyID, alg string) []byte {
@@ -87,34 +63,19 @@ func aad(boundTo, keyID, alg string) []byte {
 // the blob so rotation and algorithm migration can decrypt old rows.
 func (p *PIIBox) Encrypt(ctx context.Context, boundTo, keyID string, attrs map[string]string) (blob []byte, err error) {
 	alg := p.Algorithm()
-	g, err := p.aead(ctx, alg, keyID)
-	if err != nil {
-		return nil, err
-	}
 	plain, err := json.Marshal(attrs)
 	if err != nil {
 		return nil, err
 	}
-	nonce := make([]byte, g.NonceSize())
-	if _, err := randRead(nonce); err != nil {
-		return nil, err
-	}
-	return g.Seal(nonce, nonce, plain, aad(boundTo, keyID, alg)), nil
+	return p.eng.Seal(ctx, KeyPIIKEK+"/"+keyID, alg, aad(boundTo, keyID, alg), plain)
 }
 
 // Decrypt opens a blob produced by Encrypt for the same boundTo/keyID/alg.
 // alg is the algorithm STORED with the blob, not the configured one.
 func (p *PIIBox) Decrypt(ctx context.Context, boundTo string, blob []byte, keyID, alg string) (map[string]string, error) {
-	g, err := p.aead(ctx, alg, keyID)
+	plain, err := p.eng.Open(ctx, KeyPIIKEK+"/"+keyID, alg, aad(boundTo, keyID, alg), blob)
 	if err != nil {
 		return nil, err
-	}
-	if len(blob) < g.NonceSize() {
-		return nil, fmt.Errorf("pii blob too short")
-	}
-	plain, err := g.Open(nil, blob[:g.NonceSize()], blob[g.NonceSize():], aad(boundTo, keyID, alg))
-	if err != nil {
-		return nil, fmt.Errorf("pii decrypt: %w", err)
 	}
 	var attrs map[string]string
 	if err := json.Unmarshal(plain, &attrs); err != nil {

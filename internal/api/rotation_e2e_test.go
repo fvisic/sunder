@@ -46,7 +46,7 @@ func TestOTISigningKeyRotationDualWindow(t *testing.T) {
 		t.Fatal(rec.Code)
 	}
 	// Rotate oti-sign; v1 becomes RETIRING but stays live for verification.
-	if _, err := e.srv.Contacts.Ring.Rotate(ctx, OpenKeystore(e.srv.Cfg), "oti-sign"); err != nil {
+	if _, err := e.srv.Contacts.Ring.Rotate(ctx, OpenEngine(e.srv.Cfg), "oti-sign"); err != nil {
 		t.Fatal(err)
 	}
 	rec, out := e.do(t, credERP, "POST", "/v1/oti/verify", map[string]string{
@@ -169,7 +169,7 @@ func TestPIIKekRotationReEncryptsOnTouch(t *testing.T) {
 		t.Fatal(rec.Code)
 	}
 	cid := out["cid"]
-	if _, err := e.srv.Contacts.Ring.Rotate(ctx, OpenKeystore(e.srv.Cfg), "pii-kek"); err != nil {
+	if _, err := e.srv.Contacts.Ring.Rotate(ctx, OpenEngine(e.srv.Cfg), "pii-kek"); err != nil {
 		t.Fatal(err)
 	}
 	// Old blob (v1) still readable after rotation.
@@ -241,9 +241,9 @@ func TestRekeyCompletesRotation(t *testing.T) {
 	ctx := context.Background()
 	grantLookup(t, e, "crm")
 	cid := registerFilip(t, e)
-	ks := OpenKeystore(e.srv.Cfg)
+	eng := OpenEngine(e.srv.Cfg)
 	for _, kind := range []string{"hmac-email", "hmac-phone", "hmac-name", "pii-kek"} {
-		if _, err := e.srv.Contacts.Ring.Rotate(ctx, ks, kind); err != nil {
+		if _, err := e.srv.Contacts.Ring.Rotate(ctx, eng, kind); err != nil {
 			t.Fatal(err)
 		}
 	}

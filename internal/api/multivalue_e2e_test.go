@@ -125,7 +125,7 @@ func TestRetirePurgesTokenRows(t *testing.T) {
 	if rec.Code != 201 {
 		t.Fatal(rec.Code)
 	}
-	if _, err := e.srv.Contacts.Ring.Rotate(ctx, OpenKeystore(e.srv.Cfg), "hmac-email"); err != nil {
+	if _, err := e.srv.Contacts.Ring.Rotate(ctx, OpenEngine(e.srv.Cfg), "hmac-email"); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.srv.Contacts.Ring.Retire(ctx, "hmac-email", "v1"); err != nil {

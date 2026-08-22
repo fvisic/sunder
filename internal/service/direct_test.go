@@ -334,7 +334,7 @@ func TestVerifyAfterSigningKeyRotation(t *testing.T) {
 	}
 	// Rotate the OTI signing key out from under the cached ring.
 	adminRing := &service.KeyRing{Pool: e.admin.Pool}
-	if _, err := adminRing.Rotate(ctx, e.oti.KS, "oti-sign"); err != nil {
+	if _, err := adminRing.Rotate(ctx, e.oti.Eng, "oti-sign"); err != nil {
 		t.Fatal(err)
 	}
 	fresh := e.adminOTI()

@@ -23,6 +23,7 @@ type Config struct {
 	VaultAddr    string // SUNDER_VAULT_ADDR
 	VaultToken   string // SUNDER_VAULT_TOKEN
 	VaultMount   string // SUNDER_VAULT_MOUNT: KV v2 mount, default "secret"
+	SignerSocket string // SUNDER_SIGNER_SOCKET: when set, all crypto runs in a separate `sunder signer` process on this Unix socket; this process never holds key material
 	TSAURL       string // SUNDER_TSA_URL; the freetsa.org default suits pilots - production should point at a qualified or internal TSA
 	MetricsToken string // SUNDER_METRICS_TOKEN: when set, /metrics requires this bearer token (per-client counters reveal client ids and activity)
 	TSACA        string // SUNDER_TSA_CACERT: TSA root CA bundle; falls back to the vendored deploy/freetsa/cacert.pem when present
@@ -64,6 +65,19 @@ func getdur(key, def string, min, max time.Duration) (time.Duration, error) {
 
 // FromEnv builds a Config from the environment, validating required values.
 func FromEnv() (Config, error) {
+	c, err := FromEnvNoDB()
+	if err != nil {
+		return c, err
+	}
+	if c.DBURL == "" {
+		return c, fmt.Errorf("SUNDER_DB_URL is required")
+	}
+	return c, nil
+}
+
+// FromEnvNoDB is FromEnv without the database requirement - for the signer
+// process, which holds keys and must never need database credentials.
+func FromEnvNoDB() (Config, error) {
 	c := Config{
 		DBURL:           os.Getenv("SUNDER_DB_URL"),
 		Listen:          getenv("SUNDER_LISTEN", ":8080"),
@@ -75,6 +89,7 @@ func FromEnv() (Config, error) {
 		VaultAddr:       os.Getenv("SUNDER_VAULT_ADDR"),
 		VaultToken:      os.Getenv("SUNDER_VAULT_TOKEN"),
 		VaultMount:      getenv("SUNDER_VAULT_MOUNT", "secret"),
+		SignerSocket:    os.Getenv("SUNDER_SIGNER_SOCKET"),
 		TSAURL:          getenv("SUNDER_TSA_URL", "https://freetsa.org/tsr"),
 		MetricsToken:    os.Getenv("SUNDER_METRICS_TOKEN"),
 		TSACA:           os.Getenv("SUNDER_TSA_CACERT"),
@@ -82,9 +97,6 @@ func FromEnv() (Config, error) {
 		RedisAddr:       os.Getenv("SUNDER_REDIS_ADDR"),
 		RedisPassword:   os.Getenv("SUNDER_REDIS_PASSWORD"),
 		RedisFailClosed: os.Getenv("SUNDER_REDIS_FAIL_CLOSED") == "true",
-	}
-	if c.DBURL == "" {
-		return c, fmt.Errorf("SUNDER_DB_URL is required")
 	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		return c, fmt.Errorf("SUNDER_TLS_CERT and SUNDER_TLS_KEY must be set together")

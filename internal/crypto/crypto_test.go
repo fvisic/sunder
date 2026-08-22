@@ -21,7 +21,9 @@ func (a *autoKS) Key(ctx context.Context, name string) ([]byte, error) {
 }
 func (a *autoKS) Ensure(ctx context.Context, name string) error { return a.inner.Ensure(ctx, name) }
 
-func fileKS(t *testing.T) Keystore { return &autoKS{inner: &FileKeystore{Dir: t.TempDir()}} }
+func fileKS(t *testing.T) Engine {
+	return NewLocalEngine(&autoKS{inner: &FileKeystore{Dir: t.TempDir()}})
+}
 
 func TestNormalizeEmail(t *testing.T) {
 	for in, want := range map[string]string{
@@ -228,7 +230,7 @@ func (shortKS) Ensure(context.Context, string) error        { return nil }
 
 func TestPIIBoxRejectsBadKeyMaterial(t *testing.T) {
 	ctx := context.Background()
-	box := NewPIIBox(shortKS{})
+	box := NewPIIBox(NewLocalEngine(shortKS{}))
 	if _, err := box.Encrypt(ctx, "CID-A", "v1", map[string]string{"a": "b"}); err == nil {
 		t.Fatal("encrypt with a 4-byte KEK must error")
 	}

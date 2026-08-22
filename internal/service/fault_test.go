@@ -37,9 +37,9 @@ func newFaultEnv(t *testing.T, deny ...string) *faultEnv {
 	st := testutil.NewDB(t)
 	ctx := context.Background()
 
-	ks := crypto.NewCachingKeystore(&crypto.FileKeystore{Dir: t.TempDir()})
+	eng := crypto.NewLocalEngine(crypto.NewCachingKeystore(&crypto.FileKeystore{Dir: t.TempDir()}))
 	adminRing := &service.KeyRing{Pool: st.Pool}
-	if err := adminRing.EnsureAll(ctx, ks); err != nil {
+	if err := adminRing.EnsureAll(ctx, eng); err != nil {
 		t.Fatal(err)
 	}
 
@@ -75,11 +75,11 @@ func newFaultEnv(t *testing.T, deny ...string) *faultEnv {
 	t.Cleanup(pool.Close)
 
 	ring := &service.KeyRing{Pool: pool}
-	contacts := &service.Contacts{Pool: pool, Tok: crypto.NewTokenizer(ks), PII: crypto.NewPIIBox(ks), Ring: ring}
+	contacts := &service.Contacts{Pool: pool, Tok: crypto.NewTokenizer(eng), PII: crypto.NewPIIBox(eng), Ring: ring}
 	return &faultEnv{
 		admin: st,
 		svc:   contacts,
-		oti:   &service.OTI{Pool: pool, KS: ks, Ring: ring, Contacts: contacts},
+		oti:   &service.OTI{Pool: pool, Eng: eng, Ring: ring, Contacts: contacts},
 		gdpr:  &service.GDPR{Pool: pool, Contacts: contacts},
 		crm: &auth.Client{ID: "crm", Scope: "crm",
 			AllowedActions: []string{auth.ActContactsRegister, auth.ActLookup, auth.ActOTIIssue,
@@ -119,7 +119,7 @@ func (e *faultEnv) register(t *testing.T) string {
 func (e *faultEnv) adminOTI() *service.OTI {
 	ring := &service.KeyRing{Pool: e.admin.Pool}
 	contacts := &service.Contacts{Pool: e.admin.Pool, Tok: e.svc.Tok, PII: e.svc.PII, Ring: ring}
-	return &service.OTI{Pool: e.admin.Pool, KS: e.oti.KS, Ring: ring, Contacts: contacts}
+	return &service.OTI{Pool: e.admin.Pool, Eng: e.oti.Eng, Ring: ring, Contacts: contacts}
 }
 
 func TestAuditDeniedBlocksEveryFlow(t *testing.T) {
@@ -239,18 +239,18 @@ func TestRekeyAndRetentionFaults(t *testing.T) {
 func TestKeyringFaults(t *testing.T) {
 	ctx := context.Background()
 	e := newFaultEnv(t, "keys")
-	ks := crypto.NewCachingKeystore(&crypto.FileKeystore{Dir: t.TempDir()})
+	eng2 := crypto.NewLocalEngine(crypto.NewCachingKeystore(&crypto.FileKeystore{Dir: t.TempDir()}))
 	ring := &service.KeyRing{Pool: e.svc.Pool}
 	if _, err := ring.Newest(ctx, "hmac-email"); err == nil {
 		t.Fatal("newest must fail when the keys table is unreadable")
 	}
-	if _, err := ring.Rotate(ctx, ks, "hmac-email"); err == nil {
+	if _, err := ring.Rotate(ctx, eng2, "hmac-email"); err == nil {
 		t.Fatal("rotate must fail when the keys table is unreadable")
 	}
 	if err := ring.Retire(ctx, "hmac-email", "v1"); err == nil {
 		t.Fatal("retire must fail when the keys table is unwritable")
 	}
-	if err := ring.EnsureAll(ctx, ks); err == nil {
+	if err := ring.EnsureAll(ctx, eng2); err == nil {
 		t.Fatal("ensure-all must fail when the keys table is unreadable")
 	}
 }

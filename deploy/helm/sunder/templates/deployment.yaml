@@ -34,13 +34,33 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: {drop: [ALL]}
           volumeMounts:
+            {{- if .Values.signer.enabled }}
+            - {name: signer-socket, mountPath: /signer}
+            {{- end }}
             {{- if .Values.tls.enabled }}
             - {name: tls, mountPath: /tls, readOnly: true}
             {{- if .Values.tls.mtlsSecretName }}
             - {name: mtls, mountPath: /mtls, readOnly: true}
             {{- end }}
             {{- end }}
+        {{- if .Values.signer.enabled }}
+        - name: signer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          args: ["signer", "-socket", "/signer/signer.sock"]
+          env: {{- include "sunder.signerEnv" . | nindent 12 }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: signer-socket, mountPath: /signer}
+        {{- end }}
       volumes:
+        {{- if .Values.signer.enabled }}
+        - name: signer-socket
+          emptyDir: {medium: Memory}
+        {{- end }}
         {{- if .Values.tls.enabled }}
         - name: tls
           secret: {secretName: {{ .Values.tls.secretName }}}

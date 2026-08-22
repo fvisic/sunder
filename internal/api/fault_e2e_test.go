@@ -18,14 +18,15 @@ import (
 // token computation and every decrypt fails.
 func brokenContacts(t *testing.T, e *e2eEnv) (*service.Contacts, *service.OTI) {
 	t.Helper()
-	empty := &crypto.FileKeystore{Dir: t.TempDir()} // strict: no keys, no minting
+	// strict: no keys, no minting
+	empty := crypto.NewLocalEngine(&crypto.FileKeystore{Dir: t.TempDir()})
 	c := &service.Contacts{
 		Pool: e.srv.Store.Pool,
 		Tok:  crypto.NewTokenizer(empty),
 		PII:  crypto.NewPIIBox(empty),
 		Ring: e.srv.Contacts.Ring,
 	}
-	o := &service.OTI{Pool: e.srv.Store.Pool, KS: empty, Ring: e.srv.Contacts.Ring, Contacts: c}
+	o := &service.OTI{Pool: e.srv.Store.Pool, Eng: empty, Ring: e.srv.Contacts.Ring, Contacts: c}
 	return c, o
 }
 
@@ -147,7 +148,7 @@ func TestDeadPoolFailsClosedEverywhere(t *testing.T) {
 	if _, err := svc.Rekey(ctx, true, 10); err == nil {
 		t.Fatal("rekey on dead pool")
 	}
-	if _, err := svc.Ring.Rotate(ctx, OpenKeystore(e.srv.Cfg), "hmac-email"); err == nil {
+	if _, err := svc.Ring.Rotate(ctx, OpenEngine(e.srv.Cfg), "hmac-email"); err == nil {
 		t.Fatal("rotate on dead pool")
 	}
 	if err := svc.Ring.Retire(ctx, "hmac-email", "v1"); err == nil {

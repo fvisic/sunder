@@ -45,15 +45,25 @@ func main() {
 
 func run(cmd string, args []string) error {
 	switch cmd {
-	case "serve", "migrate", "client", "keys", "anchor", "verify-audit", "webhook", "retention", "dsr":
+	case "serve", "migrate", "client", "keys", "anchor", "verify-audit", "webhook", "retention", "dsr", "signer":
 	default:
 		// Fail on typos before requiring config or a live database.
-		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr)", cmd)
+		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr, signer)", cmd)
 	}
 
 	ctx, stop := signalContext()
 	defer stop()
 
+	// The signer needs the keystore, never the database: it is the sole
+	// key-material holder in split mode and exposes six operations over a
+	// local Unix socket (P2.1).
+	if cmd == "signer" {
+		cfg, err := config.FromEnvNoDB()
+		if err != nil {
+			return err
+		}
+		return signerCmd(ctx, cfg, args)
+	}
 	cfg, err := config.FromEnv()
 	if err != nil {
 		return err
@@ -378,7 +388,7 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		if *kind == "" {
 			return fmt.Errorf("-kind is required")
 		}
-		version, err := ring.Rotate(ctx, api.OpenKeystore(cfg), *kind)
+		version, err := ring.Rotate(ctx, api.OpenEngine(cfg), *kind)
 		if err != nil {
 			return err
 		}
@@ -415,14 +425,14 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		ks := api.OpenKeystore(cfg)
+		eng := api.OpenEngine(cfg)
 		ring := &service.KeyRing{Pool: st.Pool}
-		if err := ring.EnsureAll(ctx, ks); err != nil {
+		if err := ring.EnsureAll(ctx, eng); err != nil {
 			return err
 		}
-		pii := crypto.NewPIIBox(ks)
+		pii := crypto.NewPIIBox(eng)
 		pii.Alg = cfg.PIIAlg
-		contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: pii, Ring: ring}
+		contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: pii, Ring: ring}
 		stats, err := contacts.Rekey(ctx, *reenc, *batch)
 		if err != nil {
 			return err
@@ -513,4 +523,21 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// signerCmd runs the key-holding signer process (P2.1 split). It serves the
+// six-operation engine protocol on a local Unix socket; the main process
+// (started with SUNDER_SIGNER_SOCKET pointing here) then never holds keys.
+func signerCmd(ctx context.Context, cfg config.Config, args []string) error {
+	fs := flag.NewFlagSet("signer", flag.ContinueOnError)
+	socket := fs.String("socket", cfg.SignerSocket, "unix socket path to serve on")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *socket == "" {
+		return fmt.Errorf("signer: -socket or SUNDER_SIGNER_SOCKET required")
+	}
+	eng := crypto.NewLocalEngine(api.OpenKeystore(cfg))
+	fmt.Printf("sunder signer: serving %s (keystore: %s)\n", *socket, cfg.Keystore)
+	return crypto.ServeSigner(ctx, *socket, eng)
 }

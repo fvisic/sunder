@@ -22,6 +22,7 @@ sets none of the new variables behaves identically after an upgrade.
 | `SUNDER_KEYSTORE_PATH` | `./keystore` | Key directory for the `file` driver. |
 | `SUNDER_VAULT_ADDR` / `SUNDER_VAULT_TOKEN` | - | Required for the `vault` driver (KV v2). |
 | `SUNDER_VAULT_MOUNT` | `secret` | KV v2 mount point. |
+| `SUNDER_SIGNER_SOCKET` | - | When set, ALL cryptography runs in a separate `sunder signer` process reachable on this Unix socket; this process then never holds key material and needs no keystore configuration. The signer is started with `sunder signer -socket <path>` and needs the keystore variables but no database. See the signer split section in `docs/ARCHITECTURE.md`. |
 
 ## Audit anchoring
 

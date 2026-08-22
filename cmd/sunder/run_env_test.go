@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/testutil"
 )
 
@@ -105,5 +107,52 @@ func TestRunDispatchesOpsCommands(t *testing.T) {
 	t.Setenv("SUNDER_TSA_URL", "http://tsa.invalid/x")
 	if err := run("anchor", nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The signer subcommand needs the keystore, never the database.
+func TestRunSignerWithoutDB(t *testing.T) {
+	t.Setenv("SUNDER_DB_URL", "")
+	t.Setenv("SUNDER_KEYSTORE_PATH", t.TempDir())
+
+	// Missing socket: specific error, not a DB complaint.
+	if err := run("signer", nil); err == nil || !strings.Contains(err.Error(), "socket") {
+		t.Fatalf("signer without a socket must say so: %v", err)
+	}
+
+	// With a socket it serves until the signal context is cancelled.
+	dir, err := os.MkdirTemp("", "sgn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := dir + "/s.sock"
+	ctx, cancel := context.WithCancel(context.Background())
+	old := signalContext
+	signalContext = func() (context.Context, context.CancelFunc) { return ctx, cancel }
+	t.Cleanup(func() { signalContext = old })
+	done := make(chan error, 1)
+	go func() { done <- run("signer", []string{"-socket", sock}) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("signer socket never appeared")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// It answers over the wire.
+	eng := crypto.NewRemoteEngine(sock)
+	if err := eng.Ensure(ctx, "hmac-email/v1"); err != nil {
+		t.Fatal(err)
+	}
+	if sum, err := eng.MAC(ctx, "hmac-email/v1", []byte("x")); err != nil || len(sum) != 32 {
+		t.Fatalf("mac over CLI-started signer: %d %v", len(sum), err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("signer shutdown must be clean: %v", err)
 	}
 }

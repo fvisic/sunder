@@ -35,6 +35,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
       key: SUNDER_REDIS_PASSWORD
 {{- end }}
 {{- end }}
+{{- if .Values.signer.enabled }}
+- name: SUNDER_SIGNER_SOCKET
+  value: /signer/signer.sock
+{{- end }}
 {{- if .Values.tunables.otiTtl }}
 - name: SUNDER_OTI_TTL
   value: {{ .Values.tunables.otiTtl | quote }}
@@ -71,5 +75,22 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: SUNDER_MTLS_CA
   value: /mtls/ca.crt
 {{- end }}
+{{- end }}
+{{- end }}
+
+{{/* Env for the signer sidecar: keystore only - no database, no service config. */}}
+{{- define "sunder.signerEnv" -}}
+{{- if eq .Values.keystore.type "vault" }}
+- name: SUNDER_KEYSTORE
+  value: vault
+- name: SUNDER_VAULT_ADDR
+  value: {{ .Values.keystore.vault.addr | quote }}
+- name: SUNDER_VAULT_MOUNT
+  value: {{ .Values.keystore.vault.mount | quote }}
+- name: SUNDER_VAULT_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.keystore.vault.existingSecret }}
+      key: SUNDER_VAULT_TOKEN
 {{- end }}
 {{- end }}

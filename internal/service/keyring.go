@@ -119,14 +119,14 @@ func (k *KeyRing) Newest(ctx context.Context, kind string) (string, error) {
 
 // EnsureAll creates keystore material for every live version of every kind.
 // This is the only production path that mints keys (strict keystore).
-func (k *KeyRing) EnsureAll(ctx context.Context, ks crypto.Keystore) error {
+func (k *KeyRing) EnsureAll(ctx context.Context, eng crypto.Engine) error {
 	for _, kind := range keyKinds() {
 		vs, err := k.Versions(ctx, kind)
 		if err != nil {
 			return err
 		}
 		for _, v := range vs {
-			if err := ks.Ensure(ctx, kind+"/"+v); err != nil {
+			if err := eng.Ensure(ctx, kind+"/"+v); err != nil {
 				return err
 			}
 		}
@@ -137,7 +137,7 @@ func (k *KeyRing) EnsureAll(ctx context.Context, ks crypto.Keystore) error {
 // Rotate mints the next version for kind: keystore material first, then the
 // metadata row (ACTIVE), demoting previous ACTIVE versions to RETIRING.
 // Old versions keep matching on lookup until data is re-keyed.
-func (k *KeyRing) Rotate(ctx context.Context, ks crypto.Keystore, kind string) (string, error) {
+func (k *KeyRing) Rotate(ctx context.Context, eng crypto.Engine, kind string) (string, error) {
 	valid := false
 	for _, kd := range keyKinds() {
 		valid = valid || kd == kind
@@ -156,7 +156,7 @@ func (k *KeyRing) Rotate(ctx context.Context, ks crypto.Keystore, kind string) (
 		return "", err
 	}
 	version := fmt.Sprintf("v%d", n+1)
-	if err := ks.Ensure(ctx, kind+"/"+version); err != nil {
+	if err := eng.Ensure(ctx, kind+"/"+version); err != nil {
 		return "", err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE keys SET status='RETIRING' WHERE kind=$1 AND status='ACTIVE'`, kind); err != nil {
