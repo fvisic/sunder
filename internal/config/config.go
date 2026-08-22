@@ -19,7 +19,7 @@ type Config struct {
 	VaultAddr    string // SUNDER_VAULT_ADDR
 	VaultToken   string // SUNDER_VAULT_TOKEN
 	VaultMount   string // SUNDER_VAULT_MOUNT, default "transit"
-	TSAURL       string // SUNDER_TSA_URL, default "https://freetsa.org/tsr"
+	TSAURL       string // SUNDER_TSA_URL; the freetsa.org default suits pilots — production should point at a qualified or internal TSA
 }
 
 func getenv(key, def string) string {

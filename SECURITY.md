@@ -20,6 +20,8 @@ Pre-1.0: only the latest release receives fixes.
 
 ## Design notes for researchers
 
+The v1 design (some components land in later milestones — see docs/PLAN.md):
+
 - Search tokens are keyed HMAC-SHA256, keys held outside the database.
 - OTIs are PASETO v4.public, single-use enforced by an atomic DB transition.
 - The audit log is an append-only hash chain anchored to an RFC 3161 TSA.

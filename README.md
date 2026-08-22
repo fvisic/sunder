@@ -9,6 +9,10 @@ with any other.
 Sunder is self-hosted: every organization runs its own instance and is the
 identity provider for its own contacts. There is no central party.
 
+> **Status**: v1 under active development, milestone by milestone — the
+> feature list below is the v1 target; see `docs/PLAN.md` for what has
+> landed. Not production-ready yet.
+
 ## Why
 
 A national identifier (like the Croatian OIB) or a raw email/phone used as

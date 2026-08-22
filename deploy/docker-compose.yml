@@ -6,7 +6,8 @@ services:
       POSTGRES_USER: sunder
       POSTGRES_PASSWORD: sunder-dev-only
     ports:
-      - "5432:5432"
+      # Loopback only: never expose the dev database on all interfaces.
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sunder"]
       interval: 2s

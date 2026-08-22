@@ -33,8 +33,13 @@ func New(ctx context.Context, dbURL string) (*Store, error) {
 
 func (s *Store) Close() { s.Pool.Close() }
 
-// Migrate applies embedded migrations in filename order, tracking them in
-// schema_migrations. Each migration runs in its own transaction.
+// migrateLockKey serializes concurrent replicas racing to migrate at boot.
+const migrateLockKey = 0x53554E4D // "SUNM"
+
+// Migrate applies embedded migrations in filename order inside one
+// transaction, tracking them in schema_migrations. An advisory lock makes
+// simultaneous replica startups safe: the loser waits, then sees every
+// version as already applied.
 func (s *Store) Migrate(ctx context.Context) error {
 	_, err := s.Pool.Exec(ctx,
 		`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
@@ -50,9 +55,18 @@ func (s *Store) Migrate(ctx context.Context) error {
 		names = append(names, e.Name())
 	}
 	sort.Strings(names)
+
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrateLockKey); err != nil {
+		return err
+	}
 	for _, name := range names {
 		var done bool
-		if err := s.Pool.QueryRow(ctx,
+		if err := tx.QueryRow(ctx,
 			`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)`, name).Scan(&done); err != nil {
 			return err
 		}
@@ -63,21 +77,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		tx, err := s.Pool.Begin(ctx)
-		if err != nil {
-			return err
-		}
 		if _, err := tx.Exec(ctx, string(sql)); err != nil {
-			_ = tx.Rollback(ctx)
 			return fmt.Errorf("migration %s: %w", name, err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (version) VALUES ($1)`, name); err != nil {
-			_ = tx.Rollback(ctx)
-			return err
-		}
-		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit(ctx)
 }

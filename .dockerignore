@@ -1,0 +1,12 @@
+.git
+.env
+keystore/
+*.tsr
+*.key
+dist/
+node_modules/
+__pycache__/
+.venv/
+coverage.out
+deploy/
+docs/

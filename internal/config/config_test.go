@@ -48,6 +48,23 @@ func TestInvalidKeystore(t *testing.T) {
 	}
 }
 
+func TestValidFullConfigsAccepted(t *testing.T) {
+	setBase(t)
+	t.Setenv("SUNDER_TLS_CERT", "/tmp/cert.pem")
+	t.Setenv("SUNDER_TLS_KEY", "/tmp/key.pem")
+	t.Setenv("SUNDER_MTLS_CA", "/tmp/ca.pem")
+	t.Setenv("SUNDER_KEYSTORE", "vault")
+	t.Setenv("SUNDER_VAULT_ADDR", "https://vault.internal:8200")
+	t.Setenv("SUNDER_VAULT_TOKEN", "tok")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MTLSCA != "/tmp/ca.pem" || c.Keystore != "vault" || c.VaultMount != "transit" {
+		t.Fatalf("fields lost: %+v", c)
+	}
+}
+
 func TestVaultKeystoreValidation(t *testing.T) {
 	setBase(t)
 	t.Setenv("SUNDER_KEYSTORE", "vault")

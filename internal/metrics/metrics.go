@@ -6,6 +6,7 @@
 package metrics
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"sort"
@@ -70,10 +71,12 @@ func splitSeries(series string) (name, labels string) {
 }
 
 // ServeHTTP renders the registry in Prometheus text exposition format.
-func (r *Registry) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+// Rendering happens into a buffer under the lock; the network write happens
+// after unlock so a slow scraper cannot stall request-path Inc/Observe.
+func (r *Registry) ServeHTTP(hw http.ResponseWriter, _ *http.Request) {
+	var buf bytes.Buffer
+	w := &buf
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 
 	names := make([]string, 0, len(r.counters))
 	for k := range r.counters {
@@ -115,4 +118,8 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, "%s_sum{%s} %g\n", name, labels, h.sum)
 		fmt.Fprintf(w, "%s_count{%s} %d\n", name, labels, h.total)
 	}
+	r.mu.Unlock()
+
+	hw.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	_, _ = hw.Write(buf.Bytes())
 }
