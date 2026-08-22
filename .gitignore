@@ -1,6 +1,8 @@
 /sunder
 keystore/
 *.tsr
+# ...except the committed offline test fixture:
+!internal/audit/testdata/*.tsr
 .env
 dist/
 node_modules/

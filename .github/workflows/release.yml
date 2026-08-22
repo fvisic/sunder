@@ -52,7 +52,7 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           IMAGE="ghcr.io/${GITHUB_REPOSITORY}:${GITHUB_REF_NAME}"
-          docker build -t "$IMAGE" .
+          docker build --target runtime -t "$IMAGE" .
           docker build --target ops -t "$IMAGE-ops" .
           docker push "$IMAGE"
           docker push "$IMAGE-ops"

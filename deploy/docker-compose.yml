@@ -20,7 +20,9 @@ services:
       retries: 15
 
   sunder:
-    build: ..
+    build:
+      context: ..
+      target: runtime
     environment:
       SUNDER_DB_URL: postgres://sunder:sunder-dev-only@postgres:5432/sunder
       SUNDER_LISTEN: ":8080"
