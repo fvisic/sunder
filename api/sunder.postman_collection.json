@@ -169,8 +169,8 @@
       ]
     },
     {
-      "name": "Demo: call center -> ERP handoff",
-      "description": "The callcenter.sh storyline: register, look up, hand off to ERP via a one-time identifier, watch the replay bounce.",
+      "name": "Demo: CRM -> ERP handoff",
+      "description": "The quickstart.sh storyline: register, look up, hand off to ERP via a one-time identifier, watch the replay bounce.",
       "item": [
         {
           "name": "1. Register the customer (CRM)",

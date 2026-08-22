@@ -129,6 +129,6 @@ jobs:
           echo "SUNDER_CRED_CRM=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id crm -name CRM -scope crm -actions contacts.register,lookup,attributes.read,oti.issue -purposes support,create_order -rate 1000 | tail -1)" >> "$GITHUB_ENV"
           echo "SUNDER_CRED_ERP=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id erp -name ERP -scope erp -actions oti.verify -purposes create_order | tail -1)" >> "$GITHUB_ENV"
       - name: Run demo
-        run: bash demo/callcenter.sh
+        run: bash demo/quickstart.sh
       - name: Verify audit chain
         run: docker compose -f deploy/docker-compose.yml exec sunder /sunder verify-audit

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 #
-# callcenter.sh - Sunder demo: the call-center lookup flow.
+# quickstart.sh - Sunder demo: the lookup + handoff flow.
 #
-# This walks the adoption-wedge storyline from the pilot storyline against a running
-# stack: a CRM client registers and looks up a contact without ever storing a
+# This walks the core storyline against a running stack: a CRM client registers and looks up a contact without ever storing a
 # searchable PII key, then hands the customer to the ERP with a one-time
 # identifier (OTI) - and the two systems end up with two different, unlinkable
 # pseudonyms for the same person.
@@ -30,7 +29,7 @@ Create the two demo clients (each command prints the credential exactly once -
 copy the "client_id.secret" line it outputs):
 
   docker compose -f deploy/docker-compose.yml exec sunder /sunder client create \
-      -id crm -name "Call-center CRM" -scope crm \
+      -id crm -name "Demo CRM" -scope crm \
       -actions contacts.register,lookup,attributes.read,oti.issue \
       -purposes support,create_order
 
@@ -43,7 +42,7 @@ Then export the printed credentials and re-run:
 
   export SUNDER_CRED_CRM='crm.<secret>'
   export SUNDER_CRED_ERP='erp.<secret>'
-  ./callcenter.sh
+  ./quickstart.sh
 EOF
   exit 1
 fi
@@ -121,7 +120,7 @@ say() { echo "  $1"; }
 # ---------------------------------------------------------------------------
 # Preflight: is the stack up?
 # ---------------------------------------------------------------------------
-echo "Sunder call-center demo (pilot storyline) against $SUNDER_URL"
+echo "Sunder quickstart demo (lookup + one-time handoff) against $SUNDER_URL"
 if ! curl -sSf "$SUNDER_URL/healthz" >/dev/null 2>&1; then
   echo "FAIL: $SUNDER_URL/healthz is not answering - is the stack running?" >&2
   echo "      Try: docker compose -f deploy/docker-compose.yml up --build" >&2

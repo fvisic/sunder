@@ -58,5 +58,5 @@ audit trail. Rotate both on personnel changes.)
   certificate expiries).
 - Keep CA lifetimes >> client-cert lifetimes so step 2 of the CA rotation
   never races expiry.
-- After ANY bundle change run the demo flow (`demo/callcenter.sh`) against
+- After ANY bundle change run the demo flow (`demo/quickstart.sh`) against
   the environment - it exercises the full authenticated path.

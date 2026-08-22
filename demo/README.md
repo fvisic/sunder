@@ -1,7 +1,6 @@
-# Sunder demo - the call-center lookup flow
+# Sunder demos
 
-`callcenter.sh` is the M6 demo (decision D8): it walks the adoption-wedge
-adoption storyline - *"the national identifier out of the call-center/CRM lookup in
+`quickstart.sh` walks the core storyline - *"the national identifier out of the CRM lookup in
 30 days"* - end to end against a running stack, using nothing but `curl`
 and `python3` (no jq).
 
@@ -46,7 +45,7 @@ Create the two demo clients (each prints its credential **exactly once**):
 
 ```sh
 docker compose -f deploy/docker-compose.yml exec sunder /sunder client create \
-    -id crm -name "Call-center CRM" -scope crm \
+    -id crm -name "Demo CRM" -scope crm \
     -actions contacts.register,lookup,attributes.read,oti.issue \
     -purposes support,create_order
 
@@ -61,7 +60,7 @@ Export the credentials and run the demo:
 ```sh
 export SUNDER_CRED_CRM='crm.<secret>'
 export SUNDER_CRED_ERP='erp.<secret>'
-./demo/callcenter.sh
+./demo/quickstart.sh
 ```
 
 `SUNDER_URL` overrides the base URL (default `http://localhost:8080`).

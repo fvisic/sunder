@@ -5,7 +5,7 @@ system in the organization (CRM, billing, web, …) is a registered *client*
 with its own credentials, scope, allowed actions and purposes.
 
 ```
- org systems (CRM, billing, web, call-center, DWH, ...)
+ org systems (CRM, billing, web shop, ticketing, DWH, ...)
         │  bearer key or mTLS, per-system credentials
         ▼
  ┌──────────────────────────────┐

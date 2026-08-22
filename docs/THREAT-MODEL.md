@@ -12,7 +12,7 @@ in docs/DESIGN.md.
 | 4 | Name matches too many people | Name alone rejected (400); name is only a narrowing key beside email/phone | - |
 | 5 | Social engineering of staff | Out of technical scope; audit chain makes every employee lookup attributable and tamper-evident, which deters and proves | Process controls remain the org's job |
 | 6 | CID becomes the new internal OIB | CIDs are per-scope; a client only ever sees its own scope; attributes are per-scope blobs; `scopes.issue` is an explicit, audited, sparingly-granted privilege | An org granting `scopes.issue` to everything recreates the problem - documentation warns |
-| 7 | Migration is enormous | Start with one read-path integration (the call-center demo storyline); SDKs + conformance suite keep per-system cost constant | Organizational, not technical |
+| 7 | Migration is enormous | Start with one read-path integration (the quickstart demo storyline); SDKs + conformance suite keep per-system cost constant | Organizational, not technical |
 | 8 | Legacy systems re-import the national identifier | No OIB column exists anywhere; the service never accepts or returns one | A client system storing OIB beside the CID is outside Sunder's reach - pilot checklist item |
 | 9 | Availability becomes critical | Stateless service (scale by replicas), Postgres HA (Patroni reference deployment), graceful shutdown, readiness probes | Rate limiter is in-memory per replica (documented; a shared-counter backend is planned) |
 | 10 | Privacy could worsen (central operator sees usage) | Self-hosted: the operator IS the organization; no third party in any flow; TSA anchoring leaks only a 32-byte digest | - |
