@@ -45,6 +45,35 @@ allowed purposes. Decryption is server-side only; exactly one field is
 returned; every fetch is written to the audit chain.
 `200 {"value": "filip@example.com"}`
 
+## Endpoints (M3)
+
+### POST /v1/lookup — find a contact without exposing PII
+Action: `lookup`. Rate-limited per client (429 `rate_limited` beyond the
+client's per-minute limit); misses feed the enumeration detector (warning
+log + `sunder_lookup_misses_total` metric at 100 misses/10 min).
+
+Valid key combinations:
+
+```json
+{"email": "filip@example.com"}
+{"phone": "+385 91 123 4567"}
+{"name": "Filip Visic", "email": "filip@example.com"}
+{"name": "Filip Visic", "phone": "+385911234567"}
+```
+
+Name alone is rejected (400) — a name is a narrowing key, never an
+identifier. Identifiers are normalized, HMAC-tokenized under every active
+key version (rotation window) and matched against the token indexes; no PII
+is compared or stored in plaintext anywhere on this path.
+
+`200 {"cid": "CID-..."}` — the pseudonym in the caller's scope.
+`404 not_found` — no match, **including** the case where the person exists
+but has no CID in the caller's scope (anything else would let one scope
+enumerate another's customer base). Every lookup, hit or miss, is audited.
+
+Remember: **LOOKUP != AUTHENTICATION** — a hit never proves the caller is
+talking to that person.
+
 ## Operational endpoints
 
 - `GET /healthz` — liveness (no auth)

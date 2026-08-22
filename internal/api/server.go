@@ -16,6 +16,7 @@ import (
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/metrics"
+	"github.com/fvisic/sunder/internal/ratelimit"
 	"github.com/fvisic/sunder/internal/service"
 	"github.com/fvisic/sunder/internal/store"
 )
@@ -28,6 +29,8 @@ type Server struct {
 	Log      *slog.Logger
 	Contacts *service.Contacts
 	Auth     *auth.Authenticator
+	Limiter  *ratelimit.Limiter
+	Detector *ratelimit.Detector
 	mux      *http.ServeMux
 }
 
@@ -61,10 +64,14 @@ func New(cfg config.Config, st *store.Store) *Server {
 		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: crypto.NewPIIBox(ks)}
 		s.Auth = &auth.Authenticator{Pool: st.Pool}
 
+		s.Limiter = ratelimit.NewLimiter()
+		s.Detector = ratelimit.NewDetector()
+
 		v1 := http.NewServeMux()
 		v1.HandleFunc("POST /v1/contacts", s.handleContactsRegister)
 		v1.HandleFunc("POST /v1/contacts/{cid}/scopes", s.handleScopesIssue)
 		v1.HandleFunc("GET /v1/contacts/{cid}/attributes/{name}", s.handleAttributeGet)
+		v1.HandleFunc("POST /v1/lookup", s.handleLookup)
 		s.mux.Handle("/v1/", s.Auth.Middleware(v1))
 	}
 	return s
