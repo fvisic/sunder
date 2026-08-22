@@ -686,4 +686,18 @@ All former open questions are decided (2026-08-22):
 | D7 | **Keystore drivers in v1: `file` + `vault`.** The `pkcs11` driver stays an interface stub until the first compliance-driven demand. |
 | D8 | **M6 demo: call-center lookup flow** — matches the adoption wedge (13.4). |
 | D9 | **Local working directory:** `~/voice/labs/CID-OIB/sunder` (code next to the plans). |
-| D10 | **Push policy:** local commits continuously, push to GitHub after each completed milestone (M1–M6). Go toolchain 1.23; k6 runs via the `grafana/k6` Docker image at M6. |
+| D10 | **Push policy:** local commits continuously, push to GitHub after each completed milestone (M1–M6). Go toolchain (1.25 via auto-upgrade); k6 runs via the `grafana/k6` Docker image at M6. |
+| D11 | **Multi-value identifiers (added during implementation, 2026-08-22):** a contact can carry several searchable emails and phones (`person_tokens` table, one row per token per key version); addresses and other multi-valued data live as free-form attributes. Dedup matches any identifier (email priority); identifiers owned by another person are never silently stolen; `keys retire` purges retired-version token rows. |
+
+## 16. Implementation status (v1)
+
+Executed 2026-08-22 in `github.com/fvisic/sunder` (private). All six
+milestones completed, each followed by a critical multi-agent review in
+separate sessions with findings fixed before proceeding (the reviews
+surfaced and fixed, among others: audit-chain hash canonicalization, a
+cross-scope PII enrichment oracle — solved with per-scope AAD-bound blobs —
+verifier purpose caps, key retirement, and a pii-kek rotation no-op).
+Verified live: call-center demo end-to-end, RFC 3161 anchoring against
+freetsa.org, k6 load test at 100% checks (laptop p99: lookup ~9–10.5 ms,
+attributes 8.4 ms, OTI 13 ms). SDKs shipped for TypeScript and Python with
+mock-server test suites; Java/PHP/.NET pending per section 10.3.

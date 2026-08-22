@@ -37,6 +37,20 @@ cd deploy && docker compose up --build
 curl http://localhost:8080/healthz
 ```
 
+## What's in the box
+
+| Path | Contents |
+|---|---|
+| `cmd/sunder`, `internal/` | the service: CID/OTI, HMAC lookup, purpose-checked attributes, hash-chained + TSA-anchored audit, key rotation |
+| `api/openapi.yaml` | OpenAPI 3.1 contract |
+| `sdks/typescript`, `sdks/python` | zero-dependency SDKs (same canonical interface; Java/PHP/.NET follow) |
+| `demo/callcenter.sh` | narrated call-center pilot storyline (doubles as a smoke test) |
+| `loadtest/lookup.js` | k6 scenarios encoding the latency targets |
+| `docs/` | architecture, API, threat model, design plan |
+
+CLI: `sunder serve | migrate | client create | keys rotate/retire/list |
+anchor | verify-audit`.
+
 ## Development
 
 Requirements: Go 1.25+, Docker (for PostgreSQL).
