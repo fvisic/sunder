@@ -166,10 +166,21 @@ public final class SunderClient {
      * purpose. Safe to retry (retries once on 5xx / network failure).
      */
     public OtiResult issueOti(String cid, String purpose, String audience) {
+        return issueOti(cid, purpose, audience, null);
+    }
+
+    /**
+     * Variant with issuer-authorized attribute sharing: the listed
+     * attributes are copied into the verifier's scope at verification.
+     */
+    public OtiResult issueOti(String cid, String purpose, String audience, java.util.List<String> shareAttributes) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("cid", cid);
         body.put("purpose", purpose);
         body.put("audience", audience);
+        if (shareAttributes != null && !shareAttributes.isEmpty()) {
+            body.put("share_attributes", shareAttributes);
+        }
         Map<String, Object> raw = request("POST", "/v1/oti", body, true);
         return new OtiResult(requireString(raw, "token"), requireString(raw, "expires_at"));
     }

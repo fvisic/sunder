@@ -42,7 +42,11 @@ own contacts.
   atomic `VALID -> USED` database transition — not just the signature.
   OTIs are the only identity currency systems exchange: the verifier
   receives *its own* scoped CID, the issuer's pseudonym never crosses the
-  scope boundary.
+  scope boundary. A handoff shares no attributes by default; the issuer may
+  list `share_attributes` to copy specific fields into the verifier's scope
+  — the pattern behind delayed actions (escalation e-mails and similar):
+  consume the token immediately, fetch the shared attribute just-in-time
+  when the delayed action fires, store nothing in between.
 - **Search tokens** — keyed HMAC-SHA256 over normalized identifiers
   (Unicode NFKC; email lowercased; phone to E.164), separate keys per
   attribute. A contact can carry several searchable emails and phones (one

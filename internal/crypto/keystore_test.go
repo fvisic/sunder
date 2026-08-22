@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeVault emulates the KV v2 endpoints VaultKeystore touches.
@@ -166,5 +167,29 @@ func TestCachingKeystoreServesFromMemory(t *testing.T) {
 	// Uncached names still go through the strict inner keystore.
 	if _, err := ks.Key(ctx, "hmac-email/v9"); err == nil {
 		t.Fatal("uncached missing key must error")
+	}
+}
+
+func TestEnsureReclaimsStaleLock(t *testing.T) {
+	dir := t.TempDir()
+	ks := &FileKeystore{Dir: dir}
+	ctx := context.Background()
+	// A crashed generator left a lock file 10 minutes ago.
+	lock := ks.path("hmac-email/v1") + ".lock"
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := ks.Ensure(ctx, "hmac-email/v1"); err != nil {
+		t.Fatalf("stale lock must be reclaimed: %v", err)
+	}
+	if _, err := ks.Key(ctx, "hmac-email/v1"); err != nil {
+		t.Fatal(err)
 	}
 }

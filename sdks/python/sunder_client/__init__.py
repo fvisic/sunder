@@ -144,6 +144,14 @@ def _map_error(status: int, body: bytes) -> SunderError:
     return cls(code or f"http_{status}", status, detail)
 
 
+
+def _oti_body(cid: str, purpose: str, audience: str,
+              share_attributes: list[str] | None) -> dict:
+    body = {"cid": cid, "purpose": purpose, "audience": audience}
+    if share_attributes:
+        body["share_attributes"] = list(share_attributes)
+    return body
+
 class SunderClient:
     """Client for a Sunder instance.
 
@@ -223,10 +231,11 @@ class SunderClient:
 
     # -- OTI ---------------------------------------------------------------------
 
-    def issue_oti(self, cid: str, purpose: str, audience: str) -> dict:
+    def issue_oti(self, cid: str, purpose: str, audience: str,
+                  share_attributes: list[str] | None = None) -> dict:
         """Issue a one-time identifier; returns {"token", "expires_at"}."""
         return self._request("POST", "/v1/oti",
-                             body={"cid": cid, "purpose": purpose, "audience": audience},
+                             body=_oti_body(cid, purpose, audience, share_attributes),
                              retry=True)
 
     def verify_oti(self, token: str, purpose: str, audience: str) -> str:

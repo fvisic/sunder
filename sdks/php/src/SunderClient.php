@@ -178,12 +178,17 @@ final class SunderClient
      *
      * @return array{token: string, expiresAt: string}
      */
-    public function issueOti(string $cid, string $purpose, string $audience): array
+    public function issueOti(string $cid, string $purpose, string $audience, ?array $shareAttributes = null): array
     {
+        $body = ['cid' => $cid, 'purpose' => $purpose, 'audience' => $audience];
+        if ($shareAttributes !== null && $shareAttributes !== []) {
+            // Issuer-authorized attributes copied into the verifier's scope.
+            $body['share_attributes'] = array_values($shareAttributes);
+        }
         $raw = $this->request(
             'POST',
             '/v1/oti',
-            ['cid' => $cid, 'purpose' => $purpose, 'audience' => $audience],
+            $body,
             retry: true
         );
         return [

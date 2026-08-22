@@ -9,14 +9,15 @@ import (
 
 func (s *Server) handleOTIIssue(w http.ResponseWriter, r *http.Request) {
 	in, ok := decode[struct {
-		CID      string `json:"cid"`
-		Purpose  string `json:"purpose"`
-		Audience string `json:"audience"`
+		CID             string   `json:"cid"`
+		Purpose         string   `json:"purpose"`
+		Audience        string   `json:"audience"`
+		ShareAttributes []string `json:"share_attributes"`
 	}](w, r)
 	if !ok {
 		return
 	}
-	token, expiresAt, err := s.OTI.Issue(r.Context(), auth.FromContext(r.Context()), in.CID, in.Purpose, in.Audience)
+	token, expiresAt, err := s.OTI.Issue(r.Context(), auth.FromContext(r.Context()), in.CID, in.Purpose, in.Audience, in.ShareAttributes)
 	if err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)

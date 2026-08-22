@@ -306,12 +306,20 @@ export class SunderClient {
     cid: string,
     purpose: string,
     audience: string,
-    options?: RequestOptions,
+    options?: RequestOptions & {
+      /** Issuer-authorized attributes copied into the verifier's scope. */
+      shareAttributes?: string[];
+    },
   ): Promise<OtiResult> {
     const raw = await this.request<{ token: string; expires_at: string }>({
       method: "POST",
       path: "/v1/oti",
-      body: { cid, purpose, audience },
+      body: {
+        cid,
+        purpose,
+        audience,
+        ...(options?.shareAttributes ? { share_attributes: options.shareAttributes } : {}),
+      },
       retryOnce: true,
       options,
     });

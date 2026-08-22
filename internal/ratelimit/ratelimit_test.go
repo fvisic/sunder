@@ -79,3 +79,22 @@ func TestDetectorSlidingWindow(t *testing.T) {
 		t.Fatalf("stale window should reset, got %d", got)
 	}
 }
+
+func TestGCEvictsStaleEntries(t *testing.T) {
+	l := NewLimiter()
+	base := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	now := base
+	l.now = func() time.Time { return now }
+	l.Allow("stale", 10)
+	// Jump far ahead and drive enough operations to trigger the periodic GC.
+	now = base.Add(48 * time.Hour)
+	for i := 0; i < gcEvery+1; i++ {
+		l.Allow("active", 1000000)
+	}
+	l.mu.Lock()
+	_, staleExists := l.entries["stale"]
+	l.mu.Unlock()
+	if staleExists {
+		t.Fatal("stale entry survived GC")
+	}
+}

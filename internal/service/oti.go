@@ -59,7 +59,13 @@ func (o *OTI) signingKey(ctx context.Context, version string) (ed25519.PrivateKe
 
 // Issue mints a token for a CID of the caller's own scope, addressed to one
 // audience (target scope) and one purpose.
-func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audience string) (token string, expiresAt time.Time, err error) {
+//
+// shareAttrs lists attributes from the ISSUER's scope blob that the
+// verifier's scope receives at verification (copied into its own blob) —
+// the mechanism behind delayed flows like escalation e-mails: the verifier
+// stores no PII itself and fetches just-in-time, yet a handoff shares
+// nothing unless the issuer explicitly says so.
+func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audience string, shareAttrs []string) (token string, expiresAt time.Time, err error) {
 	if !client.Can(auth.ActOTIIssue) {
 		return "", time.Time{}, ErrForbidden
 	}
@@ -108,14 +114,17 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 		return "", time.Time{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if shareAttrs == nil {
+		shareAttrs = []string{}
+	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO oti (jti, cid, purpose, audience, expires_at) VALUES ($1,$2,$3,$4,$5)`,
-		claims.JTI, cid, purpose, audience, expiresAt); err != nil {
+		`INSERT INTO oti (jti, cid, purpose, audience, expires_at, share_attrs) VALUES ($1,$2,$3,$4,$5,$6)`,
+		claims.JTI, cid, purpose, audience, expiresAt, shareAttrs); err != nil {
 		return "", time.Time{}, err
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
 		ClientID: client.ID, Action: "oti.issue", CID: cid,
-		Detail: map[string]any{"jti": claims.JTI, "purpose": purpose, "audience": audience},
+		Detail: map[string]any{"jti": claims.JTI, "purpose": purpose, "audience": audience, "share_attrs": shareAttrs},
 	}); err != nil {
 		return "", time.Time{}, fmt.Errorf("audit append: %w", err)
 	}
@@ -212,11 +221,12 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 	// in depth: even with a compromised signing key, a crafted token cannot
 	// consume a jti bound to different parameters.
 	var issuerCID string
+	var shareAttrs []string
 	err = tx.QueryRow(ctx,
 		`UPDATE oti SET status='USED', used_at=now(), used_by=$2
 		 WHERE jti=$1 AND cid=$3 AND purpose=$4 AND audience=$5
 		   AND status='VALID' AND expires_at > now()
-		 RETURNING cid`, claims.JTI, client.ID, claims.CID, purpose, audience).Scan(&issuerCID)
+		 RETURNING cid, share_attrs`, claims.JTI, client.ID, claims.CID, purpose, audience).Scan(&issuerCID, &shareAttrs)
 	if err == pgx.ErrNoRows {
 		var status string
 		var expiresAt time.Time
@@ -252,9 +262,15 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 	if err != nil {
 		return "", err
 	}
+	// Copy issuer-authorized attributes into the verifier-scope blob so
+	// delayed, just-in-time reads work without the verifier storing PII.
+	shared, err := o.shareIntoScope(ctx, tx, issuerCID, verifierCID, shareAttrs)
+	if err != nil {
+		return "", err
+	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
 		ClientID: client.ID, Action: "oti.verify", CID: verifierCID,
-		Detail: map[string]any{"jti": claims.JTI, "purpose": purpose, "audience": audience},
+		Detail: map[string]any{"jti": claims.JTI, "purpose": purpose, "audience": audience, "shared": shared},
 	}); err != nil {
 		return "", fmt.Errorf("audit append: %w", err)
 	}
@@ -262,4 +278,64 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 		return "", err
 	}
 	return verifierCID, nil
+}
+
+// shareIntoScope copies the listed attributes from the issuer's blob into
+// the verifier's blob (issuer values win on conflict; missing attributes are
+// silently absent). Returns the names actually copied, for the audit record.
+func (o *OTI) shareIntoScope(ctx context.Context, tx pgx.Tx, issuerCID, verifierCID string, attrs []string) ([]string, error) {
+	shared := []string{}
+	if len(attrs) == 0 || issuerCID == verifierCID {
+		return shared, nil
+	}
+	var srcBlob []byte
+	var srcKey string
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1') FROM cids WHERE cid=$1`,
+		issuerCID).Scan(&srcBlob, &srcKey); err != nil {
+		return nil, err
+	}
+	if len(srcBlob) == 0 {
+		return shared, nil
+	}
+	src, err := o.Contacts.PII.Decrypt(ctx, issuerCID, srcBlob, srcKey)
+	if err != nil {
+		return nil, err
+	}
+	var dstBlob []byte
+	var dstKey string
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1') FROM cids WHERE cid=$1`,
+		verifierCID).Scan(&dstBlob, &dstKey); err != nil {
+		return nil, err
+	}
+	dst := map[string]string{}
+	if len(dstBlob) > 0 {
+		if dst, err = o.Contacts.PII.Decrypt(ctx, verifierCID, dstBlob, dstKey); err != nil {
+			return nil, err
+		}
+	}
+	for _, name := range attrs {
+		if v, ok := src[name]; ok {
+			dst[name] = v
+			shared = append(shared, name)
+		}
+	}
+	if len(shared) == 0 {
+		return shared, nil
+	}
+	newKey, err := o.Ring.Newest(ctx, crypto.KeyPIIKEK)
+	if err != nil {
+		return nil, err
+	}
+	fresh, err := o.Contacts.PII.Encrypt(ctx, verifierCID, newKey, dst)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, updated_at=now() WHERE cid=$1`,
+		verifierCID, fresh, newKey); err != nil {
+		return nil, err
+	}
+	return shared, nil
 }

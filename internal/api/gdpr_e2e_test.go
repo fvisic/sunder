@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -343,5 +344,97 @@ func TestRetentionSweep(t *testing.T) {
 	rec, _ = e.do(t, e.credCRM, "POST", "/v1/lookup", map[string]string{"email": "filip@example.com"})
 	if rec.Code != 200 {
 		t.Fatalf("retention must not delete search tokens: %d", rec.Code)
+	}
+}
+
+// Error-branch coverage for the GDPR handlers and services.
+func TestGDPRHandlerErrorBranches(t *testing.T) {
+	e, credDPO := gdprEnv(t)
+	cid := registerFilip(t, e)
+
+	// consent list / set / export without the action -> forbidden (DPO has
+	// only dsr.access + dsr.erase).
+	rec, _ := e.do(t, credDPO, "GET", "/v1/consent/"+cid, nil)
+	if rec.Code != 403 {
+		t.Fatalf("consent list without action: %d", rec.Code)
+	}
+	rec, _ = e.do(t, credDPO, "POST", "/v1/consent", map[string]any{
+		"cid": cid, "purpose": "x", "granted": true})
+	if rec.Code != 403 {
+		t.Fatalf("consent set without action: %d", rec.Code)
+	}
+	rec, _ = e.do(t, credDPO, "GET", "/v1/dsr/export?cid="+cid, nil)
+	if rec.Code != 403 {
+		t.Fatalf("export without action: %d", rec.Code)
+	}
+	// consent set with empty purpose -> validation.
+	rec, _ = e.do(t, e.credCRM, "POST", "/v1/consent", map[string]any{
+		"cid": cid, "granted": true})
+	if rec.Code != 400 {
+		t.Fatalf("consent without purpose: %d", rec.Code)
+	}
+	// consent on a foreign/unknown CID -> not found.
+	rec, _ = e.do(t, e.credCRM, "POST", "/v1/consent", map[string]any{
+		"cid": "CID-DOESNOTEXIST", "purpose": "x", "granted": true})
+	if rec.Code != 404 {
+		t.Fatalf("consent on unknown cid: %d", rec.Code)
+	}
+	rec, _ = e.do(t, e.credCRM, "GET", "/v1/consent/CID-DOESNOTEXIST", nil)
+	if rec.Code != 404 {
+		t.Fatalf("consent list on unknown cid: %d", rec.Code)
+	}
+	// scopes.issue with empty scope -> validation; bad JSON -> bad_json.
+	rec, _ = e.do(t, e.credCRM, "POST", "/v1/contacts/"+cid+"/scopes", map[string]string{})
+	if rec.Code != 400 {
+		t.Fatalf("empty scope: %d", rec.Code)
+	}
+	req := httptest.NewRequest("POST", "/v1/contacts/"+cid+"/scopes", strings.NewReader("{nope"))
+	req.Header.Set("Authorization", "Bearer "+e.credCRM)
+	rr := httptest.NewRecorder()
+	e.srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 400 {
+		t.Fatalf("bad json: %d", rr.Code)
+	}
+}
+
+// The FAILED path: a permanently broken webhook exhausts its attempts and
+// the event is closed out with an audited FAILED record.
+func TestEraseDeliveryFailsClosedAfterAttempts(t *testing.T) {
+	e, credDPO := gdprEnv(t)
+	ctx := context.Background()
+	cid := registerFilip(t, e)
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer dead.Close()
+	if _, err := e.srv.Store.Pool.Exec(ctx,
+		`INSERT INTO webhooks (scope, url, secret) VALUES ('crm', $1, 's')`, dead.URL); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := e.do(t, credDPO, "POST", "/v1/dsr/erase", map[string]string{"cid": cid})
+	if rec.Code != 200 {
+		t.Fatal(rec.Code)
+	}
+	for i := 0; i < 12; i++ {
+		if _, err := e.srv.GDPR.DeliverPending(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var status string
+	var attempts int
+	if err := e.srv.Store.Pool.QueryRow(ctx,
+		`SELECT status, attempts FROM erasure_events WHERE cid=$1`, cid).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "FAILED" || attempts < 10 {
+		t.Fatalf("expected FAILED after attempts cap, got %s/%d", status, attempts)
+	}
+	var audited int
+	if err := e.srv.Store.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit WHERE action='dsr.erase.failed'`).Scan(&audited); err != nil {
+		t.Fatal(err)
+	}
+	if audited != 1 {
+		t.Fatalf("FAILED transition must be audited once, got %d", audited)
 	}
 }

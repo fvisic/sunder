@@ -203,16 +203,24 @@ public sealed class SunderClient : IDisposable
     /// Issues a one-time identifier: 5 minutes, one use, one audience, one
     /// purpose. Safe to retry (retries once on 5xx / network failure).
     /// </summary>
-    public async Task<OtiResult> IssueOtiAsync(string cid, string purpose, string audience)
+    public async Task<OtiResult> IssueOtiAsync(string cid, string purpose, string audience,
+        IEnumerable<string>? shareAttributes = null)
     {
+        var body = new Dictionary<string, object>
+        {
+            ["cid"] = cid,
+            ["purpose"] = purpose,
+            ["audience"] = audience,
+        };
+        var share = shareAttributes is null ? null : new List<string>(shareAttributes);
+        if (share is { Count: > 0 })
+        {
+            // Issuer-authorized attributes copied into the verifier's scope.
+            body["share_attributes"] = share;
+        }
         var root = await RequestAsync(
             HttpMethod.Post, "/v1/oti",
-            JsonSerializer.Serialize(new Dictionary<string, string>
-            {
-                ["cid"] = cid,
-                ["purpose"] = purpose,
-                ["audience"] = audience,
-            }),
+            JsonSerializer.Serialize(body),
             retryOnce: true).ConfigureAwait(false);
         return new OtiResult(GetStringField(root, "token"), GetStringField(root, "expires_at"));
     }

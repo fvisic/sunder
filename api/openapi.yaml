@@ -694,6 +694,10 @@ components:
           description: Must be in the caller's allowed purposes; bound into the token.
           examples: [create_order]
         audience:
+        share_attributes:
+          type: array
+          items: {type: string}
+          description: Issuer-scope attributes copied into the verifier's scope blob at verification. Absent/empty = the handoff shares nothing.
           type: string
           description: The scope that will verify the token; only that scope can consume it.
           examples: [erp]

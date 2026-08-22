@@ -106,13 +106,22 @@ Action: `oti.issue`; `purpose` must be in the caller's allowed purposes;
 `cid` must belong to the caller's scope.
 
 ```json
-{"cid": "CID-...", "purpose": "create_order", "audience": "erp"}
+{"cid": "CID-...", "purpose": "create_order", "audience": "erp",
+ "share_attributes": ["email"]}
 ```
 
 `201 {"token": "v4.public...", "expires_at": "..."}` — a PASETO v4.public
 token (Ed25519, no negotiable algorithm) valid for **5 minutes, one use,
 one audience, one purpose**. The signing key version travels as `kid`;
 verification only accepts key versions the keyring lists as live.
+
+`share_attributes` (optional) lists attributes from the **issuer's** scope
+that are copied into the **verifier's** scope blob at verification — a
+handoff shares nothing unless the issuer says so. This is the mechanism for
+delayed flows (see `demo/escalation.sh`): the verifier holds only its own
+CID, then fetches the shared attribute just-in-time (purpose- and
+consent-checked, audited) when the delayed action fires. Tokens cannot be
+"saved for later" — they expire in five minutes by design.
 
 ### POST /v1/oti/verify — verify and consume
 Action: `oti.verify`. The caller's scope must equal `audience` — you can
