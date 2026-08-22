@@ -30,6 +30,26 @@ type Contacts struct {
 	Pool *pgxpool.Pool
 	Tok  *crypto.Tokenizer
 	PII  *crypto.PIIBox
+	Ring *KeyRing
+}
+
+// tokensAllVersions computes the token under every live version of kind,
+// newest first — writes use [0], matches use the whole set (rotation window).
+func (c *Contacts) tokensAllVersions(ctx context.Context, kind, normalized string,
+	f func(ctx context.Context, version, normalized string) (string, error)) ([]string, error) {
+	versions, err := c.Ring.Versions(ctx, kind)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(versions))
+	for _, v := range versions {
+		tok, err := f(ctx, v, normalized)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, tok)
+	}
+	return out, nil
 }
 
 // RegisterInput carries the identifiers and the attributes to protect.
@@ -65,19 +85,18 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 			return "", fmt.Errorf("%w: %q is a reserved attribute name", ErrValidation, reserved)
 		}
 	}
-	version := crypto.KeyVersions()[0]
 	attrs := map[string]string{}
 	for k, v := range in.Attributes {
 		attrs[k] = v
 	}
 
-	var emailTok, phoneTok, nameTok string
+	var emailToks, phoneToks, nameToks []string
 	if in.Email != "" {
 		norm, err := crypto.NormalizeEmail(in.Email)
 		if err != nil {
 			return "", fmt.Errorf("%w: %v", ErrValidation, err)
 		}
-		if emailTok, err = c.Tok.EmailToken(ctx, version, norm); err != nil {
+		if emailToks, err = c.tokensAllVersions(ctx, crypto.KeyHMACEmail, norm, c.Tok.EmailToken); err != nil {
 			return "", err
 		}
 		attrs["email"] = norm
@@ -87,7 +106,7 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 		if err != nil {
 			return "", fmt.Errorf("%w: %v", ErrValidation, err)
 		}
-		if phoneTok, err = c.Tok.PhoneToken(ctx, version, norm); err != nil {
+		if phoneToks, err = c.tokensAllVersions(ctx, crypto.KeyHMACPhone, norm, c.Tok.PhoneToken); err != nil {
 			return "", err
 		}
 		attrs["phone"] = norm
@@ -97,7 +116,7 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 		if err != nil {
 			return "", fmt.Errorf("%w: %v", ErrValidation, err)
 		}
-		if nameTok, err = c.Tok.NameToken(ctx, version, norm); err != nil {
+		if nameToks, err = c.tokensAllVersions(ctx, crypto.KeyHMACName, norm, c.Tok.NameToken); err != nil {
 			return "", err
 		}
 		attrs["name"] = in.Name
@@ -106,7 +125,7 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 	// Retry once: a concurrent identical registration can win the unique-
 	// index race; the second attempt then finds and reuses that person.
 	for attempt := 0; ; attempt++ {
-		cid, err = c.registerTx(ctx, client, emailTok, phoneTok, nameTok, attrs)
+		cid, err = c.registerTx(ctx, client, emailToks, phoneToks, nameToks, attrs)
 		if err == nil {
 			break
 		}
@@ -126,25 +145,33 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 	return cid, nil
 }
 
-func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailTok, phoneTok, nameTok string, attrs map[string]string) (string, error) {
+func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailToks, phoneToks, nameToks []string, attrs map[string]string) (string, error) {
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Deterministic dedup: email match takes priority over phone.
+	first := func(toks []string) string {
+		if len(toks) == 0 {
+			return ""
+		}
+		return toks[0]
+	}
+
+	// Deterministic dedup: email match takes priority over phone. Matching
+	// spans every live key version (rotation window).
 	var personID string
 	found := false
-	if emailTok != "" {
-		err = tx.QueryRow(ctx, `SELECT id FROM persons WHERE email_token=$1`, emailTok).Scan(&personID)
+	if len(emailToks) > 0 {
+		err = tx.QueryRow(ctx, `SELECT id FROM persons WHERE email_token = ANY($1)`, emailToks).Scan(&personID)
 		if err != nil && err != pgx.ErrNoRows {
 			return "", err
 		}
 		found = err == nil
 	}
-	if !found && phoneTok != "" {
-		err = tx.QueryRow(ctx, `SELECT id FROM persons WHERE phone_token=$1`, phoneTok).Scan(&personID)
+	if !found && len(phoneToks) > 0 {
+		err = tx.QueryRow(ctx, `SELECT id FROM persons WHERE phone_token = ANY($1)`, phoneToks).Scan(&personID)
 		if err != nil && err != pgx.ErrNoRows {
 			return "", err
 		}
@@ -156,18 +183,27 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailTok
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO persons (id, email_token, phone_token, name_token)
 			 VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''))`,
-			personID, emailTok, phoneTok, nameTok); err != nil {
+			personID, first(emailToks), first(phoneToks), first(nameToks)); err != nil {
 			return "", err
 		}
 	} else {
-		// Fill identifier tokens the person did not have yet; never overwrite
-		// (an overwrite would silently re-key someone else's identifier).
+		// Fill missing identifier tokens, and re-key on touch: a token that
+		// matches an older key version upgrades to the newest. A token for a
+		// DIFFERENT identifier is never overwritten.
 		if _, err := tx.Exec(ctx,
 			`UPDATE persons SET
-			   email_token = COALESCE(email_token, NULLIF($2,'')),
-			   phone_token = COALESCE(phone_token, NULLIF($3,'')),
-			   name_token  = COALESCE(name_token,  NULLIF($4,''))
-			 WHERE id=$1`, personID, emailTok, phoneTok, nameTok); err != nil {
+			   email_token = CASE WHEN $2 = '' THEN email_token
+			                      WHEN email_token IS NULL OR email_token = ANY($5) THEN $2
+			                      ELSE email_token END,
+			   phone_token = CASE WHEN $3 = '' THEN phone_token
+			                      WHEN phone_token IS NULL OR phone_token = ANY($6) THEN $3
+			                      ELSE phone_token END,
+			   name_token  = CASE WHEN $4 = '' THEN name_token
+			                      WHEN name_token IS NULL OR name_token = ANY($7) THEN $4
+			                      ELSE name_token END
+			 WHERE id=$1`, personID,
+			first(emailToks), first(phoneToks), first(nameToks),
+			emailToks, phoneToks, nameToks); err != nil {
 			return "", err
 		}
 	}

@@ -35,40 +35,33 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 		return "", fmt.Errorf("%w: email or phone required", ErrValidation)
 	}
 
+	// Tokens under every live key version (dual-key rotation window).
 	var emailToks, phoneToks, nameToks []string
-	for _, v := range crypto.KeyVersions() { // all active versions: dual-key rotation window
-		if in.Email != "" {
-			norm, err := crypto.NormalizeEmail(in.Email)
-			if err != nil {
-				return "", fmt.Errorf("%w: %v", ErrValidation, err)
-			}
-			tok, err := c.Tok.EmailToken(ctx, v, norm)
-			if err != nil {
-				return "", err
-			}
-			emailToks = append(emailToks, tok)
+	if in.Email != "" {
+		norm, err := crypto.NormalizeEmail(in.Email)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", ErrValidation, err)
 		}
-		if in.Phone != "" {
-			norm, err := crypto.NormalizePhone(in.Phone)
-			if err != nil {
-				return "", fmt.Errorf("%w: %v", ErrValidation, err)
-			}
-			tok, err := c.Tok.PhoneToken(ctx, v, norm)
-			if err != nil {
-				return "", err
-			}
-			phoneToks = append(phoneToks, tok)
+		if emailToks, err = c.tokensAllVersions(ctx, crypto.KeyHMACEmail, norm, c.Tok.EmailToken); err != nil {
+			return "", err
 		}
-		if in.Name != "" {
-			norm, err := crypto.NormalizeName(in.Name)
-			if err != nil {
-				return "", fmt.Errorf("%w: %v", ErrValidation, err)
-			}
-			tok, err := c.Tok.NameToken(ctx, v, norm)
-			if err != nil {
-				return "", err
-			}
-			nameToks = append(nameToks, tok)
+	}
+	if in.Phone != "" {
+		norm, err := crypto.NormalizePhone(in.Phone)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", ErrValidation, err)
+		}
+		if phoneToks, err = c.tokensAllVersions(ctx, crypto.KeyHMACPhone, norm, c.Tok.PhoneToken); err != nil {
+			return "", err
+		}
+	}
+	if in.Name != "" {
+		norm, err := crypto.NormalizeName(in.Name)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", ErrValidation, err)
+		}
+		if nameToks, err = c.tokensAllVersions(ctx, crypto.KeyHMACName, norm, c.Tok.NameToken); err != nil {
+			return "", err
 		}
 	}
 

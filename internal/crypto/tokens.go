@@ -74,6 +74,5 @@ func HashSecret(secret string) []byte {
 	return sum[:]
 }
 
-// KeyVersions lists which versions of a search-token key are active, current
-// first. v1-only until rotation ships in M4.
-func KeyVersions() []string { return []string{"v1"} }
+// Which key versions are live is decided by the keys table via the service
+// KeyRing (DB-driven, dual-key rotation window) — not hardcoded here.

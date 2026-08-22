@@ -14,10 +14,12 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/fvisic/sunder/internal/api"
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
+	"github.com/fvisic/sunder/internal/service"
 	"github.com/fvisic/sunder/internal/store"
 )
 
@@ -34,10 +36,10 @@ func main() {
 
 func run(cmd string, args []string) error {
 	switch cmd {
-	case "serve", "migrate", "client":
+	case "serve", "migrate", "client", "keys":
 	default:
 		// Fail on typos before requiring config or a live database.
-		return fmt.Errorf("unknown command %q (available: serve, migrate, client)", cmd)
+		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys)", cmd)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -65,8 +67,55 @@ func run(cmd string, args []string) error {
 		return srv.Run(ctx)
 	case "migrate":
 		return st.Migrate(ctx)
+	case "keys":
+		return keysCmd(ctx, cfg, st, args)
 	default:
 		return clientCmd(ctx, st, args)
+	}
+}
+
+// keysCmd implements `sunder keys rotate -kind <kind>` and `sunder keys list`.
+func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: sunder keys rotate -kind <kind> | sunder keys list")
+	}
+	if err := st.Migrate(ctx); err != nil {
+		return err
+	}
+	ring := &service.KeyRing{Pool: st.Pool}
+	switch args[0] {
+	case "rotate":
+		fs := flag.NewFlagSet("keys rotate", flag.ContinueOnError)
+		kind := fs.String("kind", "", "key kind (e.g. hmac-email)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *kind == "" {
+			return fmt.Errorf("-kind is required")
+		}
+		version, err := ring.Rotate(ctx, api.OpenKeystore(cfg), *kind)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("rotated %s to %s (previous versions RETIRING; old tokens keep matching, re-key happens on touch)\n", *kind, version)
+		return nil
+	case "list":
+		rows, err := st.Pool.Query(ctx, `SELECT key_id, status, created_at FROM keys ORDER BY kind, created_at`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, status string
+			var created time.Time
+			if err := rows.Scan(&id, &status, &created); err != nil {
+				return err
+			}
+			fmt.Printf("%-24s %-9s %s\n", id, status, created.Format(time.RFC3339))
+		}
+		return rows.Err()
+	default:
+		return fmt.Errorf("unknown keys subcommand %q", args[0])
 	}
 }
 

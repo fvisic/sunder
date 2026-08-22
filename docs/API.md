@@ -85,6 +85,44 @@ enumerate another's customer base). Every lookup, hit or miss, is audited.
 Remember: **LOOKUP != AUTHENTICATION** — a hit never proves the caller is
 talking to that person.
 
+## Endpoints (M4)
+
+### POST /v1/oti — issue a one-time identifier
+Action: `oti.issue`; `purpose` must be in the caller's allowed purposes;
+`cid` must belong to the caller's scope.
+
+```json
+{"cid": "CID-...", "purpose": "create_order", "audience": "erp"}
+```
+
+`201 {"token": "v4.public...", "expires_at": "..."}` — a PASETO v4.public
+token (Ed25519, no negotiable algorithm) valid for **5 minutes, one use,
+one audience, one purpose**. The signing key version travels as `kid`;
+verification only accepts key versions the keyring lists as live.
+
+### POST /v1/oti/verify — verify and consume
+Action: `oti.verify`. The caller's scope must equal `audience` — you can
+only verify tokens addressed to you.
+
+```json
+{"token": "v4.public...", "purpose": "create_order", "audience": "erp"}
+```
+
+`200 {"cid": "CID-..."}` — **the verifier's own scoped CID** for the person
+(auto-issued if absent); the issuer's pseudonym never crosses the scope
+boundary. Single use is enforced by an atomic `VALID -> USED` database
+transition, not just the signature. Errors: `token_invalid` (400, bad
+signature/purpose/shape), `audience_mismatch` (403), `token_used` (409),
+`token_expired` (410). Issue and verify are both audited.
+
+## Key rotation
+
+`sunder keys rotate -kind <hmac-email|hmac-phone|hmac-name|pii-kek|oti-sign>`
+mints the next version (new material first, then metadata) and demotes the
+previous version to RETIRING. Lookups and dedup match tokens under every
+live version (dual-key window); rows re-key to the newest version when
+touched by a registration. `sunder keys list` shows the ring.
+
 ## Operational endpoints
 
 - `GET /healthz` — liveness (no auth)

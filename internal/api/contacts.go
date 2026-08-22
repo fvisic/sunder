@@ -27,6 +27,14 @@ func writeErr(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "purpose_not_allowed"})
 	case errors.Is(err, service.ErrValidation):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": err.Error()})
+	case errors.Is(err, service.ErrTokenUsed):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "token_used"})
+	case errors.Is(err, service.ErrTokenExpired):
+		writeJSON(w, http.StatusGone, map[string]string{"error": "token_expired"})
+	case errors.Is(err, service.ErrAudienceMismatch):
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "audience_mismatch"})
+	case errors.Is(err, service.ErrTokenInvalid):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "token_invalid"})
 	default:
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal"})
 	}
@@ -85,9 +93,14 @@ func (s *Server) handleAttributeGet(w http.ResponseWriter, r *http.Request) {
 
 // logErr records internal failures without request payloads (no PII in logs).
 func (s *Server) logErr(r *http.Request, err error) {
-	if errors.Is(err, service.ErrNotFound) || errors.Is(err, service.ErrForbidden) ||
-		errors.Is(err, service.ErrPurposeNotAllowed) || errors.Is(err, service.ErrValidation) {
-		return
+	for _, expected := range []error{
+		service.ErrNotFound, service.ErrForbidden, service.ErrPurposeNotAllowed,
+		service.ErrValidation, service.ErrTokenInvalid, service.ErrTokenExpired,
+		service.ErrTokenUsed, service.ErrAudienceMismatch,
+	} {
+		if errors.Is(err, expected) {
+			return
+		}
 	}
 	s.Log.Error("handler error", "pattern", r.Pattern, "err", err.Error())
 }

@@ -28,6 +28,7 @@ type Server struct {
 	Metrics  *metrics.Registry
 	Log      *slog.Logger
 	Contacts *service.Contacts
+	OTI      *service.OTI
 	Auth     *auth.Authenticator
 	Limiter  *ratelimit.Limiter
 	Detector *ratelimit.Detector
@@ -62,10 +63,14 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 
 	if st != nil {
 		ks := OpenKeystore(cfg)
-		if err := EnsureKeys(context.Background(), ks); err != nil {
+		ring := &service.KeyRing{Pool: st.Pool}
+		// Bootstrap/rotation is the ONLY place key material comes into
+		// existence (the keystore itself is strict).
+		if err := ring.EnsureAll(context.Background(), ks); err != nil {
 			return nil, fmt.Errorf("keystore bootstrap: %w", err)
 		}
-		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: crypto.NewPIIBox(ks)}
+		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: crypto.NewPIIBox(ks), Ring: ring}
+		s.OTI = &service.OTI{Pool: st.Pool, KS: ks, Ring: ring, Contacts: s.Contacts}
 		s.Auth = &auth.Authenticator{Pool: st.Pool}
 
 		s.Limiter = ratelimit.NewLimiter()
@@ -76,22 +81,11 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("POST /v1/contacts/{cid}/scopes", s.handleScopesIssue)
 		v1.HandleFunc("GET /v1/contacts/{cid}/attributes/{name}", s.handleAttributeGet)
 		v1.HandleFunc("POST /v1/lookup", s.handleLookup)
+		v1.HandleFunc("POST /v1/oti", s.handleOTIIssue)
+		v1.HandleFunc("POST /v1/oti/verify", s.handleOTIVerify)
 		s.mux.Handle("/v1/", s.Auth.Middleware(v1))
 	}
 	return s, nil
-}
-
-// EnsureKeys creates any missing key material for the active key versions.
-// Bootstrap/rotation is the ONLY place keys come into existence.
-func EnsureKeys(ctx context.Context, ks crypto.Keystore) error {
-	for _, kind := range []string{crypto.KeyHMACEmail, crypto.KeyHMACPhone, crypto.KeyHMACName, crypto.KeyPIIKEK, crypto.SigningKeyName} {
-		for _, v := range crypto.KeyVersions() {
-			if err := ks.Ensure(ctx, kind+"/"+v); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 // Handler returns the outermost HTTP handler (middleware applied).

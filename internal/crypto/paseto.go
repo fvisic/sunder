@@ -44,6 +44,21 @@ func PasetoSign(sk ed25519.PrivateKey, payload []byte) string {
 	return pasetoHeader + b64.EncodeToString(append(append([]byte{}, payload...), sig...))
 }
 
+// PasetoPayload returns the embedded payload WITHOUT verifying the
+// signature. Only for reading the key id (kid) to select the verification
+// key; every field must be treated as untrusted until PasetoVerify passes.
+func PasetoPayload(token string) ([]byte, error) {
+	body, ok := strings.CutPrefix(token, pasetoHeader)
+	if !ok || strings.Contains(body, ".") {
+		return nil, fmt.Errorf("paseto: not a footerless v4.public token")
+	}
+	raw, err := b64.DecodeString(body)
+	if err != nil || len(raw) < ed25519.SignatureSize {
+		return nil, fmt.Errorf("paseto: malformed token")
+	}
+	return raw[:len(raw)-ed25519.SignatureSize], nil
+}
+
 // PasetoVerify checks the signature and returns the embedded payload.
 func PasetoVerify(pk ed25519.PublicKey, token string) ([]byte, error) {
 	body, ok := strings.CutPrefix(token, pasetoHeader)
