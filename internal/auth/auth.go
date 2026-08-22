@@ -26,6 +26,13 @@ const (
 	ActAttributesRead   = "attributes.read"
 	ActOTIIssue         = "oti.issue"
 	ActOTIVerify        = "oti.verify"
+	ActConsentManage    = "consent.manage"
+	// DSR actions (PLAN section 14). dsr.access and dsr.erase are org-wide,
+	// linkage-capable privileges for the privacy-officer client only;
+	// dsr.export is scope-local portability.
+	ActDSRAccess = "dsr.access"
+	ActDSRErase  = "dsr.erase"
+	ActDSRExport = "dsr.export"
 )
 
 // Client is an authenticated caller (one row in the clients table).

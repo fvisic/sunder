@@ -30,8 +30,11 @@ Section numbers reference docs/PLAN.md.
 | Insider/DBA rewriting history | Chain break at a provable position; a full-chain rewrite orphans TSA anchors, and deleted anchor rows are exposed by the exported `.tsr` files | Hash chain + append-only triggers on `audit` AND `audit_anchor` + RFC 3161 anchoring **with off-host export**: `sunder anchor -out <dir>` and sync that directory to write-once storage the DB attacker cannot reach; `sunder verify-audit -anchors <dir>` cross-checks. Anchors kept only in the database are circular and defeat nobody privileged. |
 | Compromised service process | Working keys in RAM — game over for that instance's crypto | The honest limit: minimize dependencies (§8.1), consider process split (v2), Vault audit trail for key access |
 
-## Deliberate non-goals (v1)
+## Deliberate non-goals
 
 Documented in PLAN §12: no verifiable credentials/selective disclosure, no
-cross-vendor federation, no OIB resolution, no multi-tenancy. GDPR
-data-subject rights layer lands in v1.5 (PLAN §14).
+cross-vendor federation, no OIB resolution, no multi-tenancy. The GDPR
+data-subject rights layer (PLAN §14) shipped in v1.5: consent enforcement,
+org-wide right of access and erasure with signed webhooks, portability
+export, and per-scope retention. The self-service privacy portal remains
+v2 (it requires citizen authentication — wallet/OTP — outside this layer).

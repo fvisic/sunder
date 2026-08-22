@@ -340,6 +340,161 @@ paths:
         '500':
           $ref: '#/components/responses/Internal'
 
+  /v1/consent:
+    post:
+      tags: [gdpr]
+      operationId: setConsent
+      summary: Record a consent decision
+      description: |
+        Action `consent.manage`; the CID must belong to the caller's scope.
+        Absence of a record means the purpose is not consent-governed; an
+        explicit granted=false blocks attribute reads and OTI issuance for
+        that purpose (403 consent_denied) until re-granted. Audited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cid, purpose, granted]
+              properties:
+                cid: {type: string}
+                purpose: {type: string}
+                granted: {type: boolean}
+      responses:
+        '200':
+          description: Decision recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cid: {type: string}
+                  purpose: {type: string}
+                  granted: {type: boolean}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/consent/{cid}:
+    get:
+      tags: [gdpr]
+      operationId: listConsents
+      summary: List recorded consent decisions for a caller-scope CID
+      parameters:
+        - {name: cid, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Recorded decisions (empty list when none).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  consents:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        purpose: {type: string}
+                        granted: {type: boolean}
+                        updated_at: {type: string, format: date-time}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/dsr/access:
+    get:
+      tags: [gdpr]
+      operationId: dsrAccess
+      summary: GDPR right of access (org-wide)
+      description: |
+        Action `dsr.access` — high-privilege and linkage-capable (privacy
+        officer only): returns every scope's data for the person plus the
+        audit trail of who touched them. Audited.
+      parameters:
+        - {name: cid, in: query, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: All scopes' data and the access trail.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scopes:
+                    type: array
+                    items: {$ref: '#/components/schemas/ScopeData'}
+                  audit_trail:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        seq: {type: integer}
+                        ts: {type: string, format: date-time}
+                        client_id: {type: string}
+                        action: {type: string}
+                        cid: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/dsr/erase:
+    post:
+      tags: [gdpr]
+      operationId: dsrErase
+      summary: GDPR right to be forgotten (org-wide)
+      description: |
+        Action `dsr.erase`. Transactionally wipes every scope's blob,
+        deletes all search tokens, tombstones the person (CID references in
+        client systems never break) and queues one signed webhook event per
+        scope. Audited. Re-registration afterwards creates a new person.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cid]
+              properties:
+                cid: {type: string}
+      responses:
+        '200':
+          description: Erasure executed; events queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  erasure_id: {type: integer}
+                  scopes: {type: integer}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/dsr/export:
+    get:
+      tags: [gdpr]
+      operationId: dsrExport
+      summary: GDPR data portability (caller scope only)
+      parameters:
+        - {name: cid, in: query, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Machine-readable dump of the caller-scope data.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScopeData'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Internal'}
+
   /healthz:
     get:
       tags: [ops]
@@ -443,6 +598,24 @@ components:
       properties:
         cid:
           $ref: '#/components/schemas/Cid'
+
+    ScopeData:
+      type: object
+      description: One scope's view of a person (DSR responses).
+      properties:
+        scope: {type: string}
+        cid: {type: string}
+        attributes:
+          type: object
+          additionalProperties: {type: string}
+        consents:
+          type: array
+          items:
+            type: object
+            properties:
+              purpose: {type: string}
+              granted: {type: boolean}
+              updated_at: {type: string, format: date-time}
 
     RegisterContactRequest:
       type: object

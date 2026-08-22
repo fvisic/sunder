@@ -420,6 +420,13 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 	if !client.CanUse(purpose) {
 		return "", ErrPurposeNotAllowed
 	}
+	// Consent hook (v1.5): an explicit granted=false decision blocks the
+	// purpose even though the client is allowed to use it in general.
+	if denied, err := consentDenied(ctx, c.Pool, cid, purpose); err != nil {
+		return "", err
+	} else if denied {
+		return "", ErrConsentDenied
+	}
 	var blob []byte
 	var keyID string
 	err := c.Pool.QueryRow(ctx,

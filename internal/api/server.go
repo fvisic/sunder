@@ -30,6 +30,7 @@ type Server struct {
 	Log      *slog.Logger
 	Contacts *service.Contacts
 	OTI      *service.OTI
+	GDPR     *service.GDPR
 	Auth     *auth.Authenticator
 	Limiter  *ratelimit.Limiter
 	Detector *ratelimit.Detector
@@ -89,6 +90,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		}
 		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: crypto.NewPIIBox(ks), Ring: ring}
 		s.OTI = &service.OTI{Pool: st.Pool, KS: ks, Ring: ring, Contacts: s.Contacts}
+		s.GDPR = &service.GDPR{Pool: st.Pool, Contacts: s.Contacts}
 		s.Auth = &auth.Authenticator{Pool: st.Pool}
 
 		s.Limiter = ratelimit.NewLimiter()
@@ -101,6 +103,11 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("POST /v1/lookup", s.handleLookup)
 		v1.HandleFunc("POST /v1/oti", s.handleOTIIssue)
 		v1.HandleFunc("POST /v1/oti/verify", s.handleOTIVerify)
+		v1.HandleFunc("POST /v1/consent", s.handleConsentSet)
+		v1.HandleFunc("GET /v1/consent/{cid}", s.handleConsentList)
+		v1.HandleFunc("GET /v1/dsr/access", s.handleDSRAccess)
+		v1.HandleFunc("POST /v1/dsr/erase", s.handleDSRErase)
+		v1.HandleFunc("GET /v1/dsr/export", s.handleDSRExport)
 		s.mux.Handle("/v1/", s.Auth.Middleware(v1))
 	}
 	return s, nil
@@ -181,6 +188,27 @@ func (s *Server) Run(ctx context.Context) error {
 		// A configured client CA means mTLS, fully: connections without a
 		// valid client certificate are refused, not merely unverified.
 		srv.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+
+	// Erasure webhook delivery worker: retries PENDING events every minute
+	// (Erase also attempts an immediate delivery inline).
+	if s.GDPR != nil {
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if n, err := s.GDPR.DeliverPending(ctx); err != nil {
+						s.Log.Error("erasure delivery", "err", err.Error())
+					} else if n > 0 {
+						s.Log.Info("erasure events delivered", "count", n)
+					}
+				}
+			}
+		}()
 	}
 
 	errCh := make(chan error, 1)

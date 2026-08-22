@@ -25,6 +25,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 	case errors.Is(err, service.ErrPurposeNotAllowed):
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "purpose_not_allowed"})
+	case errors.Is(err, service.ErrConsentDenied):
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "consent_denied"})
 	case errors.Is(err, service.ErrValidation):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": err.Error()})
 	case errors.Is(err, service.ErrTokenUsed):
@@ -96,7 +98,7 @@ func (s *Server) logErr(r *http.Request, err error) {
 	for _, expected := range []error{
 		service.ErrNotFound, service.ErrForbidden, service.ErrPurposeNotAllowed,
 		service.ErrValidation, service.ErrTokenInvalid, service.ErrTokenExpired,
-		service.ErrTokenUsed, service.ErrAudienceMismatch,
+		service.ErrTokenUsed, service.ErrAudienceMismatch, service.ErrConsentDenied,
 	} {
 		if errors.Is(err, expected) {
 			return

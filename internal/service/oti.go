@@ -69,6 +69,12 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 	if !client.CanUse(purpose) {
 		return "", time.Time{}, ErrPurposeNotAllowed
 	}
+	// Consent hook (v1.5): withdrawn consent blocks handoffs for the purpose.
+	if denied, err := consentDenied(ctx, o.Pool, cid, purpose); err != nil {
+		return "", time.Time{}, err
+	} else if denied {
+		return "", time.Time{}, ErrConsentDenied
+	}
 	if _, err := o.Contacts.personForClientCID(ctx, client, cid); err != nil {
 		return "", time.Time{}, err
 	}

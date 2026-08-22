@@ -69,6 +69,19 @@ jobs:
         working-directory: sdks/python
         run: python3 -m unittest discover -s tests -v
 
+  sdk-php:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+      - name: Test
+        working-directory: sdks/php
+        run: |
+          composer install --no-interaction
+          vendor/bin/phpunit tests
+
   e2e-demo:
     # Builds the real image, boots the compose stack, and runs the demo
     # script — which asserts every expected status code, so it doubles as a

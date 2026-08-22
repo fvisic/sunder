@@ -20,6 +20,7 @@ import (
 	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
+	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/service"
 	"github.com/fvisic/sunder/internal/store"
 )
@@ -37,10 +38,10 @@ func main() {
 
 func run(cmd string, args []string) error {
 	switch cmd {
-	case "serve", "migrate", "client", "keys", "anchor", "verify-audit":
+	case "serve", "migrate", "client", "keys", "anchor", "verify-audit", "webhook", "retention", "dsr":
 	default:
 		// Fail on typos before requiring config or a live database.
-		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit)", cmd)
+		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr)", cmd)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -74,8 +75,149 @@ func run(cmd string, args []string) error {
 		return anchorCmd(ctx, cfg, st, args)
 	case "verify-audit":
 		return verifyAuditCmd(ctx, cfg, st, args)
+	case "webhook":
+		return webhookCmd(ctx, st, args)
+	case "retention":
+		return retentionCmd(ctx, st, args)
+	case "dsr":
+		return dsrCmd(ctx, st, args)
 	default:
 		return clientCmd(ctx, st, args)
+	}
+}
+
+// webhookCmd manages per-scope erasure webhooks. The signing secret is
+// printed exactly once; receivers verify X-Sunder-Signature =
+// hex(HMAC-SHA256(secret, body)).
+func webhookCmd(ctx context.Context, st *store.Store, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: sunder webhook set -scope <s> -url <u> | webhook list")
+	}
+	if err := st.Migrate(ctx); err != nil {
+		return err
+	}
+	switch args[0] {
+	case "set":
+		fs := flag.NewFlagSet("webhook set", flag.ContinueOnError)
+		scope := fs.String("scope", "", "scope whose erasure events go to this URL")
+		url := fs.String("url", "", "HTTPS endpoint")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *scope == "" || *url == "" {
+			return fmt.Errorf("-scope and -url are required")
+		}
+		secret, err := crypto.NewClientSecret()
+		if err != nil {
+			return err
+		}
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO webhooks (scope, url, secret) VALUES ($1,$2,$3)
+			 ON CONFLICT (scope) DO UPDATE SET url=EXCLUDED.url, secret=EXCLUDED.secret, created_at=now()`,
+			*scope, *url, secret); err != nil {
+			return err
+		}
+		fmt.Println("webhook signing secret (shown once, configure the receiver now):")
+		fmt.Println(secret)
+		return nil
+	case "list":
+		rows, err := st.Pool.Query(ctx, `SELECT scope, url, created_at FROM webhooks ORDER BY scope`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var scope, url string
+			var created time.Time
+			if err := rows.Scan(&scope, &url, &created); err != nil {
+				return err
+			}
+			fmt.Printf("%-16s %s (%s)\n", scope, url, created.Format(time.RFC3339))
+		}
+		return rows.Err()
+	default:
+		return fmt.Errorf("unknown webhook subcommand %q", args[0])
+	}
+}
+
+// retentionCmd manages per-scope contact TTLs and runs the sweep.
+func retentionCmd(ctx context.Context, st *store.Store, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: sunder retention set -scope <s> -days <n> | retention run")
+	}
+	if err := st.Migrate(ctx); err != nil {
+		return err
+	}
+	switch args[0] {
+	case "set":
+		fs := flag.NewFlagSet("retention set", flag.ContinueOnError)
+		scope := fs.String("scope", "", "scope")
+		days := fs.Int("days", -1, "contact blob TTL in days")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *scope == "" || *days < 0 {
+			return fmt.Errorf("-scope and -days are required")
+		}
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO retention_policies (scope, contacts_ttl_days) VALUES ($1,$2)
+			 ON CONFLICT (scope) DO UPDATE SET contacts_ttl_days=EXCLUDED.contacts_ttl_days`,
+			*scope, *days); err != nil {
+			return err
+		}
+		fmt.Printf("retention for scope %s: blobs older than %d day(s) are wiped by `sunder retention run`\n", *scope, *days)
+		return nil
+	case "run":
+		wiped, otiPruned, err := service.RunRetention(ctx, st.Pool)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned\n", wiped, otiPruned)
+		fmt.Println("(audit rows are never pruned - the chain and its anchors are the tamper evidence)")
+		return nil
+	default:
+		return fmt.Errorf("unknown retention subcommand %q", args[0])
+	}
+}
+
+// dsrCmd operates the erasure delivery queue.
+func dsrCmd(ctx context.Context, st *store.Store, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: sunder dsr deliver | dsr events")
+	}
+	if err := st.Migrate(ctx); err != nil {
+		return err
+	}
+	switch args[0] {
+	case "deliver":
+		g := &service.GDPR{Pool: st.Pool}
+		n, err := g.DeliverPending(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("delivered %d erasure event(s)\n", n)
+		return nil
+	case "events":
+		rows, err := st.Pool.Query(ctx,
+			`SELECT id, erasure_id, scope, cid, status, attempts, COALESCE(delivered_at::text,'')
+			 FROM erasure_events ORDER BY id DESC LIMIT 50`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, erasureID int64
+			var scope, cid, status, deliveredAt string
+			var attempts int
+			if err := rows.Scan(&id, &erasureID, &scope, &cid, &status, &attempts, &deliveredAt); err != nil {
+				return err
+			}
+			fmt.Printf("#%d erasure=%d scope=%-12s cid=%s %s attempts=%d %s\n",
+				id, erasureID, scope, cid, status, attempts, deliveredAt)
+		}
+		return rows.Err()
+	default:
+		return fmt.Errorf("unknown dsr subcommand %q", args[0])
 	}
 }
 
@@ -296,6 +438,8 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 	known := map[string]bool{
 		auth.ActContactsRegister: true, auth.ActScopesIssue: true, auth.ActLookup: true,
 		auth.ActAttributesRead: true, auth.ActOTIIssue: true, auth.ActOTIVerify: true,
+		auth.ActConsentManage: true, auth.ActDSRAccess: true, auth.ActDSRErase: true,
+		auth.ActDSRExport: true,
 	}
 	acts := splitCSV(*actions)
 	for _, a := range acts {

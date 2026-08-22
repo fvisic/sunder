@@ -129,6 +129,47 @@ transition, not just the signature. Errors: `token_invalid` (400, bad
 signature/purpose/shape), `audience_mismatch` (403), `token_used` (409),
 `token_expired` (410). Issue and verify are both audited.
 
+## Endpoints (v1.5 — GDPR / data-subject rights)
+
+### POST /v1/consent — record a consent decision
+Action: `consent.manage`; CID must be caller-scope.
+Body: `{"cid": "...", "purpose": "newsletter", "granted": false}`.
+Absence of a record means "not consent-governed" (contract/legitimate-
+interest bases); an explicit `granted:false` **blocks** attribute reads and
+OTI issuance for that purpose (403 `consent_denied`) until re-granted.
+Decisions survive erasure for accountability.
+
+### GET /v1/consent/{cid} — list recorded decisions
+Action: `consent.manage`. `200 {"consents": [{purpose, granted, updated_at}]}`
+
+### GET /v1/dsr/access?cid=... — right of access (org-wide)
+Action: `dsr.access` — a high-privilege, linkage-capable action for the
+privacy-officer client only. Returns every scope's data for the person
+(scope, CID, decrypted attributes, consents) plus the audit trail of who
+touched them. Audited.
+
+### POST /v1/dsr/erase — right to be forgotten (org-wide)
+Action: `dsr.erase`. Body `{"cid": "..."}`. In one transaction: every
+scope's blob is wiped, all search tokens deleted, the person becomes a
+tombstone (client-side CID references never break), and one erasure event
+per scope is queued. Events are delivered to each scope's webhook
+(`sunder webhook set -scope crm -url ...`) as JSON signed with
+`X-Sunder-Signature: hex(HMAC-SHA256(secret, body))`; a worker retries
+PENDING deliveries every minute (`sunder dsr events` shows the queue).
+Re-registering the same identifiers afterwards creates a brand-new person.
+
+### GET /v1/dsr/export?cid=... — data portability (caller scope)
+Action: `dsr.export`. Machine-readable JSON of what the caller's scope
+holds: `{scope, cid, attributes, consents}`. Audited.
+
+## Retention
+
+`sunder retention set -scope crm -days 365` + `sunder retention run` (cron):
+wipes caller-scope blobs older than the TTL (audited) and prunes OTI rows
+expired for more than 30 days. Search tokens survive a retention wipe (it is
+not an erasure); audit rows are NEVER pruned — the chain and its anchors are
+the tamper evidence.
+
 ## Key rotation
 
 `sunder keys rotate -kind <hmac-email|hmac-phone|hmac-name|pii-kek|oti-sign>`

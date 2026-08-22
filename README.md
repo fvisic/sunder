@@ -41,7 +41,7 @@ curl http://localhost:8080/healthz
 
 | Path | Contents |
 |---|---|
-| `cmd/sunder`, `internal/` | the service: CID/OTI, HMAC lookup, purpose-checked attributes, hash-chained + TSA-anchored audit, key rotation |
+| `cmd/sunder`, `internal/` | the service: CID/OTI, HMAC lookup, purpose-checked attributes, hash-chained + TSA-anchored audit, key rotation, GDPR layer (consent, org-wide access/erasure with signed webhooks, portability, retention) |
 | `api/openapi.yaml` | OpenAPI 3.1 contract |
 | `sdks/typescript`, `sdks/python` | zero-dependency SDKs (same canonical interface; Java/PHP/.NET follow) |
 | `demo/callcenter.sh` | narrated call-center pilot storyline (doubles as a smoke test) |
@@ -49,7 +49,8 @@ curl http://localhost:8080/healthz
 | `docs/` | architecture, API, threat model, design plan |
 
 CLI: `sunder serve | migrate | client create | keys rotate/retire/list |
-anchor | verify-audit`.
+anchor | verify-audit | webhook set/list | retention set/run |
+dsr deliver/events`.
 
 ## Development
 
