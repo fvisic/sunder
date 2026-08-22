@@ -172,8 +172,10 @@ class SunderClient:
     def register_contact(self, attributes: dict) -> str:
         """Register (or dedup-merge) a contact; returns the caller-scope CID.
 
-        `attributes` is the full request body: email/phone/name plus an
-        optional nested "attributes" dict of custom fields.
+        `attributes` is the full request body: email/phone/name (plus the
+        plural "emails"/"phones" lists for contacts with several searchable
+        identifiers) and an optional nested "attributes" dict of custom
+        fields.
         """
         return self._request("POST", "/v1/contacts", body=attributes)["cid"]
 

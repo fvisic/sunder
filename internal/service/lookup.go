@@ -66,27 +66,35 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 	}
 
 	// The primary identifier is email (priority) or phone; any additional
-	// identifier narrows SOFTLY: it must match when the person has that
-	// token, but a person registered without it is not excluded (otherwise a
-	// contact registered email-only could never be found by email+phone).
+	// identifier narrows SOFTLY: it must match when the person has tokens of
+	// that kind, but a person registered without any is not excluded
+	// (otherwise a contact registered email-only could never be found by
+	// email+phone). All of a person's identifiers of a kind participate.
 	by := "email"
-	q := `SELECT id FROM persons WHERE email_token = ANY($1)`
-	args := []any{emailToks}
+	primary := emailToks
 	if in.Email == "" {
-		by, q, args = "phone", `SELECT id FROM persons WHERE phone_token = ANY($1)`, []any{phoneToks}
-	} else if in.Phone != "" {
+		by, primary = "phone", phoneToks
+	}
+	q := `SELECT pt.person_id FROM person_tokens pt WHERE pt.kind = $1 AND pt.token = ANY($2)`
+	args := []any{by, primary}
+	narrow := func(kind string, toks []string) {
+		q += fmt.Sprintf(` AND (
+			NOT EXISTS (SELECT 1 FROM person_tokens n WHERE n.person_id = pt.person_id AND n.kind = '%s')
+			OR EXISTS (SELECT 1 FROM person_tokens n WHERE n.person_id = pt.person_id AND n.kind = '%s' AND n.token = ANY($%d)))`,
+			kind, kind, len(args)+1)
+		args = append(args, toks)
+	}
+	if in.Email != "" && in.Phone != "" {
 		by += "+phone"
-		q += fmt.Sprintf(" AND (phone_token = ANY($%d) OR phone_token IS NULL)", len(args)+1)
-		args = append(args, phoneToks)
+		narrow("phone", phoneToks)
 	}
 	if in.Name != "" {
 		by += "+name"
-		q += fmt.Sprintf(" AND (name_token = ANY($%d) OR name_token IS NULL)", len(args)+1)
-		args = append(args, nameToks)
+		narrow("name", nameToks)
 	}
 
 	var personID string
-	err := c.Pool.QueryRow(ctx, q+" LIMIT 1", args...).Scan(&personID)
+	err := c.Pool.QueryRow(ctx, q+" ORDER BY pt.person_id LIMIT 1", args...).Scan(&personID)
 	matched := err == nil
 	if err != nil && err != pgx.ErrNoRows {
 		return "", err

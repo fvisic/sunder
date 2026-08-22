@@ -80,10 +80,16 @@ function mapError(status: number, serverError: string | undefined): SunderErrorC
   }
 }
 
-/** Input for registerContact. At least one of email/phone is required. */
+/** Input for registerContact. At least one email or phone is required. */
 export interface ContactAttributes {
+  /** Primary email (searchable). */
   email?: string;
+  /** Additional searchable emails. */
+  emails?: string[];
+  /** Primary phone (searchable, E.164 or common formatting). */
   phone?: string;
+  /** Additional searchable phones. */
+  phones?: string[];
   name?: string;
   /**
    * Additional attributes stored in the caller-scope encrypted blob.

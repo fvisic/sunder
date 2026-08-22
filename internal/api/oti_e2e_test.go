@@ -160,19 +160,18 @@ func TestKeyRotationKeepsLookupAndDedupWorking(t *testing.T) {
 	if rec.Code != 201 || out["cid"] != cid {
 		t.Fatalf("post-rotation dedup: %d %s", rec.Code, rec.Body.String())
 	}
-	// The stored token now differs from any v1 token (re-key on touch):
-	// verify by computing the v2 token directly.
+	// The touch added a newest-version (v2) token row for the identifier.
 	tok2, err := e.srv.Contacts.Tok.EmailToken(ctx, "v2", "filip@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var n int
 	if err := e.srv.Store.Pool.QueryRow(ctx,
-		`SELECT count(*) FROM persons WHERE email_token=$1`, tok2).Scan(&n); err != nil {
+		`SELECT count(*) FROM person_tokens WHERE kind='email' AND token=$1 AND key_version='v2'`, tok2).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
-		t.Fatalf("token not re-keyed to v2 (matches: %d)", n)
+		t.Fatalf("v2 token row not written on touch (matches: %d)", n)
 	}
 }
 

@@ -179,7 +179,12 @@ func (k *KeyRing) Rotate(ctx context.Context, ks crypto.Keystore, kind string) (
 // kinds, retire only after affected rows re-keyed (they re-key on touch);
 // tokens still stored under a retired version stop matching.
 func (k *KeyRing) Retire(ctx context.Context, kind, version string) error {
-	tag, err := k.Pool.Exec(ctx,
+	tx, err := k.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx,
 		`UPDATE keys SET status='RETIRED' WHERE key_id=$1 AND kind=$2 AND status='RETIRING'`,
 		kind+"/"+version, kind)
 	if err != nil {
@@ -187,6 +192,18 @@ func (k *KeyRing) Retire(ctx context.Context, kind, version string) error {
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("keyring: %s/%s is not RETIRING (only RETIRING versions can be retired; rotate first)", kind, version)
+	}
+	// Search-token rows under a retired version can never match again;
+	// purging them keeps the table honest (and removes material derived
+	// from a possibly-leaked key).
+	if tokenKind, ok := strings.CutPrefix(kind, "hmac-"); ok {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM person_tokens WHERE kind=$1 AND key_version=$2`, tokenKind, version); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
 	}
 	k.Invalidate()
 	return nil

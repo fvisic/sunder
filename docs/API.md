@@ -29,17 +29,25 @@ Action: `contacts.register`.
  "name": "Filip Visic", "attributes": {"loyalty_tier": "gold"}}
 ```
 
-At least one of `email`/`phone` is required. `email`, `phone` and `name`
-are reserved attribute names (rejected inside `attributes`); the service
-stores the normalized identifiers under them. Identifiers are normalized
-(Unicode NFKC; email lowercased; phone to E.164), HMAC search tokens are
-computed, and all values land in the **caller-scope** AES-256-GCM blob.
+At least one email or phone is required. A contact can carry **several
+searchable emails and phones**: the singular field is the primary, the
+plural lists (`"emails": [...]`, `"phones": [...]`) add more; every one is
+HMAC-tokenized, searchable and dedup-relevant. Normalized identifiers are
+stored as attributes `email`, `email_2`, …, `phone`, `phone_2`, …; those
+names plus `name` are reserved (rejected inside `attributes`). Identifiers
+are normalized (Unicode NFKC; email lowercased; phone to E.164), and all
+values land in the **caller-scope** AES-256-GCM blob. Multiple addresses or
+any other multi-valued data go into `attributes` under caller-chosen names
+(`address_home`, `address_billing`, …).
 
-Dedup: an existing person is matched by email token first, then phone
-(deterministic priority) and reused — re-registering returns the same
-scoped CID, merges new attributes into the caller's blob (new values win)
-and fills in identifier tokens the person was missing. Attributes stored by
-other scopes are never readable through dedup (per-scope blobs).
+Dedup: an existing person is matched by ANY of their email tokens first,
+then any phone token (deterministic email priority; an ambiguous claim
+naming person A's email and person B's phone resolves to A) and reused —
+re-registering returns the same scoped CID, merges new attributes into the
+caller's blob (new values win) and adds missing identifier tokens. An
+identifier already owned by another person is never silently stolen.
+Attributes stored by other scopes are never readable through dedup
+(per-scope blobs).
 
 `201 {"cid": "CID-..."}` — the pseudonym in the *caller's* scope.
 

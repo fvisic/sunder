@@ -50,12 +50,14 @@ paths:
       operationId: registerContact
       summary: Register a contact
       description: |
-        Action `contacts.register`. At least one of `email`/`phone` is
-        required. `email`, `phone` and `name` are reserved attribute names
-        (rejected inside `attributes`); the service stores the normalized
-        identifiers under them. Identifiers are normalized (Unicode NFKC;
-        email lowercased; phone to E.164), HMAC search tokens are computed,
-        and all values land in the caller-scope AES-256-GCM blob.
+        Action `contacts.register`. At least one email or phone is required;
+        the plural `emails`/`phones` lists make additional identifiers
+        searchable. Reserved attribute names (`email`, `phone`, `name`,
+        `email_N`, `phone_N`) are rejected inside `attributes`; the service
+        stores the normalized identifiers under them. Identifiers are
+        normalized (Unicode NFKC; email lowercased; phone to E.164), HMAC
+        search tokens are computed, and all values land in the caller-scope
+        AES-256-GCM blob.
 
         Dedup: an existing person is matched by email token first, then
         phone, and reused — re-registering returns the same scoped CID and
@@ -430,30 +432,49 @@ components:
 
     RegisterContactRequest:
       type: object
-      description: At least one of `email`/`phone` is required.
+      description: |
+        At least one email or phone is required. A contact can carry several
+        searchable emails/phones: the singular field is the primary, the
+        plural lists add more — all are searchable and dedup-relevant.
+        Normalized identifiers are stored as attributes `email`, `email_2`,
+        …, `phone`, `phone_2`, ….
       properties:
         email:
           type: string
-          description: Normalized server-side (Unicode NFKC, lowercased).
+          description: Primary email; normalized server-side (Unicode NFKC, lowercased).
           examples: [Filip@Example.com]
+        emails:
+          type: array
+          items:
+            type: string
+          description: Additional searchable emails.
         phone:
           type: string
-          description: Normalized server-side to E.164.
+          description: Primary phone; normalized server-side to E.164.
           examples: ['+385 91 123 4567']
+        phones:
+          type: array
+          items:
+            type: string
+          description: Additional searchable phones.
         name:
           type: string
           description: A narrowing key, never an identifier on its own.
           examples: [Filip Visic]
         attributes:
           type: object
-          description: Free-form attributes stored in the caller-scope encrypted blob. `email`, `phone` and `name` are reserved names and rejected here.
+          description: Free-form attributes stored in the caller-scope encrypted blob (multiple addresses go here under caller-chosen names). `email`, `phone`, `name` and the generated `email_N`/`phone_N` are reserved names and rejected here.
           additionalProperties:
             type: string
           examples:
             - loyalty_tier: gold
+              address_home: 'Ilica 1, Zagreb'
+              address_billing: 'Savska 10, Zagreb'
       anyOf:
         - required: [email]
         - required: [phone]
+        - required: [emails]
+        - required: [phones]
 
     LookupRequest:
       type: object

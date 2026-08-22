@@ -44,3 +44,27 @@ jobs:
       - name: Dependencies up to date check
         run: |
           go list -u -m all | grep '\[' && echo "::warning::outdated dependencies found" || true
+
+  sdk-typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build and test
+        working-directory: sdks/typescript
+        run: |
+          npm ci
+          npm test
+
+  sdk-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test
+        working-directory: sdks/python
+        run: python3 -m unittest discover -s tests -v

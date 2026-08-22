@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"regexp"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -53,15 +54,73 @@ func (c *Contacts) tokensAllVersions(ctx context.Context, kind, normalized strin
 }
 
 // RegisterInput carries the identifiers and the attributes to protect.
-// Email/phone/name feed HMAC search tokens; everything lands in the
-// caller-scope encrypted blob. "email"/"phone"/"name" are reserved attribute
-// names (the service stores the normalized identifiers under them) and are
-// rejected inside Attributes to prevent planting unnormalized fakes.
+// A contact can have several searchable emails and phones: the singular
+// fields and the plural lists merge (singular first = primary). All feed
+// HMAC search tokens; everything lands in the caller-scope encrypted blob.
+// "email"/"phone"/"name" and the generated "email_N"/"phone_N" are reserved
+// attribute names (the service stores the normalized identifiers under
+// them) and are rejected inside Attributes to prevent planting
+// unnormalized fakes.
 type RegisterInput struct {
 	Email      string            `json:"email"`
+	Emails     []string          `json:"emails"`
 	Phone      string            `json:"phone"`
+	Phones     []string          `json:"phones"`
 	Name       string            `json:"name"`
 	Attributes map[string]string `json:"attributes"`
+}
+
+var reservedAttr = regexp.MustCompile(`^(email|phone|name)$|^(email|phone)_[0-9]+$`)
+
+// identSet is one kind's tokenized identifiers, ready for SQL.
+type identSet struct {
+	matchToks []string // every identifier under every live key version (dedup/lookup)
+	writeToks []string // one newest-version token per identifier (rows to insert)
+	writeVer  string
+}
+
+// buildIdents normalizes and tokenizes values of one kind.
+func (c *Contacts) buildIdents(ctx context.Context, kind string, values []string,
+	normFn func(string) (string, error),
+	tokFn func(ctx context.Context, version, normalized string) (string, error)) (identSet, []string, error) {
+
+	var set identSet
+	if len(values) == 0 {
+		return set, nil, nil
+	}
+	versions, err := c.Ring.Versions(ctx, kind)
+	if err != nil {
+		return set, nil, err
+	}
+	newest, err := c.Ring.Newest(ctx, kind)
+	if err != nil {
+		return set, nil, err
+	}
+	set.writeVer = newest
+	var normalized []string
+	seen := map[string]bool{}
+	for _, v := range values {
+		norm, err := normFn(v)
+		if err != nil {
+			return set, nil, fmt.Errorf("%w: %v", ErrValidation, err)
+		}
+		if seen[norm] {
+			continue
+		}
+		seen[norm] = true
+		normalized = append(normalized, norm)
+		for _, ver := range versions {
+			tok, err := tokFn(ctx, ver, norm)
+			if err != nil {
+				return set, nil, err
+			}
+			set.matchToks = append(set.matchToks, tok)
+			if ver == newest {
+				set.writeToks = append(set.writeToks, tok)
+			}
+		}
+	}
+	return set, normalized, nil
 }
 
 // PII blobs are stored per (person, scope) on the cids row: a scope reads
@@ -77,12 +136,14 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 	if !client.Can(auth.ActContactsRegister) {
 		return "", ErrForbidden
 	}
-	if in.Email == "" && in.Phone == "" {
-		return "", fmt.Errorf("%w: email or phone required", ErrValidation)
+	emails := mergeValues(in.Email, in.Emails)
+	phones := mergeValues(in.Phone, in.Phones)
+	if len(emails) == 0 && len(phones) == 0 {
+		return "", fmt.Errorf("%w: at least one email or phone required", ErrValidation)
 	}
-	for _, reserved := range []string{"email", "phone", "name"} {
-		if _, ok := in.Attributes[reserved]; ok {
-			return "", fmt.Errorf("%w: %q is a reserved attribute name", ErrValidation, reserved)
+	for k := range in.Attributes {
+		if reservedAttr.MatchString(k) {
+			return "", fmt.Errorf("%w: %q is a reserved attribute name", ErrValidation, k)
 		}
 	}
 	attrs := map[string]string{}
@@ -90,42 +151,28 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 		attrs[k] = v
 	}
 
-	var emailToks, phoneToks, nameToks []string
-	if in.Email != "" {
-		norm, err := crypto.NormalizeEmail(in.Email)
-		if err != nil {
-			return "", fmt.Errorf("%w: %v", ErrValidation, err)
-		}
-		if emailToks, err = c.tokensAllVersions(ctx, crypto.KeyHMACEmail, norm, c.Tok.EmailToken); err != nil {
-			return "", err
-		}
-		attrs["email"] = norm
+	emailSet, emailNorm, err := c.buildIdents(ctx, crypto.KeyHMACEmail, emails, crypto.NormalizeEmail, c.Tok.EmailToken)
+	if err != nil {
+		return "", err
 	}
-	if in.Phone != "" {
-		norm, err := crypto.NormalizePhone(in.Phone)
-		if err != nil {
-			return "", fmt.Errorf("%w: %v", ErrValidation, err)
-		}
-		if phoneToks, err = c.tokensAllVersions(ctx, crypto.KeyHMACPhone, norm, c.Tok.PhoneToken); err != nil {
-			return "", err
-		}
-		attrs["phone"] = norm
+	phoneSet, phoneNorm, err := c.buildIdents(ctx, crypto.KeyHMACPhone, phones, crypto.NormalizePhone, c.Tok.PhoneToken)
+	if err != nil {
+		return "", err
 	}
+	var nameSet identSet
 	if in.Name != "" {
-		norm, err := crypto.NormalizeName(in.Name)
-		if err != nil {
-			return "", fmt.Errorf("%w: %v", ErrValidation, err)
-		}
-		if nameToks, err = c.tokensAllVersions(ctx, crypto.KeyHMACName, norm, c.Tok.NameToken); err != nil {
+		if nameSet, _, err = c.buildIdents(ctx, crypto.KeyHMACName, []string{in.Name}, crypto.NormalizeName, c.Tok.NameToken); err != nil {
 			return "", err
 		}
 		attrs["name"] = in.Name
 	}
+	storeIndexed(attrs, "email", emailNorm)
+	storeIndexed(attrs, "phone", phoneNorm)
 
 	// Retry once: a concurrent identical registration can win the unique-
 	// index race; the second attempt then finds and reuses that person.
 	for attempt := 0; ; attempt++ {
-		cid, err = c.registerTx(ctx, client, emailToks, phoneToks, nameToks, attrs)
+		cid, err = c.registerTx(ctx, client, emailSet, phoneSet, nameSet, attrs)
 		if err == nil {
 			break
 		}
@@ -138,33 +185,53 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 	return cid, nil
 }
 
-func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailToks, phoneToks, nameToks []string, attrs map[string]string) (string, error) {
+// mergeValues combines the singular (primary, first) and plural forms,
+// dropping empties.
+func mergeValues(single string, many []string) []string {
+	out := make([]string, 0, 1+len(many))
+	if single != "" {
+		out = append(out, single)
+	}
+	for _, v := range many {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// storeIndexed writes normalized identifiers as "email", "email_2", ...
+func storeIndexed(attrs map[string]string, base string, values []string) {
+	for i, v := range values {
+		key := base
+		if i > 0 {
+			key = fmt.Sprintf("%s_%d", base, i+1)
+		}
+		attrs[key] = v
+	}
+}
+
+func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet, phoneSet, nameSet identSet, attrs map[string]string) (string, error) {
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	first := func(toks []string) string {
-		if len(toks) == 0 {
-			return ""
-		}
-		return toks[0]
-	}
-
 	// Deterministic dedup: email match takes priority over phone. Matching
-	// spans every live key version (rotation window).
+	// spans every identifier under every live key version.
 	var personID string
 	found := false
-	if len(emailToks) > 0 {
-		err = tx.QueryRow(ctx, `SELECT id FROM persons WHERE email_token = ANY($1)`, emailToks).Scan(&personID)
-		if err != nil && err != pgx.ErrNoRows {
-			return "", err
+	for _, probe := range []struct {
+		kind string
+		toks []string
+	}{{"email", emailSet.matchToks}, {"phone", phoneSet.matchToks}} {
+		if found || len(probe.toks) == 0 {
+			continue
 		}
-		found = err == nil
-	}
-	if !found && len(phoneToks) > 0 {
-		err = tx.QueryRow(ctx, `SELECT id FROM persons WHERE phone_token = ANY($1)`, phoneToks).Scan(&personID)
+		err = tx.QueryRow(ctx,
+			`SELECT person_id FROM person_tokens WHERE kind=$1 AND token = ANY($2)
+			 ORDER BY created_at, person_id LIMIT 1`, probe.kind, probe.toks).Scan(&personID)
 		if err != nil && err != pgx.ErrNoRows {
 			return "", err
 		}
@@ -173,31 +240,24 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailTok
 
 	if !found {
 		personID = newUUID()
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO persons (id, email_token, phone_token, name_token)
-			 VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''))`,
-			personID, first(emailToks), first(phoneToks), first(nameToks)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID); err != nil {
 			return "", err
 		}
-	} else {
-		// Fill missing identifier tokens, and re-key on touch: a token that
-		// matches an older key version upgrades to the newest. A token for a
-		// DIFFERENT identifier is never overwritten.
-		if _, err := tx.Exec(ctx,
-			`UPDATE persons SET
-			   email_token = CASE WHEN $2 = '' THEN email_token
-			                      WHEN email_token IS NULL OR email_token = ANY($5) THEN $2
-			                      ELSE email_token END,
-			   phone_token = CASE WHEN $3 = '' THEN phone_token
-			                      WHEN phone_token IS NULL OR phone_token = ANY($6) THEN $3
-			                      ELSE phone_token END,
-			   name_token  = CASE WHEN $4 = '' THEN name_token
-			                      WHEN name_token IS NULL OR name_token = ANY($7) THEN $4
-			                      ELSE name_token END
-			 WHERE id=$1`, personID,
-			first(emailToks), first(phoneToks), first(nameToks),
-			emailToks, phoneToks, nameToks); err != nil {
-			return "", err
+	}
+	// Insert newest-version token rows for every identifier. ON CONFLICT DO
+	// NOTHING covers both "row already there" and "identifier owned by
+	// another person" — an existing owner is never silently stolen.
+	for _, ins := range []struct {
+		kind string
+		set  identSet
+	}{{"email", emailSet}, {"phone", phoneSet}, {"name", nameSet}} {
+		for _, tok := range ins.set.writeToks {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO person_tokens (person_id, kind, token, key_version)
+				 VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+				personID, ins.kind, tok, ins.set.writeVer); err != nil {
+				return "", err
+			}
 		}
 	}
 
