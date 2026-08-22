@@ -701,3 +701,20 @@ Verified live: call-center demo end-to-end, RFC 3161 anchoring against
 freetsa.org, k6 load test at 100% checks (laptop p99: lookup ~9–10.5 ms,
 attributes 8.4 ms, OTI 13 ms). SDKs shipped for TypeScript and Python with
 mock-server test suites; Java/PHP/.NET pending per section 10.3.
+
+**Benchmark vs Databunker (2026-08-22, head-to-head on one machine, both on
+PostgreSQL 16, benchmark/ in the repo):** write +99% throughput (2,173 vs
+1,091 rps), lookup +50% (2,837 vs 1,885), read +57% (2,843 vs 1,811), with
+p99 latency 2.2–3.3× lower across the board — while Sunder additionally
+writes a same-transaction hash-chained audit record per operation. The
++50% efficiency target is met on every operation.
+
+**v1.5 (GDPR layer, section 14) implemented 2026-08-22:** consent decisions
+per (cid, purpose) with enforcement hooks on attribute reads and OTI
+issuance (403 consent_denied); org-wide right of access (all scopes +
+audit trail) and right to erasure (blob wipe + token deletion + person
+tombstone + signed webhook events per scope with a retry worker);
+portability export per scope; per-scope retention TTLs + OTI pruning
+(`sunder retention run`). The self-service privacy portal stays v2 (needs
+citizen authentication). PHP SDK shipped (36 mock-server tests); Java and
+.NET SDKs in progress.
