@@ -16,7 +16,7 @@ import (
 // KeyRing resolves which key versions are live for each kind from the keys
 // table. New material is written with the newest ACTIVE version; lookups
 // compute tokens under every ACTIVE and RETIRING version (the dual-key
-// rotation window, PLAN section 9.3).
+// rotation window; docs/DESIGN.md).
 type KeyRing struct {
 	Pool *pgxpool.Pool
 

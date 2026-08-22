@@ -1,4 +1,4 @@
--- GDPR / data-subject rights layer (PLAN section 14, v1.5).
+-- GDPR / data-subject rights layer (docs/DESIGN.md, GDPR layer).
 
 -- Consent decisions per (cid, purpose). Absence of a row means "not
 -- consent-governed" (contract/legitimate-interest bases); an explicit

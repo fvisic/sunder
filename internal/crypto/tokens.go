@@ -50,7 +50,7 @@ func (t *Tokenizer) NameToken(ctx context.Context, v, normalized string) (string
 }
 
 // NewCID returns a fresh pseudonym: "CID-" + 26 base32 chars of 16 random
-// bytes. Random, never derived from PII — nothing to reverse (PLAN section 3).
+// bytes. Random, never derived from PII — nothing to reverse (docs/DESIGN.md).
 func NewCID() (string, error) {
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {

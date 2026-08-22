@@ -91,4 +91,4 @@ done
   append+commit window of each transaction.
 
 Laptop numbers are indicative; contractual targets run on the reference
-deployment (PLAN section 9.2).
+deployment (docs/DESIGN.md, performance targets).

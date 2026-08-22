@@ -1,7 +1,7 @@
 # Sunder demo — the call-center lookup flow
 
 `callcenter.sh` is the M6 demo (decision D8): it walks the adoption-wedge
-storyline from PLAN.md 13.4 — *"OIB out of the call-center/CRM lookup in
+adoption storyline — *"the national identifier out of the call-center/CRM lookup in
 30 days"* — end to end against a running stack, using nothing but `curl`
 and `python3` (no jq).
 

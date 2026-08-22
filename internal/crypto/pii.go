@@ -10,7 +10,7 @@ import (
 )
 
 // PIIBox encrypts/decrypts an attribute map with AES-256-GCM under the
-// pii-kek key. The key never leaves this process (decision D4): callers get
+// pii-kek key. The key never leaves this process: callers get
 // decrypted fields, never key material.
 //
 // The AAD binds each blob to its CID row and key id, so an attacker with

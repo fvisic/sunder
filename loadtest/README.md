@@ -1,6 +1,6 @@
 # Load test (M6)
 
-k6 benchmark for the three hot paths, encoding the PLAN section 2 latency
+k6 benchmark for the three hot paths, encoding the design latency
 targets as pass/fail thresholds:
 
 | Scenario | Endpoint(s) | Share of RATE | p99 threshold |
@@ -17,7 +17,7 @@ dedup-idempotent, so repeated runs reuse the same persons.
 > **Indicative vs. contractual numbers.** Results measured on a laptop
 > (single container, k6 on the same machine) are *indicative only* — they
 > show trends and regressions. The contractual numbers are measured on the
-> reference deployment described in PLAN 9.2 (LB + 2-3 stateless replicas +
+> reference deployment described in docs/DESIGN.md (LB + 2-3 stateless replicas +
 > PostgreSQL with the token indexes in RAM + PgBouncer), with Prometheus
 > confirming the per-endpoint p99.
 
@@ -74,6 +74,6 @@ k6 exits non-zero when any threshold fails, so the same invocation works in CI.
 | `DURATION` | `1m` | Length of the measurement window |
 
 The default rate is deliberately modest (200 rps) so the test is safe to run
-against a laptop. For the PLAN target of 1,000 rps on the reference
+against a laptop. For the design target of 1,000 rps on the reference
 deployment, run with `-e RATE=1000` (and a larger `SEED_COUNT` if you want a
 colder cache).

@@ -352,7 +352,7 @@ func ensureCID(ctx context.Context, q execQuerier, personID, scope string) (stri
 // SECURITY NOTE: this is deliberately a linkage-capable privilege — the
 // caller learns the target scope's CID for a person it knows. Grant
 // scopes.issue only to trusted integration components; day-to-day
-// cross-system handoff should use OTIs instead (PLAN section 6), where the
+// cross-system handoff should use OTIs instead (docs/DESIGN.md), where the
 // verifier learns its own CID and the issuer learns nothing.
 func (c *Contacts) IssueScopedCid(ctx context.Context, client *auth.Client, cid, targetScope string) (string, error) {
 	if !client.Can(auth.ActScopesIssue) {
@@ -406,7 +406,7 @@ func (c *Contacts) personForClientCID(ctx context.Context, client *auth.Client, 
 	return personID, nil
 }
 
-// GetAttribute returns exactly one decrypted field (decision D4): purpose is
+// GetAttribute returns exactly one decrypted field: purpose is
 // mandatory, checked against the caller's allowed purposes, the blob is the
 // caller-scope one, and the read is audited BEFORE the value is released —
 // an unaudited disclosure must not happen (fail closed).

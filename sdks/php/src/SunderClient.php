@@ -7,11 +7,11 @@ namespace Sunder;
 /**
  * Sunder PHP SDK — a thin client for the Sunder pseudonymous identity API.
  *
- * Implements the canonical CidProviderClient interface (PLAN section 10.1):
+ * Implements the canonical CidProviderClient interface (docs/DESIGN.md, SDK design rules):
  * transport, auth, timeouts, retries and error mapping only. Zero
  * cryptography, zero runtime dependencies (plain PHP streams).
  *
- * Retry policy (baked in, PLAN section 10.2):
+ * Retry policy (baked in, the SDK design rules (docs/DESIGN.md)):
  *  - lookups and issueOti retry once on 5xx / network errors (safe);
  *  - verifyOti is NEVER blind-retried (single-use token — a retry after an
  *    ambiguous network failure would legitimately return TokenUsed).

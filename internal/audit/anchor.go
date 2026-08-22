@@ -1,6 +1,6 @@
 package audit
 
-// RFC 3161 trusted timestamping of the audit-chain head (PLAN section 8.2).
+// RFC 3161 trusted timestamping of the audit-chain head (docs/DESIGN.md, audit anchoring).
 //
 // A bare hash chain proves internal consistency but not existence-at-a-time:
 // an attacker with full DB access can rewrite the whole chain consistently.

@@ -5,9 +5,9 @@
 //   attribute_read  GET  /v1/contacts/{cid}/attributes/email
 //   oti_roundtrip   POST /v1/oti  then  POST /v1/oti/verify
 //
-// Thresholds encode the PLAN section 2 latency targets. Numbers measured on
+// Thresholds encode the the design latency targets (docs/DESIGN.md). Numbers measured on
 // a laptop are indicative only — the contractual numbers come from the
-// reference deployment (PLAN 9.2). See loadtest/README.md.
+// reference deployment (docs/DESIGN.md). See loadtest/README.md.
 //
 // Environment:
 //   BASE_URL     e.g. http://localhost:8080          (required)
@@ -73,8 +73,8 @@ export const options = {
     },
   },
   thresholds: {
-    // PLAN section 2 p99 targets (ms). On a laptop these are indicative;
-    // the binding measurement is on the PLAN 9.2 reference deployment.
+    // design p99 targets in ms (docs/DESIGN.md). On a laptop these are indicative;
+    // the binding measurement is on the reference deployment (docs/DESIGN.md).
     'http_req_duration{scenario:lookup_hit}': ['p(99)<15'],
     'http_req_duration{scenario:attribute_read}': ['p(99)<15'],
     'http_req_duration{op:oti_issue}': ['p(99)<20'],

@@ -10,7 +10,7 @@ import (
 )
 
 // enumerationThreshold is how many lookup misses per client per 10 minutes
-// trigger the mass-search warning (PLAN section 5: enumeration detection).
+// trigger the mass-search warning (docs/DESIGN.md: enumeration detection).
 const enumerationThreshold = 100
 
 func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {

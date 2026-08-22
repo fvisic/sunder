@@ -2,7 +2,7 @@
  * Sunder TypeScript SDK — a thin client for the Sunder pseudonymous
  * identity provider (v1 API).
  *
- * Design rules (PLAN section 10):
+ * Design rules (docs/DESIGN.md, SDK design rules):
  * - Zero cryptography here: transport, auth, timeouts, retries, error mapping.
  * - Zero runtime dependencies: global fetch (Node 18+ / browsers).
  * - Per-endpoint retry policy: lookup* and issueOti retry once on 5xx or
@@ -169,7 +169,7 @@ function readEnv(name: string): string | undefined {
 
 /**
  * Client for the Sunder v1 API. Implements the canonical CidProviderClient
- * interface (PLAN section 10.1). All methods throw SunderError on failure.
+ * interface (docs/DESIGN.md, SDK design rules). All methods throw SunderError on failure.
  *
  * Remember: LOOKUP != AUTHENTICATION — a lookup hit never proves the caller
  * is talking to that person.

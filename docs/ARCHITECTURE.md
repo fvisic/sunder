@@ -60,4 +60,4 @@ audited exceptions exist: the `scopes.issue` action (returns another
 scope's CID for a person — a linkage-capable privilege for trusted
 integration components only) and OTI verification (the verifier receives
 its own scoped CID). Day-to-day cross-system handoff uses OTIs
-(PLAN.md section 6).
+(docs/DESIGN.md).

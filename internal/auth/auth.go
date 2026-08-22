@@ -1,5 +1,5 @@
 // Package auth authenticates client applications and enforces per-client
-// allowed actions (decision D5: bearer keys default, mTLS optional).
+// allowed actions (bearer keys by default, mTLS as a deployment option).
 package auth
 
 import (
@@ -27,7 +27,7 @@ const (
 	ActOTIIssue         = "oti.issue"
 	ActOTIVerify        = "oti.verify"
 	ActConsentManage    = "consent.manage"
-	// DSR actions (PLAN section 14). dsr.access and dsr.erase are org-wide,
+	// DSR actions (docs/DESIGN.md, GDPR layer). dsr.access and dsr.erase are org-wide,
 	// linkage-capable privileges for the privacy-officer client only;
 	// dsr.export is scope-local portability.
 	ActDSRAccess = "dsr.access"

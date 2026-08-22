@@ -3,7 +3,7 @@
 //
 // In-memory by design for v1 (single-node pilots); the types are small
 // interfaces over one method each, so a Redis-backed implementation can drop
-// in when multi-replica deployments need shared counters (PLAN section 9.2).
+// in when multi-replica deployments need shared counters (docs/DESIGN.md, performance targets).
 package ratelimit
 
 import (

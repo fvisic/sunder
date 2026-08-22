@@ -1,7 +1,7 @@
 // Sunder .NET SDK — a thin client for the Sunder pseudonymous identity
 // provider (v1 API).
 //
-// Design rules (PLAN section 10):
+// Design rules (docs/DESIGN.md, SDK design rules):
 // - Zero cryptography here: transport, auth, timeouts, retries, error mapping.
 // - Zero dependencies beyond the BCL (System.Net.Http + System.Text.Json).
 // - Per-endpoint retry policy: lookups and IssueOtiAsync retry once on 5xx or
@@ -62,7 +62,7 @@ public sealed record OtiResult(string Token, string ExpiresAt);
 
 /// <summary>
 /// Client for the Sunder v1 API. Implements the canonical CidProviderClient
-/// interface (PLAN section 10.1). All methods throw a subclass of
+/// interface (docs/DESIGN.md, SDK design rules). All methods throw a subclass of
 /// <see cref="SunderException" /> on failure.
 ///
 /// Remember: LOOKUP != AUTHENTICATION — a lookup hit never proves the caller

@@ -15,12 +15,12 @@ import java.util.Map;
  * Sunder Java SDK — a thin client for the Sunder pseudonymous identity
  * provider (v1 API).
  *
- * <p>Implements the canonical CidProviderClient interface (PLAN section 10.1):
+ * <p>Implements the canonical CidProviderClient interface (docs/DESIGN.md, SDK design rules):
  * transport, auth, timeouts, retries and error mapping only. Zero
  * cryptography, zero runtime dependencies ({@code java.net.http} plus a
  * hand-rolled minimal JSON codec). Java 17+.
  *
- * <p>Retry policy (baked in, PLAN section 10.2):
+ * <p>Retry policy (baked in, the SDK design rules (docs/DESIGN.md)):
  * <ul>
  *   <li>lookups and {@link #issueOti} retry once on 5xx / network errors
  *       (safe);</li>

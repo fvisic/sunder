@@ -9,9 +9,9 @@ with any other.
 Sunder is self-hosted: every organization runs its own instance and is the
 identity provider for its own contacts. There is no central party.
 
-> **Status**: v1 under active development, milestone by milestone — the
-> feature list below is the v1 target; see `docs/PLAN.md` for what has
-> landed. Not production-ready yet.
+> **Status**: feature-complete v1 with a GDPR layer and five SDKs; see
+> `docs/DESIGN.md` for the design rationale. Pre-1.0 — interfaces may
+> still move; review the threat model before production use.
 
 ## Why
 

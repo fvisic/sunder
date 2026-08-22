@@ -37,7 +37,7 @@ type Server struct {
 	mux      *http.ServeMux
 }
 
-// OpenKeystore builds the configured keystore driver (decision D7), wrapped
+// OpenKeystore builds the configured keystore driver, wrapped
 // in an in-memory cache (key material per name is immutable, so caching is
 // safe and keeps keystore I/O off the request hot path).
 func OpenKeystore(cfg config.Config) crypto.Keystore {

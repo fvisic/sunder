@@ -25,11 +25,11 @@ var (
 	ErrAudienceMismatch = errors.New("audience mismatch")
 )
 
-// OTITTL is the maximum one-time-identifier lifetime (PLAN section 3).
+// OTITTL is the maximum one-time-identifier lifetime (docs/DESIGN.md).
 const OTITTL = 5 * time.Minute
 
 // OTI issues and verifies one-time identifiers — the only identity currency
-// systems exchange (PLAN section 6). Tokens are PASETO v4.public, bound to
+// systems exchange (docs/DESIGN.md). Tokens are PASETO v4.public, bound to
 // one purpose and one audience, single-use enforced by an atomic DB
 // transition (not just the signature).
 type OTI struct {
@@ -127,7 +127,7 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 
 // Verify checks signature, purpose, audience and expiry, atomically marks
 // the token USED, and returns the VERIFIER'S OWN scoped CID for the person —
-// the issuer's pseudonym never crosses the scope boundary (PLAN section 6).
+// the issuer's pseudonym never crosses the scope boundary (docs/DESIGN.md).
 func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, audience string) (string, error) {
 	if !client.Can(auth.ActOTIVerify) {
 		return "", ErrForbidden

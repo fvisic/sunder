@@ -1,9 +1,9 @@
 -- Core schema: pseudonymous identity layer. No OIB column exists anywhere
--- by design (PLAN.md section 7 / decision D4).
+-- by design (docs/DESIGN.md).
 
 -- persons carries ONLY dedup/search tokens. PII lives per-scope on cids:
 -- a person's attributes are whatever each scope itself stored, so one scope
--- can never read attributes contributed by another (M2 review finding #12).
+-- can never read attributes contributed by another.
 CREATE TABLE persons (
     id          UUID PRIMARY KEY,
     email_token TEXT,

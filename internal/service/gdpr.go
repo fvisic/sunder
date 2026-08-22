@@ -1,6 +1,6 @@
 package service
 
-// GDPR / data-subject rights layer (PLAN section 14, v1.5): consent
+// GDPR / data-subject rights layer (docs/DESIGN.md, GDPR layer): consent
 // management, right of access, right to erasure (orchestrated org-wide via
 // signed webhooks — the provider is the only component that knows which
 // scopes hold a person), data portability, and per-scope retention.

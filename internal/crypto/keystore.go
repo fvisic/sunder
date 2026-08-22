@@ -296,15 +296,16 @@ func (c *CachingKeystore) Ensure(ctx context.Context, name string) error {
 	return c.Inner.Ensure(ctx, name)
 }
 
-// --- pkcs11 stub (decision D7) ----------------------------------------------
+// --- pkcs11 stub --------------------------------------------------------------
 
-// PKCS11Keystore is an interface stub until the first compliance-driven demand.
+// PKCS11Keystore is an interface stub until the first compliance-driven demand
+// (production deployments needing an HSM front the file/vault drivers today).
 type PKCS11Keystore struct{}
 
 func (*PKCS11Keystore) Key(context.Context, string) ([]byte, error) {
-	return nil, fmt.Errorf("keystore: pkcs11 driver not implemented in v1 (decision D7)")
+	return nil, fmt.Errorf("keystore: pkcs11 driver not implemented yet")
 }
 
 func (*PKCS11Keystore) Ensure(context.Context, string) error {
-	return fmt.Errorf("keystore: pkcs11 driver not implemented in v1 (decision D7)")
+	return fmt.Errorf("keystore: pkcs11 driver not implemented yet")
 }

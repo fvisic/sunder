@@ -13,7 +13,7 @@ import (
 
 // LookupInput carries search identifiers. Valid combinations: email alone,
 // phone alone, or name plus one of email/phone (name never stands alone —
-// it is a narrowing key, PLAN section 5). LOOKUP != AUTHENTICATION: a match
+// it is a narrowing key; docs/DESIGN.md). LOOKUP != AUTHENTICATION: a match
 // returns a pseudonym, never asserts the caller talked to that person.
 type LookupInput struct {
 	Email string `json:"email"`

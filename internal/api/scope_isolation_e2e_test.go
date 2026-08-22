@@ -7,8 +7,7 @@ import (
 	"github.com/fvisic/sunder/internal/auth"
 )
 
-// TestCrossScopeEnrichmentBlocked pins the fix for the M2 review's critical
-// finding: a client must NOT be able to register a known identifier, dedup
+// TestCrossScopeEnrichmentBlocked pins a critical property: a client must NOT be able to register a known identifier, dedup
 // onto a person another scope created, and then read attributes that other
 // scope stored. Blobs are per-scope, so the attacker sees only what it
 // contributed itself.

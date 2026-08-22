@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# callcenter.sh — Sunder M6 demo: the call-center lookup flow (decision D8).
+# callcenter.sh — Sunder demo: the call-center lookup flow.
 #
-# This walks the adoption-wedge storyline from PLAN.md 13.4 against a running
+# This walks the adoption-wedge storyline from the pilot storyline against a running
 # stack: a CRM client registers and looks up a contact without ever storing a
 # searchable PII key, then hands the customer to the ERP with a one-time
 # identifier (OTI) — and the two systems end up with two different, unlinkable
@@ -121,7 +121,7 @@ say() { echo "  $1"; }
 # ---------------------------------------------------------------------------
 # Preflight: is the stack up?
 # ---------------------------------------------------------------------------
-echo "Sunder call-center demo (PLAN 13.4 storyline) against $SUNDER_URL"
+echo "Sunder call-center demo (pilot storyline) against $SUNDER_URL"
 if ! curl -sSf "$SUNDER_URL/healthz" >/dev/null 2>&1; then
   echo "FAIL: $SUNDER_URL/healthz is not answering — is the stack running?" >&2
   echo "      Try: docker compose -f deploy/docker-compose.yml up --build" >&2
@@ -256,7 +256,7 @@ echo
 echo "============================================================"
 echo "  Demo complete."
 echo "============================================================"
-echo "  What the pilot cutover means (PLAN 13.4): after this flow replaces"
+echo "  What the pilot cutover means : after this flow replaces"
 echo "  PII-keyed lookup, a stolen CRM database contains no OIB and no"
 echo "  searchable PII keys, every agent lookup is in the hash-chained audit"
 echo "  log, and cross-system handoff leaks nothing but a one-time token."

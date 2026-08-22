@@ -1,5 +1,5 @@
 // Unified Sunder SDK error taxonomy — identical names and identical trigger
-// conditions across all Sunder SDKs (PLAN section 10.1).
+// conditions across all Sunder SDKs (docs/DESIGN.md, SDK design rules).
 
 using System;
 
