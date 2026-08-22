@@ -6,7 +6,19 @@ import (
 	"testing"
 )
 
-func fileKS(t *testing.T) *FileKeystore { return &FileKeystore{Dir: t.TempDir()} }
+// autoKS wraps FileKeystore to create keys on demand — ONLY for tests; the
+// production keystore is strict and keys are created at bootstrap.
+type autoKS struct{ inner *FileKeystore }
+
+func (a *autoKS) Key(ctx context.Context, name string) ([]byte, error) {
+	if err := a.inner.Ensure(ctx, name); err != nil {
+		return nil, err
+	}
+	return a.inner.Key(ctx, name)
+}
+func (a *autoKS) Ensure(ctx context.Context, name string) error { return a.inner.Ensure(ctx, name) }
+
+func fileKS(t *testing.T) Keystore { return &autoKS{inner: &FileKeystore{Dir: t.TempDir()}} }
 
 func TestNormalizeEmail(t *testing.T) {
 	for in, want := range map[string]string{
@@ -82,6 +94,9 @@ func TestTokenizerDeterministicAndKeySeparated(t *testing.T) {
 func TestFileKeystoreStableAcrossInstances(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
+	if err := (&FileKeystore{Dir: dir}).Ensure(ctx, "hmac-email/v1"); err != nil {
+		t.Fatal(err)
+	}
 	k1, err := (&FileKeystore{Dir: dir}).Key(ctx, "hmac-email/v1")
 	if err != nil {
 		t.Fatal(err)
@@ -95,20 +110,41 @@ func TestFileKeystoreStableAcrossInstances(t *testing.T) {
 	}
 }
 
-func TestPIIRoundtripAndTamper(t *testing.T) {
+func TestFileKeystoreStrictOnMissingKey(t *testing.T) {
+	ks := &FileKeystore{Dir: t.TempDir()}
+	if _, err := ks.Key(context.Background(), "hmac-email/v9"); err == nil {
+		t.Fatal("strict keystore must error on a missing key, never mint one")
+	}
+}
+
+func TestKeyNameValidation(t *testing.T) {
+	ks := &FileKeystore{Dir: t.TempDir()}
+	for _, bad := range []string{"", "hmac-email", "hmac_email/v1", "a/b/v1", "HMAC/v1", "../../etc/x/v1"} {
+		if err := ks.Ensure(context.Background(), bad); err == nil {
+			t.Errorf("Ensure(%q): expected name validation error", bad)
+		}
+	}
+}
+
+func TestPIIRoundtripTamperAndTransplant(t *testing.T) {
 	ctx := context.Background()
 	box := NewPIIBox(fileKS(t))
 	attrs := map[string]string{"email": "filip@example.com", "name": "Filip"}
-	blob, keyID, err := box.Encrypt(ctx, attrs)
+	blob, keyID, err := box.Encrypt(ctx, "CID-A", attrs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := box.Decrypt(ctx, blob, keyID)
+	got, err := box.Decrypt(ctx, "CID-A", blob, keyID)
 	if err != nil || got["email"] != attrs["email"] {
 		t.Fatalf("roundtrip failed: %v %v", got, err)
 	}
+	// Transplant: the same ciphertext moved under another CID must fail
+	// authentication (AAD binding).
+	if _, err := box.Decrypt(ctx, "CID-B", blob, keyID); err == nil {
+		t.Fatal("blob transplanted to another CID decrypted without error")
+	}
 	blob[len(blob)-1] ^= 0xFF
-	if _, err := box.Decrypt(ctx, blob, keyID); err == nil {
+	if _, err := box.Decrypt(ctx, "CID-A", blob, keyID); err == nil {
 		t.Fatal("tampered blob decrypted without error")
 	}
 }
@@ -129,6 +165,9 @@ func TestNewCIDShape(t *testing.T) {
 
 func TestPKCS11Stub(t *testing.T) {
 	if _, err := (&PKCS11Keystore{}).Key(context.Background(), "x"); err == nil {
-		t.Fatal("pkcs11 stub must error")
+		t.Fatal("pkcs11 stub Key must error")
+	}
+	if err := (&PKCS11Keystore{}).Ensure(context.Background(), "x"); err == nil {
+		t.Fatal("pkcs11 stub Ensure must error")
 	}
 }

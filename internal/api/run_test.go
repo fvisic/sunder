@@ -12,9 +12,18 @@ import (
 	"github.com/fvisic/sunder/internal/config"
 )
 
+func mustNew(t *testing.T, cfg config.Config) *Server {
+	t.Helper()
+	s, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 func TestRunFailsOnUnreadableMTLSCA(t *testing.T) {
-	s := New(config.Config{Listen: "127.0.0.1:0", TLSCert: "/nope.pem", TLSKey: "/nope.key",
-		MTLSCA: "/does/not/exist.pem"}, nil)
+	s := mustNew(t, config.Config{Listen: "127.0.0.1:0", TLSCert: "/nope.pem", TLSKey: "/nope.key",
+		MTLSCA: "/does/not/exist.pem"})
 	if err := s.Run(context.Background()); err == nil {
 		t.Fatal("expected error for missing CA file")
 	}
@@ -25,14 +34,14 @@ func TestRunFailsOnEmptyMTLSCA(t *testing.T) {
 	if err := os.WriteFile(ca, []byte("not a cert"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s := New(config.Config{Listen: "127.0.0.1:0", TLSCert: "/nope.pem", TLSKey: "/nope.key", MTLSCA: ca}, nil)
+	s := mustNew(t, config.Config{Listen: "127.0.0.1:0", TLSCert: "/nope.pem", TLSKey: "/nope.key", MTLSCA: ca})
 	if err := s.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "no certificates") {
 		t.Fatalf("expected 'no certificates' error, got %v", err)
 	}
 }
 
 func TestRunShutsDownGracefully(t *testing.T) {
-	s := New(config.Config{Listen: "127.0.0.1:0"}, nil)
+	s := mustNew(t, config.Config{Listen: "127.0.0.1:0"})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.Run(ctx) }()

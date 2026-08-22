@@ -60,7 +60,7 @@ func TestValidFullConfigsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.MTLSCA != "/tmp/ca.pem" || c.Keystore != "vault" || c.VaultMount != "transit" {
+	if c.MTLSCA != "/tmp/ca.pem" || c.Keystore != "vault" || c.VaultMount != "secret" {
 		t.Fatalf("fields lost: %+v", c)
 	}
 }

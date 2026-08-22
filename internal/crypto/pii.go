@@ -9,9 +9,14 @@ import (
 	"fmt"
 )
 
-// PIIBox encrypts/decrypts a person's attribute map with AES-256-GCM under
-// the pii-kek key. The key never leaves this process (decision D4): callers
-// get decrypted fields, never key material.
+// PIIBox encrypts/decrypts an attribute map with AES-256-GCM under the
+// pii-kek key. The key never leaves this process (decision D4): callers get
+// decrypted fields, never key material.
+//
+// The AAD binds each blob to its CID row and key id, so an attacker with
+// UPDATE access to the database cannot transplant person B's ciphertext into
+// person A's row (it fails authentication), and a key-id downgrade is
+// equally detectable.
 type PIIBox struct {
 	ks Keystore
 }
@@ -30,9 +35,11 @@ func (p *PIIBox) gcm(ctx context.Context, keyID string) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// Encrypt seals attrs as nonce||ciphertext and reports the key id used,
-// stored alongside so rotation can decrypt old rows.
-func (p *PIIBox) Encrypt(ctx context.Context, attrs map[string]string) (blob []byte, keyID string, err error) {
+func aad(boundTo, keyID string) []byte { return []byte(boundTo + "\x00" + keyID) }
+
+// Encrypt seals attrs as nonce||ciphertext bound to boundTo (the CID) and
+// reports the key id used, stored alongside so rotation can decrypt old rows.
+func (p *PIIBox) Encrypt(ctx context.Context, boundTo string, attrs map[string]string) (blob []byte, keyID string, err error) {
 	keyID = "v1"
 	g, err := p.gcm(ctx, keyID)
 	if err != nil {
@@ -46,11 +53,11 @@ func (p *PIIBox) Encrypt(ctx context.Context, attrs map[string]string) (blob []b
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, "", err
 	}
-	return g.Seal(nonce, nonce, plain, nil), keyID, nil
+	return g.Seal(nonce, nonce, plain, aad(boundTo, keyID)), keyID, nil
 }
 
-// Decrypt opens a blob produced by Encrypt.
-func (p *PIIBox) Decrypt(ctx context.Context, blob []byte, keyID string) (map[string]string, error) {
+// Decrypt opens a blob produced by Encrypt for the same boundTo/keyID.
+func (p *PIIBox) Decrypt(ctx context.Context, boundTo string, blob []byte, keyID string) (map[string]string, error) {
 	g, err := p.gcm(ctx, keyID)
 	if err != nil {
 		return nil, err
@@ -58,7 +65,7 @@ func (p *PIIBox) Decrypt(ctx context.Context, blob []byte, keyID string) (map[st
 	if len(blob) < g.NonceSize() {
 		return nil, fmt.Errorf("pii blob too short")
 	}
-	plain, err := g.Open(nil, blob[:g.NonceSize()], blob[g.NonceSize():], nil)
+	plain, err := g.Open(nil, blob[:g.NonceSize()], blob[g.NonceSize():], aad(boundTo, keyID))
 	if err != nil {
 		return nil, fmt.Errorf("pii decrypt: %w", err)
 	}

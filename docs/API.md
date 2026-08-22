@@ -27,17 +27,28 @@ Action: `contacts.register`.
  "name": "Filip Visic", "attributes": {"loyalty_tier": "gold"}}
 ```
 
-At least one of `email`/`phone` is required. Identifiers are normalized
-(email lowercased; phone to E.164), HMAC search tokens are computed, and all
-values land in the AES-256-GCM encrypted attribute blob. An existing person
-(matched by email or phone token) is reused — re-registering returns the
-same scoped CID.
+At least one of `email`/`phone` is required. `email`, `phone` and `name`
+are reserved attribute names (rejected inside `attributes`); the service
+stores the normalized identifiers under them. Identifiers are normalized
+(Unicode NFKC; email lowercased; phone to E.164), HMAC search tokens are
+computed, and all values land in the **caller-scope** AES-256-GCM blob.
+
+Dedup: an existing person is matched by email token first, then phone
+(deterministic priority) and reused — re-registering returns the same
+scoped CID, merges new attributes into the caller's blob (new values win)
+and fills in identifier tokens the person was missing. Attributes stored by
+other scopes are never readable through dedup (per-scope blobs).
 
 `201 {"cid": "CID-..."}` — the pseudonym in the *caller's* scope.
 
 ### POST /v1/contacts/{cid}/scopes — issue a CID in another scope
 Action: `scopes.issue`. Body: `{"scope": "billing"}`.
 `200 {"cid": "CID-..."}` — a different pseudonym for the same person.
+
+**Grant sparingly**: this action is linkage-capable — the caller learns the
+target scope's pseudonym. It exists for trusted integration components;
+regular cross-system handoff should use OTIs, where the verifier learns its
+own CID and the issuer learns nothing.
 
 ### GET /v1/contacts/{cid}/attributes/{name}?purpose=... — fetch one field
 Action: `attributes.read`; `purpose` mandatory and must be in the caller's

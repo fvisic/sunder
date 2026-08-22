@@ -46,8 +46,9 @@ func OpenKeystore(cfg config.Config) crypto.Keystore {
 	}
 }
 
-// New builds the server and registers routes.
-func New(cfg config.Config, st *store.Store) *Server {
+// New builds the server, bootstraps key material (the strict keystore never
+// creates keys per request — see crypto.Keystore) and registers routes.
+func New(cfg config.Config, st *store.Store) (*Server, error) {
 	s := &Server{
 		Cfg:     cfg,
 		Store:   st,
@@ -61,6 +62,9 @@ func New(cfg config.Config, st *store.Store) *Server {
 
 	if st != nil {
 		ks := OpenKeystore(cfg)
+		if err := EnsureKeys(context.Background(), ks); err != nil {
+			return nil, fmt.Errorf("keystore bootstrap: %w", err)
+		}
 		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: crypto.NewPIIBox(ks)}
 		s.Auth = &auth.Authenticator{Pool: st.Pool}
 
@@ -74,7 +78,20 @@ func New(cfg config.Config, st *store.Store) *Server {
 		v1.HandleFunc("POST /v1/lookup", s.handleLookup)
 		s.mux.Handle("/v1/", s.Auth.Middleware(v1))
 	}
-	return s
+	return s, nil
+}
+
+// EnsureKeys creates any missing key material for the active key versions.
+// Bootstrap/rotation is the ONLY place keys come into existence.
+func EnsureKeys(ctx context.Context, ks crypto.Keystore) error {
+	for _, kind := range []string{crypto.KeyHMACEmail, crypto.KeyHMACPhone, crypto.KeyHMACName, crypto.KeyPIIKEK, crypto.SigningKeyName} {
+		for _, v := range crypto.KeyVersions() {
+			if err := ks.Ensure(ctx, kind+"/"+v); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Handler returns the outermost HTTP handler (middleware applied).
@@ -125,8 +142,8 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 }
 
 // Run serves until ctx is cancelled, then shuts down gracefully.
-// TLS is enabled when a cert/key pair is configured; a client CA additionally
-// enforces mTLS (VerifyClientCertIfGiven now, strict mapping lands in M5).
+// TLS is enabled when a cert/key pair is configured; a configured client CA
+// enforces full mTLS (connections without a valid client cert are refused).
 func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{
 		Addr:              s.Cfg.Listen,

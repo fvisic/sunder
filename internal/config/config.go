@@ -18,7 +18,7 @@ type Config struct {
 	KeystorePath string // SUNDER_KEYSTORE_PATH, default "./keystore"
 	VaultAddr    string // SUNDER_VAULT_ADDR
 	VaultToken   string // SUNDER_VAULT_TOKEN
-	VaultMount   string // SUNDER_VAULT_MOUNT, default "transit"
+	VaultMount   string // SUNDER_VAULT_MOUNT: KV v2 mount, default "secret"
 	TSAURL       string // SUNDER_TSA_URL; the freetsa.org default suits pilots — production should point at a qualified or internal TSA
 }
 
@@ -41,7 +41,7 @@ func FromEnv() (Config, error) {
 		KeystorePath: getenv("SUNDER_KEYSTORE_PATH", "./keystore"),
 		VaultAddr:    os.Getenv("SUNDER_VAULT_ADDR"),
 		VaultToken:   os.Getenv("SUNDER_VAULT_TOKEN"),
-		VaultMount:   getenv("SUNDER_VAULT_MOUNT", "transit"),
+		VaultMount:   getenv("SUNDER_VAULT_MOUNT", "secret"),
 		TSAURL:       getenv("SUNDER_TSA_URL", "https://freetsa.org/tsr"),
 	}
 	if c.DBURL == "" {

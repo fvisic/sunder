@@ -53,13 +53,20 @@ func (f *fakeVault) handler() http.Handler {
 	})
 }
 
-func TestVaultKeystoreCreateThenRead(t *testing.T) {
+func TestVaultKeystoreEnsureThenRead(t *testing.T) {
 	fv := &fakeVault{data: map[string]string{}, token: "t0k"}
 	srv := httptest.NewServer(fv.handler())
 	defer srv.Close()
 	ks := &VaultKeystore{Addr: srv.URL, Token: "t0k", Mount: "secret", HTTP: srv.Client()}
 
 	ctx := context.Background()
+	// Strict: reading before Ensure must fail, never mint.
+	if _, err := ks.Key(ctx, "hmac-email/v1"); err == nil {
+		t.Fatal("strict keystore must error on missing key")
+	}
+	if err := ks.Ensure(ctx, "hmac-email/v1"); err != nil {
+		t.Fatal(err)
+	}
 	k1, err := ks.Key(ctx, "hmac-email/v1")
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +95,9 @@ func TestVaultKeystoreCASConflictReturnsWinner(t *testing.T) {
 	}
 	fv.data["/v1/secret/data/sunder/hmac-phone_v1"] = fmt.Sprintf("%x", winner)
 
+	if err := ks.Ensure(context.Background(), "hmac-phone/v1"); err != nil {
+		t.Fatal(err)
+	}
 	got, err := ks.Key(context.Background(), "hmac-phone/v1")
 	if err != nil {
 		t.Fatal(err)
@@ -107,17 +117,17 @@ func TestVaultKeystoreBadToken(t *testing.T) {
 	}
 }
 
-func TestFileKeystoreConcurrentFirstUse(t *testing.T) {
-	ks := &FileKeystore{Dir: t.TempDir()}
+func TestFileKeystoreConcurrentEnsure(t *testing.T) {
+	dir := t.TempDir()
 	ctx := context.Background()
 	var wg sync.WaitGroup
-	keys := make([][]byte, 16)
 	errs := make([]error, 16)
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			keys[i], errs[i] = ks.Key(ctx, "race/v1")
+			// Separate instances simulate separate processes on a shared dir.
+			errs[i] = (&FileKeystore{Dir: dir}).Ensure(ctx, "race/v1")
 		}(i)
 	}
 	wg.Wait()
@@ -125,8 +135,8 @@ func TestFileKeystoreConcurrentFirstUse(t *testing.T) {
 		if errs[i] != nil {
 			t.Fatal(errs[i])
 		}
-		if string(keys[i]) != string(keys[0]) {
-			t.Fatal("concurrent first use produced different keys")
-		}
+	}
+	if _, err := (&FileKeystore{Dir: dir}).Key(ctx, "race/v1"); err != nil {
+		t.Fatal(err)
 	}
 }

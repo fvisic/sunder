@@ -106,10 +106,13 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 			return "", err
 		}
 	}
-	_ = audit.Append(ctx, c.Pool, audit.Entry{
+	// Fail closed: a lookup that cannot be audited must not answer.
+	if err := audit.Append(ctx, c.Pool, audit.Entry{
 		ClientID: client.ID, Action: "lookup", CID: cid,
 		Detail: map[string]any{"by": by, "matched": matched},
-	})
+	}); err != nil {
+		return "", fmt.Errorf("audit append: %w", err)
+	}
 	if !matched {
 		return "", ErrNotFound
 	}

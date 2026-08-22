@@ -1,24 +1,29 @@
 -- Core schema: pseudonymous identity layer. No OIB column exists anywhere
 -- by design (PLAN.md section 7 / decision D4).
 
+-- persons carries ONLY dedup/search tokens. PII lives per-scope on cids:
+-- a person's attributes are whatever each scope itself stored, so one scope
+-- can never read attributes contributed by another (M2 review finding #12).
 CREATE TABLE persons (
-    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    email_token   TEXT,
-    phone_token   TEXT,
-    name_token    TEXT,
-    pii_encrypted BYTEA,
-    pii_key_id    TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    id          UUID PRIMARY KEY,
+    email_token TEXT,
+    phone_token TEXT,
+    name_token  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX persons_email_token_idx ON persons (email_token) WHERE email_token IS NOT NULL;
-CREATE INDEX persons_phone_token_idx ON persons (phone_token) WHERE phone_token IS NOT NULL;
-CREATE INDEX persons_name_token_idx  ON persons (name_token)  WHERE name_token  IS NOT NULL;
+-- UNIQUE: concurrent same-identifier registrations must collide, not fork
+-- one human into two person rows.
+CREATE UNIQUE INDEX persons_email_token_idx ON persons (email_token) WHERE email_token IS NOT NULL;
+CREATE UNIQUE INDEX persons_phone_token_idx ON persons (phone_token) WHERE phone_token IS NOT NULL;
+CREATE INDEX persons_name_token_idx ON persons (name_token) WHERE name_token IS NOT NULL;
 
 CREATE TABLE cids (
-    cid        TEXT PRIMARY KEY,
-    person_id  UUID NOT NULL REFERENCES persons(id),
-    scope      TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    cid           TEXT PRIMARY KEY,
+    person_id     UUID NOT NULL REFERENCES persons(id),
+    scope         TEXT NOT NULL,
+    pii_encrypted BYTEA,          -- AES-256-GCM, AAD = cid (no cross-row transplant)
+    pii_key_id    TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (person_id, scope)
 );
 
@@ -85,4 +90,6 @@ $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER audit_no_update BEFORE UPDATE OR DELETE ON audit
     FOR EACH ROW EXECUTE FUNCTION audit_append_only();
+CREATE TRIGGER audit_no_truncate BEFORE TRUNCATE ON audit
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_append_only();
 

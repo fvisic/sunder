@@ -10,7 +10,11 @@ import (
 
 func testServer() *Server {
 	// Store stays nil: healthz and metrics must not touch the database.
-	return New(config.Config{Listen: ":0"}, nil)
+	s, err := New(config.Config{Listen: ":0"}, nil)
+	if err != nil {
+		panic(err)
+	}
+	return s
 }
 
 func TestHealthz(t *testing.T) {

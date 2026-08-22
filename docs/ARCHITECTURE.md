@@ -49,8 +49,15 @@ anchoring), `internal/ratelimit`.
 
 ## Identity model
 
-`persons` holds one row per real person: HMAC search tokens plus an
-AES-256-GCM encrypted attribute blob. `cids` maps a person to one pseudonym
-per *scope* (internal domain: crm, billing, …). Systems only ever see CIDs
-from their own scope; OTIs are the only identity currency exchanged between
-systems (PLAN.md section 6).
+`persons` holds one row per real person: HMAC search tokens only. Encrypted
+attributes live per-scope on the `cids` row (AES-256-GCM, AAD-bound to the
+CID), so each scope reads exactly the attributes it stored itself — dedup
+onto a shared person never exposes another scope's data. `cids` maps a
+person to one pseudonym per *scope* (internal domain: crm, billing, …).
+
+Clients only ever reference CIDs of their own scope. Two deliberate,
+audited exceptions exist: the `scopes.issue` action (returns another
+scope's CID for a person — a linkage-capable privilege for trusted
+integration components only) and OTI verification (the verifier receives
+its own scoped CID). Day-to-day cross-system handoff uses OTIs
+(PLAN.md section 6).

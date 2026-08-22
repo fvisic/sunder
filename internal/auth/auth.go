@@ -5,7 +5,9 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
+	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -55,8 +57,9 @@ type Authenticator struct {
 }
 
 // Authenticate resolves "Bearer <client_id>.<secret>". The stored hash is
-// compared in constant time; unknown ids burn the same work as bad secrets
-// so the two are indistinguishable to a timing observer.
+// compared in constant time; the decoy compare below narrows (but cannot
+// fully close — the DB roundtrip differs) the timing gap between unknown
+// ids and bad secrets. Client ids are not secrets; the secret is.
 func (a *Authenticator) Authenticate(ctx context.Context, authorization string) (*Client, bool) {
 	raw, ok := strings.CutPrefix(authorization, "Bearer ")
 	if !ok {
@@ -92,16 +95,26 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 		c, ok := a.Authenticate(r.Context(), r.Header.Get("Authorization"))
 		if !ok {
 			w.Header().Set("WWW-Authenticate", "Bearer")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, c)))
 	})
 }
 
+// clientIDPattern keeps ids unambiguous inside the "<id>.<secret>"
+// credential: a '.' in the id would make Authenticate's split parse the
+// credential as a different client's.
+var clientIDPattern = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
+
 // Create registers a client and returns the full bearer credential
 // ("<id>.<secret>") exactly once; only the hash is stored.
 func Create(ctx context.Context, pool *pgxpool.Pool, c Client) (credential string, err error) {
+	if !clientIDPattern.MatchString(c.ID) {
+		return "", fmt.Errorf("client id must match %s", clientIDPattern)
+	}
 	secret, err := crypto.NewClientSecret()
 	if err != nil {
 		return "", err

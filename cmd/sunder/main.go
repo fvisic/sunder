@@ -58,7 +58,11 @@ func run(cmd string, args []string) error {
 		if err := st.Migrate(ctx); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
-		return api.New(cfg, st).Run(ctx)
+		srv, err := api.New(cfg, st)
+		if err != nil {
+			return err
+		}
+		return srv.Run(ctx)
 	case "migrate":
 		return st.Migrate(ctx)
 	default:
@@ -85,12 +89,24 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 	if *id == "" || *name == "" || *scope == "" {
 		return fmt.Errorf("-id, -name and -scope are required")
 	}
+	// Reject typo'd actions up front: a dead grant would surface much later
+	// as a confusing 403 in some integration.
+	known := map[string]bool{
+		auth.ActContactsRegister: true, auth.ActScopesIssue: true, auth.ActLookup: true,
+		auth.ActAttributesRead: true, auth.ActOTIIssue: true, auth.ActOTIVerify: true,
+	}
+	acts := splitCSV(*actions)
+	for _, a := range acts {
+		if !known[a] {
+			return fmt.Errorf("unknown action %q", a)
+		}
+	}
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: *id, Name: *name, Scope: *scope,
-		AllowedActions:  splitCSV(*actions),
+		AllowedActions:  acts,
 		AllowedPurposes: splitCSV(*purposes),
 		RateLimit:       *rate,
 	})

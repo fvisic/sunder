@@ -40,7 +40,11 @@ func newE2E(t *testing.T) *e2eEnv {
 		t.Fatal(err)
 	}
 	cfg := config.Config{Keystore: "file", KeystorePath: t.TempDir()}
-	return &e2eEnv{srv: New(cfg, st), credCRM: credCRM, credDWH: credDWH}
+	srv, err := New(cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &e2eEnv{srv: srv, credCRM: credCRM, credDWH: credDWH}
 }
 
 func (e *e2eEnv) do(t *testing.T, cred, method, path string, body any) (*httptest.ResponseRecorder, map[string]string) {
