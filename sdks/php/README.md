@@ -16,6 +16,8 @@ The same ~20-line flow as every Sunder SDK: register → lookup → issue OTI �
 
 ```php
 <?php
+require __DIR__ . '/vendor/autoload.php';
+
 use Sunder\SunderClient;
 
 // Config defaults to env: SUNDER_URL, SUNDER_CREDENTIAL ("client_id.secret")
@@ -61,3 +63,8 @@ the SDK surfaces that distinctly so your code can decide.
 composer install
 vendor/bin/phpunit tests
 ```
+
+## Requirements
+
+PHP 8.1+, `allow_url_fopen=1` (the transport uses PHP's HTTP stream
+wrapper; the client fails fast at construction when it is disabled).

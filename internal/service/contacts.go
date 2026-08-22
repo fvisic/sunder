@@ -295,7 +295,7 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet
 		return "", err
 	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3 WHERE cid=$1`, cid, blob, keyID); err != nil {
+		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, updated_at=now() WHERE cid=$1`, cid, blob, keyID); err != nil {
 		return "", err
 	}
 	// Audit inside the same transaction: the registration and its record
@@ -420,13 +420,9 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 	if !client.CanUse(purpose) {
 		return "", ErrPurposeNotAllowed
 	}
-	// Consent hook (v1.5): an explicit granted=false decision blocks the
-	// purpose even though the client is allowed to use it in general.
-	if denied, err := consentDenied(ctx, c.Pool, cid, purpose); err != nil {
-		return "", err
-	} else if denied {
-		return "", ErrConsentDenied
-	}
+	// Scope ownership FIRST: the consent hook must never run on a raw
+	// caller-supplied CID, or the 403/404 split becomes an oracle revealing
+	// that a foreign CID exists and what its consent state is.
 	var blob []byte
 	var keyID string
 	err := c.Pool.QueryRow(ctx,
@@ -437,6 +433,14 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 	}
 	if err != nil {
 		return "", err
+	}
+	// Consent hook (v1.5): an explicit granted=false decision blocks the
+	// purpose even though the client is allowed to use it in general.
+	// Runs only after the scope check above proved ownership.
+	if denied, err := consentDenied(ctx, c.Pool, cid, purpose); err != nil {
+		return "", err
+	} else if denied {
+		return "", ErrConsentDenied
 	}
 	if err := audit.Append(ctx, c.Pool, audit.Entry{
 		ClientID: client.ID, Action: "attributes.read", CID: cid,

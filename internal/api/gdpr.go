@@ -15,7 +15,13 @@ func (s *Server) handleConsentSet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	granted := in.Granted != nil && *in.Granted
+	// A missing granted field must be a validation error, never a silent
+	// consent withdrawal.
+	if in.Granted == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": "granted (true/false) is required"})
+		return
+	}
+	granted := *in.Granted
 	err := s.GDPR.SetConsent(r.Context(), auth.FromContext(r.Context()), in.CID, in.Purpose, granted)
 	if err != nil {
 		s.logErr(r, err)

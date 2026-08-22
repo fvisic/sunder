@@ -39,7 +39,14 @@ func (g *GDPR) client() *http.Client {
 	if g.HTTP != nil {
 		return g.HTTP
 	}
-	return &http.Client{Timeout: 5 * time.Second}
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		// Never follow redirects: a hostile/compromised webhook receiver
+		// must not be able to steer the signed POST at internal addresses.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 // --- consent -----------------------------------------------------------------
@@ -274,6 +281,17 @@ func (g *GDPR) Erase(ctx context.Context, client *auth.Client, cid string) (eras
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Idempotency guard: a tombstone cannot be erased again (a second call
+	// would re-queue webhook deliveries for an already-forgotten person).
+	var alreadyErased bool
+	if err := tx.QueryRow(ctx,
+		`SELECT erased_at IS NOT NULL FROM persons WHERE id=$1 FOR UPDATE`, personID).Scan(&alreadyErased); err != nil {
+		return 0, 0, err
+	}
+	if alreadyErased {
+		return 0, 0, fmt.Errorf("%w: person already erased", ErrValidation)
+	}
+
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO erasures (person_id, requested_by) VALUES ($1,$2) RETURNING id`,
 		personID, client.ID).Scan(&erasureID); err != nil {
@@ -311,6 +329,14 @@ func (g *GDPR) Erase(ctx context.Context, client *auth.Client, cid string) (eras
 	if _, err := tx.Exec(ctx, `DELETE FROM person_tokens WHERE person_id=$1`, personID); err != nil {
 		return 0, 0, err
 	}
+	// Outstanding one-time tokens die with the person: a pre-erasure OTI
+	// must not stay verifiable (it would mint a fresh live CID for the
+	// forgotten person in the verifier's scope).
+	if _, err := tx.Exec(ctx,
+		`UPDATE oti SET status='REVOKED' WHERE status='VALID'
+		   AND cid IN (SELECT cid FROM cids WHERE person_id=$1)`, personID); err != nil {
+		return 0, 0, err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE persons SET erased_at=now() WHERE id=$1`, personID); err != nil {
 		return 0, 0, err
 	}
@@ -341,14 +367,20 @@ type erasePayload struct {
 	TS        string `json:"ts"`
 }
 
+// maxDeliveryAttempts bounds retries: after this many failures the event is
+// marked FAILED (audited) so one dead endpoint cannot starve the queue.
+const maxDeliveryAttempts = 10
+
 // DeliverPending pushes queued erasure events to their scopes' webhooks.
-// Events for scopes without a webhook are marked NO_WEBHOOK (visible in
-// `sunder dsr events`); failures stay PENDING for the next pass.
+// Events for scopes without a webhook are marked NO_WEBHOOK; failures stay
+// PENDING until the attempts cap, then FAILED. Every terminal transition is
+// written to the audit chain — delivery confirmations are accountability
+// records, not operational noise.
 func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 	rows, err := g.Pool.Query(ctx,
 		`SELECT e.id, e.erasure_id, e.scope, e.cid, w.url, w.secret
 		 FROM erasure_events e LEFT JOIN webhooks w ON w.scope = e.scope
-		 WHERE e.status='PENDING' ORDER BY e.id LIMIT 100`)
+		 WHERE e.status='PENDING' ORDER BY e.attempts, e.id LIMIT 100`)
 	if err != nil {
 		return 0, err
 	}
@@ -370,10 +402,29 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
+	terminal := func(e ev, status, action string) {
+		tx, err := g.Pool.Begin(ctx)
+		if err != nil {
+			return
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := tx.Exec(ctx,
+			`UPDATE erasure_events SET status=$2, delivered_at=CASE WHEN $2='DELIVERED' THEN now() END,
+			        attempts=attempts+1 WHERE id=$1`, e.id, status); err != nil {
+			return
+		}
+		if err := audit.AppendTx(ctx, tx, audit.Entry{
+			ClientID: "system", Action: action, CID: e.cid,
+			Detail: map[string]any{"erasure_id": e.erasureID, "scope": e.scope, "event_id": e.id},
+		}); err != nil {
+			return
+		}
+		_ = tx.Commit(ctx)
+	}
+
 	for _, e := range evs {
 		if e.url == nil {
-			_, _ = g.Pool.Exec(ctx,
-				`UPDATE erasure_events SET status='NO_WEBHOOK' WHERE id=$1`, e.id)
+			terminal(e, "NO_WEBHOOK", "dsr.erase.no_webhook")
 			continue
 		}
 		body, _ := json.Marshal(erasePayload{
@@ -394,13 +445,32 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 			_ = resp.Body.Close()
 		}
 		if ok {
-			if _, err := g.Pool.Exec(ctx,
-				`UPDATE erasure_events SET status='DELIVERED', delivered_at=now(), attempts=attempts+1 WHERE id=$1`, e.id); err == nil {
-				delivered++
+			terminal(e, "DELIVERED", "dsr.erase.delivered")
+			delivered++
+			continue
+		}
+		var attempts int
+		if err := g.Pool.QueryRow(ctx,
+			`UPDATE erasure_events SET attempts=attempts+1 WHERE id=$1 RETURNING attempts`, e.id).Scan(&attempts); err != nil {
+			continue
+		}
+		if attempts >= maxDeliveryAttempts {
+			// terminal() adds one more attempt in its UPDATE; compensate by
+			// marking FAILED directly here with an audited record.
+			tx, err := g.Pool.Begin(ctx)
+			if err != nil {
+				continue
 			}
-		} else {
-			_, _ = g.Pool.Exec(ctx,
-				`UPDATE erasure_events SET attempts=attempts+1 WHERE id=$1`, e.id)
+			if _, err := tx.Exec(ctx,
+				`UPDATE erasure_events SET status='FAILED' WHERE id=$1`, e.id); err == nil {
+				if audit.AppendTx(ctx, tx, audit.Entry{
+					ClientID: "system", Action: "dsr.erase.failed", CID: e.cid,
+					Detail: map[string]any{"erasure_id": e.erasureID, "scope": e.scope, "event_id": e.id, "attempts": attempts},
+				}) == nil {
+					_ = tx.Commit(ctx)
+				}
+			}
+			_ = tx.Rollback(ctx)
 		}
 	}
 	return delivered, nil
@@ -417,25 +487,51 @@ func RunRetention(ctx context.Context, pool *pgxpool.Pool) (wiped int64, otiPrun
 		return 0, 0, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	tag, err := tx.Exec(ctx,
+	// TTL keys off updated_at (bumped on every blob write): an actively
+	// maintained contact is never "old" just because it was first seen long
+	// ago. RETURNING captures WHICH pseudonyms lost data — a PII-destroying
+	// mutation needs a per-CID accountability trail, not just a count.
+	rows, err := tx.Query(ctx,
 		`UPDATE cids c SET pii_encrypted=NULL, pii_key_id=NULL
 		 FROM retention_policies rp
 		 WHERE rp.scope = c.scope
 		   AND c.pii_encrypted IS NOT NULL
-		   AND c.created_at < now() - make_interval(days => rp.contacts_ttl_days)`)
+		   AND c.updated_at < now() - make_interval(days => rp.contacts_ttl_days)
+		 RETURNING c.cid`)
 	if err != nil {
 		return 0, 0, err
 	}
-	wiped = tag.RowsAffected()
-	tag, err = tx.Exec(ctx, `DELETE FROM oti WHERE expires_at < now() - interval '30 days'`)
+	var wipedCIDs []string
+	for rows.Next() {
+		var cid string
+		if err := rows.Scan(&cid); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		wipedCIDs = append(wipedCIDs, cid)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+	wiped = int64(len(wipedCIDs))
+
+	tag, err := tx.Exec(ctx, `DELETE FROM oti WHERE expires_at < now() - interval '30 days'`)
 	if err != nil {
 		return 0, 0, err
 	}
 	otiPruned = tag.RowsAffected()
 	if wiped > 0 || otiPruned > 0 {
+		detail := map[string]any{"blobs_wiped": wiped, "oti_pruned": otiPruned}
+		const listCap = 500
+		if len(wipedCIDs) > listCap {
+			detail["cids"] = wipedCIDs[:listCap]
+			detail["cids_truncated"] = true
+		} else {
+			detail["cids"] = wipedCIDs
+		}
 		if err := audit.AppendTx(ctx, tx, audit.Entry{
-			ClientID: "system", Action: "retention.run",
-			Detail: map[string]any{"blobs_wiped": wiped, "oti_pruned": otiPruned},
+			ClientID: "system", Action: "retention.run", Detail: detail,
 		}); err != nil {
 			return 0, 0, err
 		}

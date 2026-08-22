@@ -65,6 +65,11 @@ final class SunderClient
         if ($credential === '') {
             throw new \InvalidArgumentException('Sunder credential required (arg or SUNDER_CREDENTIAL)');
         }
+        if (!filter_var(ini_get('allow_url_fopen'), FILTER_VALIDATE_BOOL)) {
+            // Fail loudly at construction: with the http wrapper disabled
+            // every call would surface as a transient-looking network error.
+            throw new \RuntimeException('SunderClient requires allow_url_fopen=1 (php.ini)');
+        }
         $this->base = rtrim($url, '/');
         $this->credential = $credential;
         $this->timeout = $timeout;
@@ -81,6 +86,12 @@ final class SunderClient
      */
     public function registerContact(array $attributes): string
     {
+        // PHP cannot distinguish an empty map from an empty list: a nested
+        // empty "attributes" array would encode as [] and the server would
+        // reject it (Go unmarshals it into a map). Force the object form.
+        if (isset($attributes['attributes']) && $attributes['attributes'] === []) {
+            $attributes['attributes'] = new \stdClass();
+        }
         return $this->expectString(
             $this->request('POST', '/v1/contacts', $attributes),
             'cid'
@@ -274,7 +285,17 @@ final class SunderClient
         if ($body !== null) {
             $headers[] = 'Content-Type: application/json';
             // Empty bodies must encode as a JSON object, not a JSON list.
-            $options['content'] = $body === [] ? '{}' : json_encode($body, JSON_UNESCAPED_SLASHES);
+            $encoded = $body === [] ? '{}' : json_encode($body, JSON_UNESCAPED_SLASHES);
+            if ($encoded === false) {
+                // json_encode fails on invalid UTF-8; silently sending an
+                // empty body would turn into a misleading server-side 400.
+                throw new ValidationException(
+                    'validation',
+                    null,
+                    'request body is not valid UTF-8/JSON: ' . json_last_error_msg()
+                );
+            }
+            $options['content'] = $encoded;
         }
         $options['header'] = implode("\r\n", $headers);
         $context = stream_context_create(['http' => $options]);
@@ -287,10 +308,24 @@ final class SunderClient
         }
 
         $status = 0;
+        $contentLength = null;
         foreach ($http_response_header ?? [] as $line) {
             if (preg_match('#^HTTP/\S+\s+(\d{3})#', $line, $m)) {
                 $status = (int) $m[1]; // keep the last status line (redirects)
+                $contentLength = null; // headers restart after a redirect
+            } elseif (preg_match('#^Content-Length:\s*(\d+)#i', $line, $m)) {
+                $contentLength = (int) $m[1];
             }
+        }
+        // A read timeout mid-body makes PHP return the TRUNCATED body with
+        // no error; that is a network-level failure (retryable), not a
+        // malformed response.
+        if ($contentLength !== null && strlen($raw) < $contentLength) {
+            throw new ServiceUnavailableException(
+                'service_unavailable',
+                null,
+                sprintf('network failure: response truncated (%d of %d bytes)', strlen($raw), $contentLength)
+            );
         }
         if ($status === 0) {
             throw new ServiceUnavailableException(

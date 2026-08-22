@@ -162,6 +162,14 @@ Re-registering the same identifiers afterwards creates a brand-new person.
 Action: `dsr.export`. Machine-readable JSON of what the caller's scope
 holds: `{scope, cid, attributes, consents}`. Audited.
 
+**Grant sparingly**: export is a bulk read — it returns the whole
+caller-scope blob in one audited call, without per-attribute purpose or
+consent gating (data portability is its own legal basis under GDPR Art. 20;
+a withdrawn marketing consent does not block the subject's right to their
+data). A client holding `dsr.export` can therefore read everything its
+scope stores; treat the grant like `scopes.issue` — privacy-officer and
+subject-request tooling only.
+
 ## Retention
 
 `sunder retention set -scope crm -days 365` + `sunder retention run` (cron):

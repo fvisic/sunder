@@ -69,14 +69,16 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 	if !client.CanUse(purpose) {
 		return "", time.Time{}, ErrPurposeNotAllowed
 	}
+	// Scope ownership FIRST (see GetAttribute: the consent hook on a raw
+	// caller CID would leak foreign-CID existence via the 403/404 split).
+	if _, err := o.Contacts.personForClientCID(ctx, client, cid); err != nil {
+		return "", time.Time{}, err
+	}
 	// Consent hook (v1.5): withdrawn consent blocks handoffs for the purpose.
 	if denied, err := consentDenied(ctx, o.Pool, cid, purpose); err != nil {
 		return "", time.Time{}, err
 	} else if denied {
 		return "", time.Time{}, ErrConsentDenied
-	}
-	if _, err := o.Contacts.personForClientCID(ctx, client, cid); err != nil {
-		return "", time.Time{}, err
 	}
 
 	version, err := o.Ring.Newest(ctx, crypto.SigningKeyName)
@@ -228,6 +230,10 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 			return "", serr
 		case status == "USED":
 			return "", ErrTokenUsed
+		case status == "REVOKED":
+			// Erasure revokes outstanding tokens; indistinguishable from a
+			// forged token on purpose (no oracle for "this person was erased").
+			return "", ErrTokenInvalid
 		default:
 			return "", ErrTokenExpired
 		}

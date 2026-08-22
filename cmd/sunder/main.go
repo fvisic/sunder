@@ -107,6 +107,13 @@ func webhookCmd(ctx context.Context, st *store.Store, args []string) error {
 		if *scope == "" || *url == "" {
 			return fmt.Errorf("-scope and -url are required")
 		}
+		// HTTPS only (loopback exempt for local development): erasure events
+		// carry pseudonyms and must not travel plaintext.
+		if !strings.HasPrefix(*url, "https://") &&
+			!strings.HasPrefix(*url, "http://localhost") &&
+			!strings.HasPrefix(*url, "http://127.0.0.1") {
+			return fmt.Errorf("webhook URL must be https:// (http:// allowed for localhost only)")
+		}
 		secret, err := crypto.NewClientSecret()
 		if err != nil {
 			return err

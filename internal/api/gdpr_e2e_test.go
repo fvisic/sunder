@@ -243,6 +243,82 @@ func TestDSREraseOrgWideWithSignedWebhook(t *testing.T) {
 	}
 }
 
+// A foreign-scope CID with a withdrawn consent must read as 404, not 403 —
+// otherwise the 403/404 split is an oracle for foreign-CID existence and
+// consent state.
+func TestConsentHookNoForeignCIDOracle(t *testing.T) {
+	e, _ := gdprEnv(t)
+	cid := registerFilip(t, e)
+	rec, _ := e.do(t, e.credCRM, "POST", "/v1/consent", map[string]any{
+		"cid": cid, "purpose": "analytics", "granted": false})
+	if rec.Code != 200 {
+		t.Fatal(rec.Code)
+	}
+	// DWH (foreign scope, has purpose "analytics" granted) probes the CRM CID.
+	rec, out := e.do(t, e.credDWH, "GET", "/v1/contacts/"+cid+"/attributes/email?purpose=analytics", nil)
+	if rec.Code != 404 {
+		t.Fatalf("foreign CID with withdrawn consent must be 404 (got %d %s) - 403 would leak existence+consent", rec.Code, out["error"])
+	}
+}
+
+// An OTI issued before erasure must not survive it: verification after the
+// erase must fail (and never mint a fresh CID for the forgotten person).
+func TestEraseRevokesOutstandingOTIs(t *testing.T) {
+	e, credDPO := gdprEnv(t)
+	ctx := context.Background()
+	credERP, err := auth.Create(ctx, e.srv.Store.Pool, auth.Client{
+		ID: "erp3", Name: "ERP3", Scope: "erp",
+		AllowedActions:  []string{auth.ActOTIVerify},
+		AllowedPurposes: []string{"create_order"}, RateLimit: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid := registerFilip(t, e)
+	rec, out := e.do(t, e.credCRM, "POST", "/v1/oti", map[string]string{
+		"cid": cid, "purpose": "create_order", "audience": "erp"})
+	if rec.Code != 201 {
+		t.Fatal(rec.Code)
+	}
+	token := out["token"]
+
+	rec, _ = e.do(t, credDPO, "POST", "/v1/dsr/erase", map[string]string{"cid": cid})
+	if rec.Code != 200 {
+		t.Fatal(rec.Code)
+	}
+	rec, out = e.do(t, credERP, "POST", "/v1/oti/verify", map[string]string{
+		"token": token, "purpose": "create_order", "audience": "erp"})
+	if rec.Code != 400 || out["error"] != "token_invalid" {
+		t.Fatalf("pre-erasure OTI must be revoked: %d %s", rec.Code, rec.Body.String())
+	}
+	// No new CID may have been minted in the erp scope for the erased person.
+	var n int
+	if err := e.srv.Store.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM cids c JOIN persons p ON p.id=c.person_id
+		 WHERE p.erased_at IS NOT NULL AND c.scope='erp'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("erased person re-linked into verifier scope (%d cids)", n)
+	}
+	// Erase is not repeatable on a tombstone.
+	rec, _ = e.do(t, credDPO, "POST", "/v1/dsr/erase", map[string]string{"cid": cid})
+	if rec.Code != 400 {
+		t.Fatalf("second erase must be a validation error: %d", rec.Code)
+	}
+}
+
+// Omitting "granted" must be a validation error, not a silent withdrawal.
+func TestConsentGrantedFieldRequired(t *testing.T) {
+	e, _ := gdprEnv(t)
+	cid := registerFilip(t, e)
+	rec, out := e.do(t, e.credCRM, "POST", "/v1/consent", map[string]any{
+		"cid": cid, "purpose": "newsletter"})
+	if rec.Code != 400 || out["error"] != "validation" {
+		t.Fatalf("missing granted must be 400 validation: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRetentionSweep(t *testing.T) {
 	e, _ := gdprEnv(t)
 	ctx := context.Background()

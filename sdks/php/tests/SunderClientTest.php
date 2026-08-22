@@ -47,8 +47,8 @@ final class SunderClientTest extends TestCase
         $proc = proc_open(
             [PHP_BINARY, '-S', "127.0.0.1:{$port}", __DIR__ . '/mock_server_router.php'],
             [
-                1 => ['file', '/dev/null', 'w'],
-                2 => ['file', '/dev/null', 'w'],
+                1 => ['file', tempnam(sys_get_temp_dir(), 'sunder-mock-out'), 'w'],
+                2 => ['file', tempnam(sys_get_temp_dir(), 'sunder-mock-err'), 'w'],
             ],
             $pipes
         );
@@ -521,7 +521,7 @@ final class SunderClientTest extends TestCase
 
     public function testNetworkFailureIsServiceUnavailable(): void
     {
-        $client = new SunderClient('http://127.0.0.1:' . self::freePort(), 'client_id.secret');
+        $client = new SunderClient('http://127.0.0.1:1', 'client_id.secret'); // port 1: deterministic connection refusal, no freed-port race
         try {
             $client->verifyOti('t', 'create_order', 'erp');
             $this->fail('expected ServiceUnavailableException');
@@ -534,7 +534,7 @@ final class SunderClientTest extends TestCase
 
     public function testHealthNetworkFailureIsServiceUnavailable(): void
     {
-        $client = new SunderClient('http://127.0.0.1:' . self::freePort(), 'client_id.secret');
+        $client = new SunderClient('http://127.0.0.1:1', 'client_id.secret'); // port 1: deterministic connection refusal, no freed-port race
         try {
             $client->health();
             $this->fail('expected ServiceUnavailableException');

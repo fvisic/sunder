@@ -3,7 +3,7 @@
         'name' => 'sunder-id/sunder-client',
         'pretty_version' => 'dev-main',
         'version' => 'dev-main',
-        'reference' => '0b18ac67f05318a8f14e302c2030d14a3e525f82',
+        'reference' => 'b6065ba4e37e781a168893c622cbeb5fc083cfcb',
         'type' => 'library',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
@@ -238,7 +238,7 @@
         'sunder-id/sunder-client' => array(
             'pretty_version' => 'dev-main',
             'version' => 'dev-main',
-            'reference' => '0b18ac67f05318a8f14e302c2030d14a3e525f82',
+            'reference' => 'b6065ba4e37e781a168893c622cbeb5fc083cfcb',
             'type' => 'library',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),
