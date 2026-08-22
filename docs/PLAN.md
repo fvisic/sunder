@@ -716,5 +716,10 @@ audit trail) and right to erasure (blob wipe + token deletion + person
 tombstone + signed webhook events per scope with a retry worker);
 portability export per scope; per-scope retention TTLs + OTI pruning
 (`sunder retention run`). The self-service privacy portal stays v2 (needs
-citizen authentication). PHP SDK shipped (36 mock-server tests); Java and
-.NET SDKs in progress.
+citizen authentication). All five SDKs from section 10.3 are shipped:
+TypeScript, Python, PHP (36 tests), Java (29 tests) and .NET (xunit suite,
+validated in CI — no local toolchain), each with mock-server suites and CI
+jobs. The v1.5 wave went through three dedicated critical reviews (GDPR
+layer, PHP, Java+.NET); all findings fixed, including a consent-hook
+foreign-CID oracle, OTI survival across erasure, unaudited webhook
+deliveries, retention keyed on created_at, and wrong license metadata.
