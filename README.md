@@ -46,7 +46,9 @@ curl http://localhost:8080/healthz
 | `sdks/typescript`, `sdks/python` | zero-dependency SDKs (same canonical interface; Java/PHP/.NET follow) |
 | `demo/callcenter.sh` | narrated call-center pilot storyline (doubles as a smoke test) |
 | `loadtest/lookup.js` | k6 scenarios encoding the latency targets |
-| `docs/` | architecture, API, threat model, design plan |
+| `benchmark/` | head-to-head benchmark harness vs Databunker (+ results) |
+| `migrate/databunker/` | migration tool: Databunker records -> Sunder contacts + token-to-CID mapping |
+| `docs/` | design rationale, architecture, API, threat model |
 
 CLI: `sunder serve | migrate | client create | keys rotate/retire/list |
 anchor | verify-audit | webhook set/list | retention set/run |
