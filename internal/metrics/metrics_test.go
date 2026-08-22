@@ -30,3 +30,12 @@ func TestCounterAndHistogramRendering(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitSeries(t *testing.T) {
+	if n, l := splitSeries(`requests{path="/v1/lookup"}`); n != "requests" || l != `path="/v1/lookup"` {
+		t.Fatalf("labeled: %q %q", n, l)
+	}
+	if n, l := splitSeries("plain"); n != "plain" || l != "" {
+		t.Fatalf("plain: %q %q", n, l)
+	}
+}

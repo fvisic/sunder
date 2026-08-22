@@ -128,3 +128,202 @@ func TestBuildQueryRejectsBadRoot(t *testing.T) {
 		}
 	}
 }
+
+func TestAnchorErrorBranches(t *testing.T) {
+	needsOpenSSL(t)
+	s := testPool(t)
+	ctx := context.Background()
+	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "seed"}); err != nil {
+		t.Fatal(err)
+	}
+	// TSA returns garbage: TokenTime fails, nothing is stored.
+	garbage := fakeTSA(t, 200, []byte("this is not a DER token"))
+	if _, _, err := Anchor(ctx, s.Pool, garbage.URL, "", t.TempDir()); err == nil {
+		t.Fatal("garbage TSA reply must not be stored")
+	}
+	// Unreachable TSA.
+	if _, _, err := Anchor(ctx, s.Pool, "http://127.0.0.1:1/tsr", "", ""); err == nil {
+		t.Fatal("unreachable TSA must error")
+	}
+	var n int
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_anchor`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("failed anchor attempts must store nothing, found %d rows", n)
+	}
+}
+
+func TestVerifyAnchorsMalformedRootRow(t *testing.T) {
+	needsOpenSSL(t)
+	s := testPool(t)
+	ctx := context.Background()
+	// A row whose root is not a sha256 digest: with a CA the token check
+	// must surface an error (environment/validation), not a silent verdict.
+	if _, err := s.Pool.Exec(ctx,
+		`INSERT INTO audit_anchor (root_hash, tsa_url, stamped_at, tsr) VALUES ('XYZ','t','',''::bytea)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAnchors(ctx, s.Pool, vendoredCA, ""); err == nil {
+		t.Fatal("malformed stored root must error under token verification")
+	}
+	// Without a CA it is only reported as not-in-chain.
+	res, err := VerifyAnchors(ctx, s.Pool, "", "")
+	if err != nil || len(res) != 1 || res[0].InChain {
+		t.Fatalf("expected one not-in-chain row: %+v %v", res, err)
+	}
+}
+
+func TestVerifyTokenWithoutOpenSSL(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no openssl anywhere
+	if _, err := VerifyToken([]byte("x"), fixtureDigest, vendoredCA); err == nil {
+		t.Fatal("missing openssl must be an environment error")
+	}
+}
+
+func TestAppendOnDeadPool(t *testing.T) {
+	s := testPool(t)
+	s.Close()
+	if err := Append(context.Background(), s.Pool, Entry{ClientID: "x", Action: "y"}); err == nil {
+		t.Fatal("append on dead pool must error")
+	}
+	if _, _, err := Verify(context.Background(), s.Pool); err == nil {
+		t.Fatal("verify on dead pool must error")
+	}
+	if _, err := Head(context.Background(), s.Pool); err == nil {
+		t.Fatal("head on dead pool must error")
+	}
+	if _, err := VerifyAnchors(context.Background(), s.Pool, "", ""); err == nil {
+		t.Fatal("verify-anchors on dead pool must error")
+	}
+	if _, _, err := Anchor(context.Background(), s.Pool, "http://x", "", ""); err == nil {
+		t.Fatal("anchor on dead pool must error")
+	}
+}
+
+func TestVerifyAnchorsFileStates(t *testing.T) {
+	s := testPool(t)
+	ctx := context.Background()
+	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "seed"}); err != nil {
+		t.Fatal(err)
+	}
+	head, err := Head(ctx, s.Pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx,
+		`INSERT INTO audit_anchor (root_hash, tsa_url, stamped_at, tsr) VALUES ($1,'t','','dbbytes'::bytea)`, head); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	// missing: no exported file for the DB anchor.
+	res, err := VerifyAnchors(ctx, s.Pool, "", dir)
+	if err != nil || len(res) != 1 || res[0].FileState != "missing" {
+		t.Fatalf("want missing, got %+v %v", res, err)
+	}
+	// mismatch: exported bytes differ from the DB token.
+	if err := os.WriteFile(dir+"/"+head+".tsr", []byte("otherbytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err = VerifyAnchors(ctx, s.Pool, "", dir)
+	if err != nil || res[0].FileState != "mismatch" {
+		t.Fatalf("want mismatch, got %+v %v", res, err)
+	}
+	// ok: bytes agree.
+	if err := os.WriteFile(dir+"/"+head+".tsr", []byte("dbbytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err = VerifyAnchors(ctx, s.Pool, "", dir)
+	if err != nil || res[0].FileState != "ok" {
+		t.Fatalf("want ok, got %+v %v", res, err)
+	}
+}
+
+func TestVerifyAnchorsOrphanWithCA(t *testing.T) {
+	needsOpenSSL(t)
+	s := testPool(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	// An orphan export whose root is the fixture digest: not in the chain,
+	// not in the DB, but the TSA token verifies — deletion evidence with a
+	// cryptographically valid receipt.
+	if err := os.WriteFile(dir+"/"+fixtureDigest+".tsr", fixture(t), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	res, err := VerifyAnchors(ctx, s.Pool, vendoredCA, dir)
+	if err != nil || len(res) != 1 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if res[0].InDB || res[0].InChain || !res[0].TokenOK {
+		t.Fatalf("orphan with valid token expected: %+v", res[0])
+	}
+}
+
+func TestBuildQueryWithoutOpenSSL(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	if _, err := BuildQuery(fixtureDigest); err == nil {
+		t.Fatal("BuildQuery without openssl must error")
+	}
+	if _, err := TokenTime([]byte("x")); err == nil {
+		t.Fatal("TokenTime without openssl must error")
+	}
+}
+
+// stubOpenSSL puts a fake openssl on PATH whose behaviour is scripted per
+// subcommand, unlocking the CA-success paths without a live TSA.
+func stubOpenSSL(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openssl"), []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+func TestAnchorSuccessWithCA(t *testing.T) {
+	s := testPool(t)
+	ctx := context.Background()
+	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "seed"}); err != nil {
+		t.Fatal(err)
+	}
+	stubOpenSSL(t, `case "$*" in
+*-query*) printf 'QUERYBYTES' ;;
+*-reply*) echo 'Time stamp: Aug 22 10:00:00 2026 GMT' ;;
+*-verify*) echo 'Verification: OK' ;;
+esac
+exit 0`)
+	srv := fakeTSA(t, 200, []byte("TOKENBYTES"))
+	outDir := t.TempDir()
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, []byte("pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, stampedAt, err := Anchor(ctx, s.Pool, srv.URL, ca, outDir)
+	if err != nil || root == "" || stampedAt == "" {
+		t.Fatalf("anchor with verifying CA: %q %q %v", root, stampedAt, err)
+	}
+	// Full cross-check succeeds end to end.
+	res, err := VerifyAnchors(ctx, s.Pool, ca, outDir)
+	if err != nil || len(res) != 1 || !res[0].TokenOK || !res[0].InChain || res[0].FileState != "ok" {
+		t.Fatalf("verify-anchors: %+v %v", res, err)
+	}
+}
+
+func TestTokenTimeWithoutStampLine(t *testing.T) {
+	stubOpenSSL(t, `echo 'no stamp here'; exit 0`)
+	if _, err := TokenTime([]byte("x")); err == nil {
+		t.Fatal("reply without a Time stamp line must error")
+	}
+}
+
+func TestVerifyTokenOpenSSLGarbageOutput(t *testing.T) {
+	stubOpenSSL(t, `echo 'something else'; exit 0`)
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, []byte("pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := VerifyToken([]byte("x"), fixtureDigest, ca)
+	if err != nil || ok {
+		t.Fatalf("exit-0 without Verification: OK must be a clean failure: %v %v", ok, err)
+	}
+}

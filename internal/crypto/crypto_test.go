@@ -2,6 +2,9 @@ package crypto
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -170,5 +173,138 @@ func TestPKCS11Stub(t *testing.T) {
 	}
 	if err := (&PKCS11Keystore{}).Ensure(context.Background(), "x"); err == nil {
 		t.Fatal("pkcs11 stub Ensure must error")
+	}
+}
+
+func TestNormalizeCleanRejectsControlChars(t *testing.T) {
+	if _, err := NormalizeEmail("a\x00b@example.com"); err == nil {
+		t.Fatal("NUL in email must be rejected")
+	}
+	if _, err := NormalizeName("Ana\x1bAnic"); err == nil {
+		t.Fatal("escape char in name must be rejected")
+	}
+	if _, err := NormalizeEmail("has space@example.com"); err == nil {
+		t.Fatal("inner whitespace must be rejected")
+	}
+	long := strings.Repeat("a", 330) + "@example.com"
+	if _, err := NormalizeEmail(long); err == nil {
+		t.Fatal("overlong email must be rejected")
+	}
+}
+
+func TestCSPRNGFailureSurfaces(t *testing.T) {
+	old := randRead
+	randRead = func([]byte) (int, error) { return 0, context.DeadlineExceeded }
+	defer func() { randRead = old }()
+
+	if _, err := NewCID(); err == nil {
+		t.Fatal("NewCID must surface CSPRNG failure")
+	}
+	if _, err := NewClientSecret(); err == nil {
+		t.Fatal("NewClientSecret must surface CSPRNG failure")
+	}
+	box := NewPIIBox(fileKS(t))
+	if _, err := box.Encrypt(context.Background(), "CID-X", "v1", map[string]string{"a": "b"}); err == nil {
+		t.Fatal("Encrypt must surface CSPRNG failure")
+	}
+	ks := &FileKeystore{Dir: t.TempDir()}
+	if err := ks.Ensure(context.Background(), "hmac-email/v1"); err == nil {
+		t.Fatal("Ensure must surface CSPRNG failure")
+	}
+}
+
+func TestWriteKeyFailure(t *testing.T) {
+	ks := &FileKeystore{}
+	if err := ks.writeKey("/definitely/not/a/dir/x.key"); err == nil {
+		t.Fatal("writeKey into a nonexistent dir must error")
+	}
+}
+
+// shortKS returns key material of an invalid length for AES.
+type shortKS struct{}
+
+func (shortKS) Key(context.Context, string) ([]byte, error) { return []byte("tiny"), nil }
+func (shortKS) Ensure(context.Context, string) error        { return nil }
+
+func TestPIIBoxRejectsBadKeyMaterial(t *testing.T) {
+	ctx := context.Background()
+	box := NewPIIBox(shortKS{})
+	if _, err := box.Encrypt(ctx, "CID-A", "v1", map[string]string{"a": "b"}); err == nil {
+		t.Fatal("encrypt with a 4-byte KEK must error")
+	}
+	if _, err := box.Decrypt(ctx, "CID-A", []byte("blob"), "v1"); err == nil {
+		t.Fatal("decrypt with a 4-byte KEK must error")
+	}
+	good := NewPIIBox(fileKS(t))
+	if _, err := good.Decrypt(ctx, "CID-A", []byte("x"), "v1"); err == nil {
+		t.Fatal("blob shorter than the nonce must error")
+	}
+}
+
+func TestEnsureLockedDirect(t *testing.T) {
+	dir := t.TempDir()
+	ks := &FileKeystore{Dir: dir}
+	if err := ks.Ensure(context.Background(), "hmac-email/v1"); err != nil {
+		t.Fatal(err)
+	}
+	// Existing valid key: early return.
+	if err := ks.ensureLocked(context.Background(), "hmac-email/v1"); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt (short) key on disk: regenerated.
+	p := dir + "/hmac-email_v1.key"
+	if err := os.WriteFile(p, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ks.ensureLocked(context.Background(), "hmac-email/v1"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil || len(b) != 32 {
+		t.Fatalf("regenerated key: %d bytes, %v", len(b), err)
+	}
+}
+
+func TestVaultErrorBranches(t *testing.T) {
+	ctx := context.Background()
+	// Server erroring 500 on writes: Ensure must surface the status.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.WriteHeader(404)
+			return
+		}
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+	v := &VaultKeystore{Addr: srv.URL, Token: "t", HTTP: srv.Client()}
+	if err := v.Ensure(ctx, "hmac-email/v1"); err == nil {
+		t.Fatal("500 on vault write must error")
+	}
+	if err := v.Ensure(ctx, "BAD NAME"); err == nil {
+		t.Fatal("invalid name must be rejected before any request")
+	}
+	if _, err := v.Key(ctx, "BAD NAME"); err == nil {
+		t.Fatal("invalid name must be rejected on read too")
+	}
+	// Write accepted but the re-read still 404s: fail loudly.
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.WriteHeader(404)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv2.Close()
+	v2 := &VaultKeystore{Addr: srv2.URL, Token: "t", HTTP: srv2.Client()}
+	if err := v2.Ensure(ctx, "hmac-email/v1"); err == nil {
+		t.Fatal("write-then-vanish must error")
+	}
+	// Unreachable vault.
+	v3 := &VaultKeystore{Addr: "http://127.0.0.1:1", Token: "t"}
+	if _, err := v3.Key(ctx, "hmac-email/v1"); err == nil {
+		t.Fatal("unreachable vault must error on read")
+	}
+	if err := v3.Ensure(ctx, "hmac-email/v1"); err == nil {
+		t.Fatal("unreachable vault must error on ensure")
 	}
 }

@@ -9,6 +9,10 @@ import (
 	"encoding/hex"
 )
 
+// randRead is a seam for tests; the kernel CSPRNG failing is otherwise
+// nearly impossible to exercise.
+var randRead = rand.Read
+
 // Search-token key names. Rotation (M4) appends /v2 etc.; ActiveVersions in
 // the keys table decides which are computed on lookup (dual-key window).
 const (
@@ -53,7 +57,7 @@ func (t *Tokenizer) NameToken(ctx context.Context, v, normalized string) (string
 // bytes. Random, never derived from PII — nothing to reverse (docs/DESIGN.md).
 func NewCID() (string, error) {
 	raw := make([]byte, 16)
-	if _, err := rand.Read(raw); err != nil {
+	if _, err := randRead(raw); err != nil {
 		return "", err
 	}
 	return "CID-" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw), nil
@@ -62,7 +66,7 @@ func NewCID() (string, error) {
 // NewClientSecret returns a bearer secret with enough entropy for API keys.
 func NewClientSecret() (string, error) {
 	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
+	if _, err := randRead(raw); err != nil {
 		return "", err
 	}
 	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw), nil

@@ -57,3 +57,17 @@ func TestEd25519FromSeedValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPasetoPayloadBranches(t *testing.T) {
+	for _, bad := range []string{"v2.local.abc", "v4.public.!!!", "v4.public.AA", "v4.public.abc.Zm9v"} {
+		if _, err := PasetoPayload(bad); err == nil {
+			t.Errorf("PasetoPayload(%q): expected error", bad)
+		}
+	}
+	sk := ed25519.NewKeyFromSeed(make([]byte, 32))
+	tok := PasetoSign(sk, []byte(`{"a":1}`))
+	out, err := PasetoPayload(tok)
+	if err != nil || string(out) != `{"a":1}` {
+		t.Fatalf("payload roundtrip: %q %v", out, err)
+	}
+}

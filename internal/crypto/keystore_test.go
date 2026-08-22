@@ -193,3 +193,67 @@ func TestEnsureReclaimsStaleLock(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestKeystoreCorruptAndVaultFailures(t *testing.T) {
+	ctx := context.Background()
+	// File driver: a key file of the wrong size is a hard error.
+	dir := t.TempDir()
+	ks := &FileKeystore{Dir: dir}
+	if err := os.WriteFile(ks.path("hmac-email/v1"), []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ks.Key(ctx, "hmac-email/v1"); err == nil {
+		t.Fatal("wrong-size key must error")
+	}
+	// Ensure with an existing wrong-size file regenerates cleanly is NOT
+	// wanted — it must overwrite? No: Ensure reads, sees wrong size, and
+	// regenerates via the lock path (len check fails -> writeKey).
+	if err := ks.Ensure(ctx, "hmac-email/v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ks.Key(ctx, "hmac-email/v1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Vault: server erroring on write; server returning malformed material.
+	fail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.WriteHeader(404)
+			return
+		}
+		w.WriteHeader(500)
+	}))
+	defer fail.Close()
+	v := &VaultKeystore{Addr: fail.URL, Token: "t", HTTP: fail.Client()}
+	if err := v.Ensure(ctx, "hmac-email/v1"); err == nil {
+		t.Fatal("vault write failure must surface")
+	}
+	badKey := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"data":{"key":"zz-not-hex"}}}`))
+	}))
+	defer badKey.Close()
+	v2 := &VaultKeystore{Addr: badKey.URL, Token: "t", HTTP: badKey.Client()}
+	if _, err := v2.Key(ctx, "hmac-email/v1"); err == nil {
+		t.Fatal("malformed vault key material must error")
+	}
+	garbage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	defer garbage.Close()
+	v3 := &VaultKeystore{Addr: garbage.URL, Token: "t", HTTP: garbage.Client()}
+	if _, err := v3.Key(ctx, "hmac-email/v1"); err == nil {
+		t.Fatal("non-JSON vault response must error")
+	}
+}
+
+func TestWriteKeyUnwritableDir(t *testing.T) {
+	dir := t.TempDir()
+	sub := dir + "/ro"
+	if err := os.MkdirAll(sub, 0o500); err != nil { // no write permission
+		t.Fatal(err)
+	}
+	ks := &FileKeystore{Dir: sub}
+	if err := ks.Ensure(context.Background(), "hmac-email/v1"); err == nil {
+		t.Fatal("unwritable keystore dir must error")
+	}
+}

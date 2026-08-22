@@ -25,6 +25,11 @@ import (
 	"github.com/fvisic/sunder/internal/store"
 )
 
+// signalContext is a seam for tests (which cannot deliver real signals).
+var signalContext = func() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+}
+
 func main() {
 	cmd := "serve"
 	var rest []string
@@ -46,7 +51,7 @@ func run(cmd string, args []string) error {
 		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr)", cmd)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signalContext()
 	defer stop()
 
 	cfg, err := config.FromEnv()

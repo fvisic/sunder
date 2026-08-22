@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"net"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/fvisic/sunder/internal/config"
@@ -56,5 +58,32 @@ func TestStoreNewErrors(t *testing.T) {
 	}
 	if _, err := store.New(ctx, "postgres://nouser@127.0.0.1:1/none"); err == nil {
 		t.Fatal("unreachable server must error")
+	}
+}
+
+func TestBadJSONOnEveryHandler(t *testing.T) {
+	e := newE2E(t)
+	for _, path := range []string{"/v1/contacts", "/v1/lookup", "/v1/oti", "/v1/oti/verify", "/v1/dsr/erase", "/v1/consent"} {
+		req := httptest.NewRequest("POST", path, strings.NewReader("{broken"))
+		req.Header.Set("Authorization", "Bearer "+e.credCRM)
+		rec := httptest.NewRecorder()
+		e.srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Errorf("%s with broken JSON: got %d", path, rec.Code)
+		}
+	}
+}
+
+func TestRunListenError(t *testing.T) {
+	// Occupy a port, then ask Run to bind it: the listener error must
+	// surface through errCh.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	s := mustNew(t, config.Config{Listen: l.Addr().String()})
+	if err := s.Run(context.Background()); err == nil {
+		t.Fatal("binding an occupied port must error")
 	}
 }

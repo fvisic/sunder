@@ -9,7 +9,6 @@ package crypto
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -130,7 +129,7 @@ func (f *FileKeystore) ensureLocked(_ context.Context, name string) error {
 
 func (f *FileKeystore) writeKey(p string) error {
 	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
+	if _, err := randRead(key); err != nil {
 		return err
 	}
 	tmp := p + ".tmp"
@@ -194,7 +193,7 @@ func (v *VaultKeystore) Ensure(ctx context.Context, name string) error {
 		return err
 	}
 	fresh := make([]byte, 32)
-	if _, err := rand.Read(fresh); err != nil {
+	if _, err := randRead(fresh); err != nil {
 		return err
 	}
 	// cas=0 makes the write fail if the secret appeared meanwhile; then the

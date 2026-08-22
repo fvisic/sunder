@@ -71,8 +71,9 @@ go run ./cmd/sunder serve
 Configuration is environment-only; see `internal/config/config.go` for the
 full `SUNDER_*` list. Documentation lives in `docs/`.
 
-Test coverage is gated at **>= 80%** in CI (currently ~80-82% across the
-server and CLI, with the API layer above 90%); the SDKs carry their own
+Test coverage is gated at **>= 88%** in CI (currently ~90% across the
+server and CLI — the uncovered remainder is almost entirely defensive
+branches for mid-transaction database failures); the SDKs carry their own
 mock-server suites (TS 18, Python 22, PHP 36, Java 29, .NET xunit), and the
 CI `e2e-demo` job boots the real stack and runs the narrated demo as a
 smoke test on every push.

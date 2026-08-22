@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 )
@@ -51,7 +50,7 @@ func (p *PIIBox) Encrypt(ctx context.Context, boundTo, keyID string, attrs map[s
 		return nil, err
 	}
 	nonce := make([]byte, g.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
+	if _, err := randRead(nonce); err != nil {
 		return nil, err
 	}
 	return g.Seal(nonce, nonce, plain, aad(boundTo, keyID)), nil
