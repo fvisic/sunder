@@ -23,6 +23,11 @@ type Config struct {
 	MetricsToken string // SUNDER_METRICS_TOKEN: when set, /metrics requires this bearer token (per-client counters reveal client ids and activity)
 	TSACA        string // SUNDER_TSA_CACERT: TSA root CA bundle; falls back to the vendored deploy/freetsa/cacert.pem when present
 	AnchorDir    string // SUNDER_ANCHOR_DIR: directory where `sunder anchor` exports .tsr files — sync it to write-once storage off this host
+	// Shared rate-limit counters for multi-replica deployments; unset =
+	// in-memory per-replica windows.
+	RedisAddr       string // SUNDER_REDIS_ADDR (host:port)
+	RedisPassword   string // SUNDER_REDIS_PASSWORD
+	RedisFailClosed bool   // SUNDER_REDIS_FAIL_CLOSED=true blocks lookups when Redis is unreachable (default: fail open)
 }
 
 func getenv(key, def string) string {
@@ -35,20 +40,23 @@ func getenv(key, def string) string {
 // FromEnv builds a Config from the environment, validating required values.
 func FromEnv() (Config, error) {
 	c := Config{
-		DBURL:        os.Getenv("SUNDER_DB_URL"),
-		Listen:       getenv("SUNDER_LISTEN", ":8080"),
-		TLSCert:      os.Getenv("SUNDER_TLS_CERT"),
-		TLSKey:       os.Getenv("SUNDER_TLS_KEY"),
-		MTLSCA:       os.Getenv("SUNDER_MTLS_CA"),
-		Keystore:     getenv("SUNDER_KEYSTORE", "file"),
-		KeystorePath: getenv("SUNDER_KEYSTORE_PATH", "./keystore"),
-		VaultAddr:    os.Getenv("SUNDER_VAULT_ADDR"),
-		VaultToken:   os.Getenv("SUNDER_VAULT_TOKEN"),
-		VaultMount:   getenv("SUNDER_VAULT_MOUNT", "secret"),
-		TSAURL:       getenv("SUNDER_TSA_URL", "https://freetsa.org/tsr"),
-		MetricsToken: os.Getenv("SUNDER_METRICS_TOKEN"),
-		TSACA:        os.Getenv("SUNDER_TSA_CACERT"),
-		AnchorDir:    os.Getenv("SUNDER_ANCHOR_DIR"),
+		DBURL:           os.Getenv("SUNDER_DB_URL"),
+		Listen:          getenv("SUNDER_LISTEN", ":8080"),
+		TLSCert:         os.Getenv("SUNDER_TLS_CERT"),
+		TLSKey:          os.Getenv("SUNDER_TLS_KEY"),
+		MTLSCA:          os.Getenv("SUNDER_MTLS_CA"),
+		Keystore:        getenv("SUNDER_KEYSTORE", "file"),
+		KeystorePath:    getenv("SUNDER_KEYSTORE_PATH", "./keystore"),
+		VaultAddr:       os.Getenv("SUNDER_VAULT_ADDR"),
+		VaultToken:      os.Getenv("SUNDER_VAULT_TOKEN"),
+		VaultMount:      getenv("SUNDER_VAULT_MOUNT", "secret"),
+		TSAURL:          getenv("SUNDER_TSA_URL", "https://freetsa.org/tsr"),
+		MetricsToken:    os.Getenv("SUNDER_METRICS_TOKEN"),
+		TSACA:           os.Getenv("SUNDER_TSA_CACERT"),
+		AnchorDir:       os.Getenv("SUNDER_ANCHOR_DIR"),
+		RedisAddr:       os.Getenv("SUNDER_REDIS_ADDR"),
+		RedisPassword:   os.Getenv("SUNDER_REDIS_PASSWORD"),
+		RedisFailClosed: os.Getenv("SUNDER_REDIS_FAIL_CLOSED") == "true",
 	}
 	if c.DBURL == "" {
 		return c, fmt.Errorf("SUNDER_DB_URL is required")

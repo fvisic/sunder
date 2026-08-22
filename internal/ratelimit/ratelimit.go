@@ -11,6 +11,18 @@ import (
 	"time"
 )
 
+// Allower gates requests per client; MissCounter feeds enumeration
+// detection. The in-memory implementations below are single-replica by
+// design; RedisLimiter (redis.go) implements both with shared counters for
+// multi-replica deployments.
+type Allower interface {
+	Allow(key string, limit int) bool
+}
+
+type MissCounter interface {
+	Miss(key string) int
+}
+
 // Limiter approximates a 60s sliding window with two adjacent fixed windows
 // (the standard weighted-window scheme): cheap, O(1) memory per client, and
 // accurate enough for abuse control (not billing).

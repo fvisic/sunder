@@ -11,6 +11,8 @@
 **/.venv/
 coverage.out
 deploy/
+# The ops image vendors the TSA root CA:
+!deploy/freetsa/cacert.pem
 docs/
 sdks/
 demo/

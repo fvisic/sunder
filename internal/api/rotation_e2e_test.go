@@ -233,6 +233,53 @@ func TestLookupSoftNarrowing(t *testing.T) {
 	}
 }
 
+// Rekey completes a rotation without touch: after the sweep every
+// identifier matches under the newest version, blobs are re-encrypted, and
+// the old version can be retired without losing lookups.
+func TestRekeyCompletesRotation(t *testing.T) {
+	e := newE2E(t)
+	ctx := context.Background()
+	grantLookup(t, e, "crm")
+	cid := registerFilip(t, e)
+	ks := OpenKeystore(e.srv.Cfg)
+	for _, kind := range []string{"hmac-email", "hmac-phone", "hmac-name", "pii-kek"} {
+		if _, err := e.srv.Contacts.Ring.Rotate(ctx, ks, kind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := e.srv.Contacts.Rekey(ctx, true, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Persons < 1 || stats.TokensInserted < 3 || stats.BlobsReenc < 1 {
+		t.Fatalf("sweep did too little: %+v", stats)
+	}
+	// Retire v1 everywhere; lookups must still hit via the v2 tokens.
+	for _, kind := range []string{"hmac-email", "hmac-phone", "hmac-name"} {
+		if err := e.srv.Contacts.Ring.Retire(ctx, kind, "v1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec, out := e.do(t, e.credCRM, "POST", "/v1/lookup", map[string]string{"email": "filip@example.com"})
+	if rec.Code != 200 || out["cid"] != cid {
+		t.Fatalf("lookup after rekey+retire: %d %s", rec.Code, rec.Body.String())
+	}
+	rec, out = e.do(t, e.credCRM, "POST", "/v1/lookup", map[string]string{"phone": "+385911234567"})
+	if rec.Code != 200 || out["cid"] != cid {
+		t.Fatalf("phone lookup after rekey+retire: %d %s", rec.Code, rec.Body.String())
+	}
+	// Blob readable under the new KEK.
+	rec, out = e.do(t, e.credCRM, "GET", "/v1/contacts/"+cid+"/attributes/email?purpose=newsletter", nil)
+	if rec.Code != 200 || out["value"] != "filip@example.com" {
+		t.Fatalf("attribute after pii rekey: %d %s", rec.Code, rec.Body.String())
+	}
+	var keyID string
+	if err := e.srv.Store.Pool.QueryRow(ctx,
+		`SELECT pii_key_id FROM cids WHERE cid=$1`, cid).Scan(&keyID); err != nil || keyID != "v2" {
+		t.Fatalf("blob not under v2 KEK: %s %v", keyID, err)
+	}
+}
+
 func TestKeysCLIListAndUnknown(t *testing.T) {
 	// Exercised through the ring API (CLI wiring is thin); strings must not
 	// collide with the strict keystore name check.

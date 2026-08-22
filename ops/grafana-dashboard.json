@@ -1,0 +1,51 @@
+{
+  "title": "Sunder",
+  "uid": "sunder-main",
+  "schemaVersion": 39,
+  "tags": ["sunder"],
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {"list": [{"name": "job", "type": "query", "datasource": null, "query": "label_values(sunder_requests_total, job)", "refresh": 2}]},
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Request rate by handler",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (handler) (rate(sunder_requests_total{job=\"$job\"}[5m]))", "legendFormat": "{{handler}}"}]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "p99 latency by handler (target: verify <10ms, lookup/attr <15ms, issue <20ms)",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "targets": [{"expr": "histogram_quantile(0.99, sum by (handler, le) (rate(sunder_request_seconds_bucket{job=\"$job\"}[5m])))", "legendFormat": "{{handler}}"}]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "5xx error rate",
+      "gridPos": {"x": 0, "y": 8, "w": 8, "h": 8},
+      "targets": [{"expr": "sum by (handler) (rate(sunder_requests_total{job=\"$job\", code=~\"5..\"}[5m]))", "legendFormat": "{{handler}}"}]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Lookup misses by client (enumeration signal)",
+      "gridPos": {"x": 8, "y": 8, "w": 8, "h": 8},
+      "targets": [{"expr": "sum by (client) (rate(sunder_lookup_misses_total{job=\"$job\"}[5m]))", "legendFormat": "{{client}}"}]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Rate-limited requests by client",
+      "gridPos": {"x": 16, "y": 8, "w": 8, "h": 8},
+      "targets": [{"expr": "sum by (client) (rate(sunder_ratelimited_total{job=\"$job\"}[5m]))", "legendFormat": "{{client}}"}]
+    },
+    {
+      "id": 6, "type": "stat", "title": "Auth failures (401) / min",
+      "gridPos": {"x": 0, "y": 16, "w": 6, "h": 6},
+      "targets": [{"expr": "sum(rate(sunder_requests_total{job=\"$job\", code=\"401\"}[5m])) * 60"}]
+    },
+    {
+      "id": 7, "type": "stat", "title": "Requests / s (total)",
+      "gridPos": {"x": 6, "y": 16, "w": 6, "h": 6},
+      "targets": [{"expr": "sum(rate(sunder_requests_total{job=\"$job\"}[5m]))"}]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Consent / DSR / OTI denials (403,409,410) by code",
+      "gridPos": {"x": 12, "y": 16, "w": 12, "h": 6},
+      "targets": [{"expr": "sum by (code) (rate(sunder_requests_total{job=\"$job\", code=~\"403|409|410\"}[5m]))", "legendFormat": "{{code}}"}]
+    }
+  ]
+}

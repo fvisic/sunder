@@ -48,11 +48,13 @@ curl http://localhost:8080/healthz
 | `loadtest/lookup.js` | k6 scenarios encoding the latency targets |
 | `benchmark/` | head-to-head benchmark harness vs Databunker (+ results) |
 | `migrate/databunker/` | migration tool: Databunker records -> Sunder contacts + token-to-CID mapping |
-| `docs/` | design rationale, architecture, API, threat model |
+| `deploy/helm/sunder/` | Helm chart (deployment, service, anchor + retention cron jobs) |
+| `ops/` | Grafana dashboard + Prometheus alert rules over the built-in metrics |
+| `docs/` | design rationale, architecture, API, threat model, backup/DR and mTLS-rotation runbooks |
 
-CLI: `sunder serve | migrate | client create | keys rotate/retire/list |
+CLI: `sunder serve | migrate | client create | keys rotate/rekey/retire/list |
 anchor | verify-audit | webhook set/list | retention set/run |
-dsr deliver/events`.
+dsr deliver/events`. Releases: see [RELEASING.md](RELEASING.md).
 
 ## Development
 

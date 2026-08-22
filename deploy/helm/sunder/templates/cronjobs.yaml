@@ -1,0 +1,61 @@
+{{- if .Values.anchor.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-sunder-anchors
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.anchor.pvc.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.anchor.pvc.size }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-sunder-anchor
+spec:
+  schedule: {{ .Values.anchor.schedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: anchor
+              image: "{{ .Values.image.repository }}:{{ .Values.image.opsTag }}"
+              args: ["anchor", "-out", "/anchors", "-ca", "/etc/sunder/tsa-ca.pem"]
+              env:
+                {{- include "sunder.env" . | nindent 16 }}
+                - name: SUNDER_TSA_URL
+                  value: {{ .Values.anchor.tsaUrl | quote }}
+              volumeMounts:
+                - {name: anchors, mountPath: /anchors}
+          volumes:
+            - name: anchors
+              persistentVolumeClaim:
+                claimName: {{ .Release.Name }}-sunder-anchors
+{{- end }}
+{{- if .Values.retention.enabled }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-sunder-retention
+spec:
+  schedule: {{ .Values.retention.schedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: retention
+              image: "{{ .Values.image.repository }}:{{ .Values.image.opsTag }}"
+              args: ["retention", "run"]
+              env: {{- include "sunder.env" . | nindent 16 }}
+{{- end }}

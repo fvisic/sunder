@@ -1,0 +1,58 @@
+image:
+  repository: ghcr.io/fvisic/sunder
+  tag: v0.1.0
+  # The ops image (anchor/verify-audit cron jobs) needs openssl:
+  opsTag: v0.1.0-ops
+
+replicaCount: 2
+
+# PostgreSQL connection string. Provide via an existing secret (key SUNDER_DB_URL);
+# never inline credentials in values files committed to git.
+database:
+  existingSecret: sunder-db
+
+keystore:
+  # vault is the right choice on Kubernetes: the file driver would need a
+  # ReadWriteMany volume shared across replicas.
+  type: vault
+  vault:
+    addr: https://vault.internal:8200
+    mount: secret
+    # token via existing secret (key SUNDER_VAULT_TOKEN)
+    existingSecret: sunder-vault
+
+# Shared rate-limit counters across replicas (strongly recommended when
+# replicaCount > 1). Leave addr empty for per-replica in-memory windows.
+redis:
+  addr: ""
+  existingSecret: ""   # optional, key SUNDER_REDIS_PASSWORD
+  failClosed: false
+
+tls:
+  # TLS between the ingress/mesh and sunder; keys via existing TLS secret.
+  enabled: false
+  secretName: sunder-tls
+  # Optional client-CA bundle secret (key ca.crt) to enforce mTLS.
+  mtlsSecretName: ""
+
+metrics:
+  # Optional bearer token protecting /metrics (key SUNDER_METRICS_TOKEN).
+  existingSecret: ""
+
+anchor:
+  enabled: true
+  schedule: "17 2 * * *"       # daily; only a 32-byte digest leaves the cluster
+  tsaUrl: https://freetsa.org/tsr
+  # PVC where exported .tsr tokens land; sync it to write-once storage OFF
+  # the database host — anchors kept only in the database are circular.
+  pvc:
+    size: 1Gi
+    storageClassName: ""
+
+retention:
+  enabled: true
+  schedule: "43 3 * * *"
+
+resources:
+  requests: {cpu: 250m, memory: 256Mi}
+  limits: {memory: 512Mi}

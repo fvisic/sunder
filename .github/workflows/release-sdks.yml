@@ -1,0 +1,70 @@
+# Publishes the SDK packages to their registries. Manually triggered; each
+# job runs only when its registry credential is configured as a repo secret
+# (see RELEASING.md). Nothing publishes by accident.
+name: release-sdks
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version being published (informational; package files are the source of truth)'
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # npm --provenance / PyPI trusted publishing
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    if: ${{ vars.PUBLISH_NPM == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - working-directory: sdks/typescript
+        run: |
+          npm ci && npm test
+          npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  pypi:
+    runs-on: ubuntu-latest
+    if: ${{ vars.PUBLISH_PYPI == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - working-directory: sdks/python
+        run: |
+          python3 -m unittest discover -s tests
+          python3 -m pip install --quiet build twine
+          python3 -m build
+          python3 -m twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+
+  nuget:
+    runs-on: ubuntu-latest
+    if: ${{ vars.PUBLISH_NUGET == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - working-directory: sdks/dotnet
+        run: |
+          dotnet test SunderId.sln --nologo
+          dotnet pack src/SunderId.Client -c Release -o out
+          dotnet nuget push out/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+
+  # Packagist tracks the git repository itself (submit the repo URL once at
+  # packagist.org, tags become versions). Maven Central requires the Sonatype
+  # OSSRH onboarding + GPG signing; the pom.xml is release-ready — see
+  # RELEASING.md for the manual steps.

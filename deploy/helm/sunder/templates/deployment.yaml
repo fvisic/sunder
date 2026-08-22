@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-sunder
+  labels: {{- include "sunder.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "sunder.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "sunder.labels" . | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: sunder
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          args: ["serve"]
+          ports:
+            - {containerPort: 8080, name: http}
+          env: {{- include "sunder.env" . | nindent 12 }}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http{{ if .Values.tls.enabled }}, scheme: HTTPS{{ end }}}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http{{ if .Values.tls.enabled }}, scheme: HTTPS{{ end }}}
+            periodSeconds: 10
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            {{- if .Values.tls.enabled }}
+            - {name: tls, mountPath: /tls, readOnly: true}
+            {{- if .Values.tls.mtlsSecretName }}
+            - {name: mtls, mountPath: /mtls, readOnly: true}
+            {{- end }}
+            {{- end }}
+      volumes:
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret: {secretName: {{ .Values.tls.secretName }}}
+        {{- if .Values.tls.mtlsSecretName }}
+        - name: mtls
+          secret: {secretName: {{ .Values.tls.mtlsSecretName }}}
+        {{- end }}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-sunder
+  labels: {{- include "sunder.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "sunder.labels" . | nindent 4 }}
+  ports:
+    - {port: 8080, targetPort: http, name: http}

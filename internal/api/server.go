@@ -32,8 +32,8 @@ type Server struct {
 	OTI      *service.OTI
 	GDPR     *service.GDPR
 	Auth     *auth.Authenticator
-	Limiter  *ratelimit.Limiter
-	Detector *ratelimit.Detector
+	Limiter  ratelimit.Allower
+	Detector ratelimit.MissCounter
 	mux      *http.ServeMux
 }
 
@@ -93,8 +93,15 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		s.GDPR = &service.GDPR{Pool: st.Pool, Contacts: s.Contacts}
 		s.Auth = &auth.Authenticator{Pool: st.Pool}
 
-		s.Limiter = ratelimit.NewLimiter()
-		s.Detector = ratelimit.NewDetector()
+		if cfg.RedisAddr != "" {
+			// Multi-replica deployments share windows via Redis; the same
+			// instance serves both the limiter and the enumeration detector.
+			rl := ratelimit.NewRedisLimiter(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisFailClosed)
+			s.Limiter, s.Detector = rl, rl
+		} else {
+			s.Limiter = ratelimit.NewLimiter()
+			s.Detector = ratelimit.NewDetector()
+		}
 
 		v1 := http.NewServeMux()
 		v1.HandleFunc("POST /v1/contacts", s.handleContactsRegister)

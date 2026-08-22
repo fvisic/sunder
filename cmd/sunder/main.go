@@ -27,10 +27,12 @@ import (
 
 func main() {
 	cmd := "serve"
+	var rest []string
 	if len(os.Args) > 1 {
 		cmd = os.Args[1]
+		rest = os.Args[2:]
 	}
-	if err := run(cmd, os.Args[2:]); err != nil {
+	if err := run(cmd, rest); err != nil {
 		fmt.Fprintln(os.Stderr, "sunder:", err)
 		os.Exit(1)
 	}
@@ -355,7 +357,7 @@ func verifyAuditCmd(ctx context.Context, cfg config.Config, st *store.Store, arg
 // keysCmd implements `sunder keys rotate -kind <kind>` and `sunder keys list`.
 func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: sunder keys rotate -kind <kind> | keys retire -kind <kind> -version <v> | keys list")
+		return fmt.Errorf("usage: sunder keys rotate -kind <kind> | keys rekey [-reencrypt-pii] | keys retire -kind <kind> -version <v> | keys list")
 	}
 	if err := st.Migrate(ctx); err != nil {
 		return err
@@ -400,6 +402,27 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		}
 		fmt.Printf("retired %s/%s - it no longer matches lookups nor verifies tokens\n", *kind, *version)
 		fmt.Println("(for hmac kinds: rows still stored under this version stop matching; re-key first)")
+		return nil
+	case "rekey":
+		fs := flag.NewFlagSet("keys rekey", flag.ContinueOnError)
+		reenc := fs.Bool("reencrypt-pii", true, "also re-encrypt attribute blobs under the newest pii-kek")
+		batch := fs.Int("batch", 500, "persons per page")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		ks := api.OpenKeystore(cfg)
+		ring := &service.KeyRing{Pool: st.Pool}
+		if err := ring.EnsureAll(ctx, ks); err != nil {
+			return err
+		}
+		contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(ks), PII: crypto.NewPIIBox(ks), Ring: ring}
+		stats, err := contacts.Rekey(ctx, *reenc, *batch)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("rekey sweep: %d person(s), %d token(s) written, %d blob(s) re-encrypted, %d blob(s) undecryptable\n",
+			stats.Persons, stats.TokensInserted, stats.BlobsReenc, stats.Skipped)
+		fmt.Println("old versions can now be retired: sunder keys retire -kind <kind> -version <v>")
 		return nil
 	case "list":
 		rows, err := st.Pool.Query(ctx, `SELECT key_id, status, created_at FROM keys ORDER BY kind, created_at`)
