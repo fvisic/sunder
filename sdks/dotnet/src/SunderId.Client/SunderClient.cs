@@ -324,7 +324,7 @@ public sealed class SunderClient : IDisposable
                 }
                 catch (JsonException)
                 {
-                    throw new SunderException("bad_response", status, "non-JSON response body");
+                    throw new SunderException("bad_response", null, "non-JSON response body");
                 }
             }
 

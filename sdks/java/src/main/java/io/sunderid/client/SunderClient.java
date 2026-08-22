@@ -230,6 +230,11 @@ public final class SunderClient {
                 return doRequest(method, path, body);
             } catch (ServiceUnavailableException e) {
                 lastError = e; // retryable if attempts remain
+                if (Thread.currentThread().isInterrupted()) {
+                    // A thread interrupt is a cancellation, not a service
+                    // failure: never issue another network attempt for it.
+                    throw lastError;
+                }
             }
         }
         throw lastError;

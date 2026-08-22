@@ -276,11 +276,14 @@ final class Json {
                                 throw new JsonException("truncated \\u escape");
                             }
                             String hex = text.substring(pos, pos + 4);
-                            try {
-                                sb.append((char) Integer.parseInt(hex, 16));
-                            } catch (NumberFormatException ex) {
-                                throw new JsonException("invalid \\u escape: " + hex);
+                            // Integer.parseInt accepts signs; JSON requires
+                            // exactly four hex digits.
+                            for (int i = 0; i < 4; i++) {
+                                if (Character.digit(hex.charAt(i), 16) < 0) {
+                                    throw new JsonException("invalid \\u escape: " + hex);
+                                }
                             }
+                            sb.append((char) Integer.parseInt(hex, 16));
                             pos += 4;
                         }
                         default -> throw new JsonException("invalid escape: \\" + e);
@@ -301,6 +304,11 @@ final class Json {
 
         private Object readNumber() {
             int start = pos;
+            // JSON numbers start with '-' or a digit; a leading '+' would
+            // otherwise slip through Double.parseDouble.
+            if (!atEnd() && text.charAt(pos) != '-' && Character.digit(text.charAt(pos), 10) < 0) {
+                throw new JsonException("invalid token at position " + pos);
+            }
             if (!atEnd() && text.charAt(pos) == '-') {
                 pos++;
             }
