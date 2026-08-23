@@ -410,6 +410,8 @@ public sealed class SunderClient : IDisposable
         {
             "unauthorized" => new SunderUnauthorizedException(c, status, detail),
             "forbidden" => new SunderForbiddenException(c, status, detail),
+            "credential_expired" => new SunderCredentialExpiredException(c, status, detail),
+            "consent_denied" => new SunderConsentDeniedException(c, status, detail),
             "purpose_not_allowed" => new SunderPurposeNotAllowedException(c, status, detail),
             "audience_mismatch" => new SunderAudienceMismatchException(c, status, detail),
             "not_found" => new SunderNotFoundException(c, status, detail),

@@ -93,13 +93,13 @@ same-transaction audit record per operation*.
 
 | Path | Contents |
 |---|---|
-| `cmd/sunder`, `internal/` | the service + CLI (`serve`, `signer`, `migrate`, `client create/rotate-secret`, `keys rotate/rekey/retire`, `anchor`, `verify-audit`, `webhook`, `retention`, `dsr`) |
+| `cmd/sunder`, `internal/` | the service + CLI (`serve`, `signer`, `bootstrap`, `migrate`, `client create/rotate-secret`, `keys rotate/rekey/retire`, `anchor`, `verify-audit`, `webhook`, `retention`, `dsr`, `issuer`) |
 | `api/` | OpenAPI 3.1 contract (also served at `/openapi.yaml`) + Postman collection |
 | `sdks/` | the five SDKs, each with a mock-server test suite |
 | `demo/` | narrated demos: lookup + one-time handoff, escalation e-mail handoff |
 | `benchmark/`, `loadtest/` | Databunker head-to-head + k6 latency targets |
 | `migrate/databunker/` | migration tool: Databunker records to Sunder contacts |
-| `deploy/` | Docker Compose + Helm chart (TLS/mTLS, Vault, anchor/retention cron jobs) |
+| `deploy/` | Docker Compose + Helm chart (TLS/mTLS, Vault, signer sidecar, NetworkPolicy, anchor/retention cron jobs) + per-customer provisioning script |
 | `ops/` | Grafana dashboard + Prometheus alert rules |
 | `docs/` | design, architecture, threat model, config reference, runbooks (backup/DR, mTLS rotation, algorithm migration) |
 

@@ -156,6 +156,9 @@ type RedisLimiter struct {
 	// FailClosed blocks requests when Redis is unreachable. Default false:
 	// degrade the abuse control, not availability - but count the failures.
 	FailClosed bool
+	// OnFailure, when set, is called on every Redis failure - wired to a
+	// metrics counter by the server.
+	OnFailure func()
 
 	mu       sync.Mutex
 	failures int64
@@ -181,6 +184,11 @@ func (l *RedisLimiter) failed() bool {
 	l.mu.Lock()
 	l.failures++
 	l.mu.Unlock()
+	if l.OnFailure != nil {
+		// Ops visibility: fail-open degradation must not be silent
+		// (review finding F4).
+		l.OnFailure()
+	}
 	return !l.FailClosed
 }
 
@@ -193,11 +201,12 @@ func (l *RedisLimiter) windowCount(prefix, key string, span time.Duration) (floa
 	curKey := fmt.Sprintf("%s:%s:%d", prefix, key, start)
 	prevKey := fmt.Sprintf("%s:%s:%d", prefix, key, prev)
 
-	cur, err := l.Client.cmd("INCR", curKey)
+	// One atomic script: INCR and EXPIRE together, so a crash between the
+	// two can never leave an immortal counter key (review finding F4).
+	cur, err := l.Client.cmd("EVAL",
+		"local c = redis.call('INCR', KEYS[1]) if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end return c",
+		"1", curKey, strconv.Itoa(int(2*span/time.Second)))
 	if err != nil {
-		return 0, err
-	}
-	if _, err := l.Client.cmd("EXPIRE", curKey, strconv.Itoa(int(2*span/time.Second))); err != nil {
 		return 0, err
 	}
 	prevVal := int64(0)

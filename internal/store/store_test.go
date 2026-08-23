@@ -1,24 +1,24 @@
-package store
+package store_test
 
 import (
 	"context"
 	"os"
 	"testing"
+
+	"github.com/fvisic/sunder/internal/store"
+	"github.com/fvisic/sunder/internal/testutil"
 )
 
 // TestMigrate runs against a real PostgreSQL when SUNDER_TEST_DB_URL is set
 // (CI provides one; locally: deploy/docker-compose.yml). Skipped otherwise.
 func TestMigrate(t *testing.T) {
-	dbURL := os.Getenv("SUNDER_TEST_DB_URL")
-	if dbURL == "" {
+	if os.Getenv("SUNDER_TEST_DB_URL") == "" {
 		t.Skip("SUNDER_TEST_DB_URL not set")
 	}
 	ctx := context.Background()
-	s, err := New(ctx, dbURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
+	// An ISOLATED database: migrating the shared server's database would
+	// leave permanent schema pollution behind (review finding, item 8).
+	s := testutil.NewDB(t)
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -32,5 +32,9 @@ func TestMigrate(t *testing.T) {
 	}
 	if n < 1 {
 		t.Fatalf("expected at least 1 applied migration, got %d", n)
+	}
+	// The direct constructor still rejects a bad URL.
+	if _, err := store.New(ctx, "not-a-url://"); err == nil {
+		t.Fatal("invalid URL must error")
 	}
 }

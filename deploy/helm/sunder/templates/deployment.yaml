@@ -22,12 +22,24 @@ spec:
           ports:
             - {containerPort: 8080, name: http}
           env: {{- include "sunder.env" . | nindent 12 }}
+          {{- if .Values.tls.mtlsSecretName }}
+          # mTLS: kubelet HTTPS probes present no client certificate, and a
+          # configured client CA sets RequireAndVerifyClientCert - so an
+          # httpGet probe could never complete a handshake. Probe the port.
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 10
+          {{- else }}
           readinessProbe:
             httpGet: {path: /readyz, port: http{{ if .Values.tls.enabled }}, scheme: HTTPS{{ end }}}
             periodSeconds: 5
           livenessProbe:
             httpGet: {path: /healthz, port: http{{ if .Values.tls.enabled }}, scheme: HTTPS{{ end }}}
             periodSeconds: 10
+          {{- end }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false

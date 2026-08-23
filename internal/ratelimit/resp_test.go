@@ -214,15 +214,15 @@ func TestRedisLimiterErrorReplies(t *testing.T) {
 	if l.Allow("k", 0) {
 		t.Fatal("limit 0 must always deny")
 	}
-	// INCR ok, EXPIRE ok, GET errors: windowCount must surface the error and
-	// the limiter fail-open.
-	addr := scriptedRedis(t, []string{":1\r\n", ":1\r\n", "-ERR broken\r\n"})
+	// EVAL ok (atomic INCR+EXPIRE), GET errors: windowCount must surface the
+	// error and the limiter fail-open.
+	addr := scriptedRedis(t, []string{":1\r\n", "-ERR broken\r\n"})
 	l2 := NewRedisLimiter(addr, "", false)
 	if !l2.Allow("k", 10) {
 		t.Fatal("fail-open limiter must allow on redis errors")
 	}
 	// Same but fail-closed.
-	addr2 := scriptedRedis(t, []string{":1\r\n", ":1\r\n", "-ERR broken\r\n"})
+	addr2 := scriptedRedis(t, []string{":1\r\n", "-ERR broken\r\n"})
 	l3 := NewRedisLimiter(addr2, "", true)
 	if l3.Allow("k", 10) {
 		t.Fatal("fail-closed limiter must deny on redis errors")

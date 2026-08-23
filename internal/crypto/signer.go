@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -82,7 +83,14 @@ func readFrame(r io.Reader, v any) error {
 // mode. The socket directory is created 0700 and the socket chmodded 0600:
 // same-user processes only.
 func ServeSigner(ctx context.Context, socketPath string, eng Engine) error {
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+	dir := filepath.Dir(socketPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// MkdirAll leaves a PRE-EXISTING directory's mode alone; tighten it, or
+	// a group/world-traversable dir would expose the socket during the
+	// listen/chmod window (review finding F5).
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
 	// A stale socket from a previous run blocks Listen; remove only if
@@ -94,7 +102,11 @@ func ServeSigner(ctx context.Context, socketPath string, eng Engine) error {
 		}
 		_ = os.Remove(socketPath)
 	}
+	// Close the umask window: the socket is created 0600 from the start
+	// rather than chmod'ed after the fact (review finding F5).
+	old := syscall.Umask(0o177)
 	l, err := net.Listen("unix", socketPath)
+	syscall.Umask(old)
 	if err != nil {
 		return err
 	}

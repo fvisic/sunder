@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -50,7 +51,15 @@ func TestRunServe(t *testing.T) {
 	st.Close()
 	t.Setenv("SUNDER_DB_URL", url)
 	t.Setenv("SUNDER_KEYSTORE_PATH", t.TempDir())
-	t.Setenv("SUNDER_LISTEN", "127.0.0.1:0")
+	// A concrete free port (not :0) so the readiness poll below has an
+	// address to dial.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen := probe.Addr().String()
+	_ = probe.Close()
+	t.Setenv("SUNDER_LISTEN", listen)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	old := signalContext
@@ -59,7 +68,24 @@ func TestRunServe(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- run("serve", nil) }()
-	time.Sleep(400 * time.Millisecond) // migrate + keystore bootstrap + listen
+	// Poll for the listener instead of a fixed sleep: migrate + keystore
+	// bootstrap + listen is slower on loaded CI (review finding, item 5).
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if c, err := net.DialTimeout("tcp", listen, 100*time.Millisecond); err == nil {
+			_ = c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("serve never bound its port")
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("serve exited before binding: %v", err)
+		default:
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	cancel()
 	select {
 	case err := <-done:

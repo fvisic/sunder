@@ -373,8 +373,10 @@ func (o *OTI) shareIntoScope(ctx context.Context, tx pgx.Tx, issuerCID, verifier
 	}
 	var dstBlob []byte
 	var dstKey, dstAlg string
+	// FOR UPDATE: the merge into the verifier blob must not race a
+	// concurrent register/verify on the same cid (review finding F2).
 	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1`,
+		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1 FOR UPDATE`,
 		verifierCID).Scan(&dstBlob, &dstKey, &dstAlg); err != nil {
 		return nil, err
 	}

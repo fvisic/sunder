@@ -109,6 +109,43 @@ func TestSignerSocketPermissions(t *testing.T) {
 	}
 }
 
+// ServeSigner must TIGHTEN a pre-existing loose directory, not inherit it -
+// os.MkdirAll leaves existing modes alone (review finding F5/test item 3).
+func TestSignerTightensLooseDirectory(t *testing.T) {
+	dir, err := os.MkdirTemp("", "sgn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil { // deliberately loose
+		t.Fatal(err)
+	}
+	sock := filepath.Join(dir, "s.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = ServeSigner(ctx, sock, NewLocalEngine(&FileKeystore{Dir: t.TempDir()})) }()
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	di, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := di.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("ServeSigner must tighten the socket dir to 0700, got %o", perm)
+	}
+	fi, err := os.Stat(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("socket must be 0600 from creation, got %o", perm)
+	}
+}
+
 func TestSignerSurvivesMalformedFrames(t *testing.T) {
 	remote, sock := startSigner(t)
 	ctx := context.Background()

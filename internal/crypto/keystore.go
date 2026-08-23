@@ -132,16 +132,27 @@ func (f *FileKeystore) writeKey(p string) error {
 	if _, err := randRead(key); err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, key, 0o600); err != nil {
-		_ = os.Remove(tmp)
+	// Unique temp name: after a stale-lock reclaim two processes may write
+	// concurrently, and a shared "<name>.tmp" could transiently publish a
+	// short key file (review finding F7).
+	tf, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".tmp*")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, p); err != nil {
-		_ = os.Remove(tmp)
+	tmp := tf.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if err := tf.Chmod(0o600); err != nil {
+		_ = tf.Close()
 		return err
 	}
-	return nil
+	if _, err := tf.Write(key); err != nil {
+		_ = tf.Close()
+		return err
+	}
+	if err := tf.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
 }
 
 // --- vault driver ----------------------------------------------------------

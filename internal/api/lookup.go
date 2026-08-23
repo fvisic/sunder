@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/service"
@@ -29,9 +30,10 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, service.ErrNotFound) {
 			misses := s.Detector.Miss(client.ID)
 			s.Metrics.Inc(fmt.Sprintf(`sunder_lookup_misses_total{client=%q}`, client.ID))
-			if misses == enumerationThreshold {
-				// Logged once per window at the crossing point; ops alerting
-				// keys off this line and the misses counter.
+			// ">=" with a per-client latch: the sliding-window count is not
+			// monotonic (decay between calls), so an exact "==" crossing can
+			// be skipped entirely (review finding F3).
+			if misses >= enumerationThreshold && s.warnLatch(client.ID) {
 				s.Log.Warn("possible enumeration attack", "client", client.ID, "misses_10m", misses)
 			}
 		}
@@ -40,4 +42,15 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"cid": cid})
+}
+
+// warnLatch reports whether the enumeration warning for this client should
+// log now (at most once per 10-minute window).
+func (s *Server) warnLatch(clientID string) bool {
+	now := time.Now()
+	if v, ok := s.enumWarned.Load(clientID); ok && now.Sub(v.(time.Time)) < 10*time.Minute {
+		return false
+	}
+	s.enumWarned.Store(clientID, now)
+	return true
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/config"
@@ -373,5 +374,54 @@ func TestIssuerCLI(t *testing.T) {
 	}
 	if err := issuerCmd(ctx, st, nil); err == nil {
 		t.Fatal("no subcommand must error")
+	}
+}
+
+func TestBootstrapCmd(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+
+	// Interactive: prints the credential; idempotent on rerun.
+	if err := bootstrapCmd(ctx, cfg, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := bootstrapCmd(ctx, cfg, st, nil); err != nil {
+		t.Fatalf("rerun must be a no-op success: %v", err)
+	}
+	var n int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM clients WHERE client_id='admin'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("exactly one admin client expected: %d %v", n, err)
+	}
+
+	// Unattended: credential written 0600 to the given file.
+	st2 := testutil.NewDB(t)
+	credFile := t.TempDir() + "/cred"
+	if err := bootstrapCmd(ctx, cfg, st2, []string{
+		"-unattended", "-id", "provisioner", "-credential-file", credFile, "-ttl", "90d",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(credFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("credential file must be 0600, got %o", fi.Mode().Perm())
+	}
+	b, _ := os.ReadFile(credFile)
+	if !strings.HasPrefix(string(b), "provisioner.") {
+		t.Fatalf("credential file content: %q", b)
+	}
+	// The written credential authenticates (TTL applied, not expired).
+	var expires *time.Time
+	if err := st2.Pool.QueryRow(ctx,
+		`SELECT credential_expires_at FROM clients WHERE client_id='provisioner'`).Scan(&expires); err != nil || expires == nil {
+		t.Fatalf("ttl must be stored: %v %v", expires, err)
+	}
+	// Unattended without a file is an explicit error.
+	st3 := testutil.NewDB(t)
+	if err := bootstrapCmd(ctx, cfg, st3, []string{"-unattended"}); err == nil {
+		t.Fatal("unattended without a credential file must error")
 	}
 }

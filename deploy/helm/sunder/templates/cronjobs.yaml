@@ -24,6 +24,13 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          # fsGroup so the non-root image (uid 65532) can write the anchor
+          # PVC, which mounts root-owned 0755 by default (finding F9).
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            fsGroup: 65532
+            seccompProfile: {type: RuntimeDefault}
           containers:
             - name: anchor
               image: "{{ .Values.image.repository }}:{{ .Values.image.opsTag }}"
@@ -53,6 +60,13 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          # fsGroup so the non-root image (uid 65532) can write the anchor
+          # PVC, which mounts root-owned 0755 by default (finding F9).
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            fsGroup: 65532
+            seccompProfile: {type: RuntimeDefault}
           containers:
             - name: retention
               image: "{{ .Values.image.repository }}:{{ .Values.image.opsTag }}"

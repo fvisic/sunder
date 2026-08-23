@@ -123,7 +123,7 @@ stop matching and stop verifying, and their search-token rows are purged.
 
 ### Supply chain
 
-The crypto hot path is Go stdlib only (Ed25519, HMAC, AES-GCM, TLS); the
+The crypto hot path is Go stdlib (Ed25519, HMAC, AES-GCM, TLS) plus golang.org/x/crypto for the optional XChaCha20-Poly1305 PII algorithm; the
 sole runtime dependency is pgx. A "stdlib first" policy applies - a new
 dependency needs justification - because the honest limit of any key
 handling is a compromised process reading working keys from RAM: the fewer

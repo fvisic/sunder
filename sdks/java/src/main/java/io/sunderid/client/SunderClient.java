@@ -339,6 +339,10 @@ public final class SunderClient {
                 return new UnauthorizedException(effective, status, detail);
             case "forbidden":
                 return new ForbiddenException(effective, status, detail);
+            case "credential_expired":
+                return new CredentialExpiredException(effective, status, detail);
+            case "consent_denied":
+                return new ConsentDeniedException(effective, status, detail);
             case "purpose_not_allowed":
                 return new PurposeNotAllowedException(effective, status, detail);
             case "audience_mismatch":

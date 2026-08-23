@@ -205,9 +205,19 @@ func TestCSPRNGFailureSurfaces(t *testing.T) {
 	if _, err := NewClientSecret(); err == nil {
 		t.Fatal("NewClientSecret must surface CSPRNG failure")
 	}
-	box := NewPIIBox(fileKS(t))
+	// Encrypt: create the key FIRST (with a working CSPRNG) so the failure
+	// exercised here is the nonce draw inside Seal, not key generation
+	// (review finding, test item 2).
+	randRead = old
+	ksDir := t.TempDir()
+	warm := &FileKeystore{Dir: ksDir}
+	if err := warm.Ensure(context.Background(), "pii-kek/v1"); err != nil {
+		t.Fatal(err)
+	}
+	box := NewPIIBox(NewLocalEngine(warm))
+	randRead = func([]byte) (int, error) { return 0, context.DeadlineExceeded }
 	if _, err := box.Encrypt(context.Background(), "CID-X", "v1", map[string]string{"a": "b"}); err == nil {
-		t.Fatal("Encrypt must surface CSPRNG failure")
+		t.Fatal("Encrypt must surface a nonce CSPRNG failure")
 	}
 	ks := &FileKeystore{Dir: t.TempDir()}
 	if err := ks.Ensure(context.Background(), "hmac-email/v1"); err == nil {
