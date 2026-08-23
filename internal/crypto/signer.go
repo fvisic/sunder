@@ -39,6 +39,9 @@ type signerResp struct {
 	OK    bool   `json:"ok"`
 	Out   []byte `json:"out,omitempty"`
 	Error string `json:"error,omitempty"`
+	// Code preserves error TYPE across the boundary; "verify_failed" means
+	// a genuine verification failure (4xx), anything else is environmental.
+	Code string `json:"code,omitempty"`
 }
 
 func writeFrame(w io.Writer, v any) error {
@@ -135,9 +138,12 @@ func ServeSigner(ctx context.Context, socketPath string, eng Engine) error {
 func serveConn(ctx context.Context, conn net.Conn, eng Engine) {
 	defer conn.Close()
 	for {
+		// Idle cap: a stalled or leaked client connection frees its
+		// goroutine instead of holding it forever.
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Minute))
 		var req signerReq
 		if err := readFrame(conn, &req); err != nil {
-			return // EOF or malformed frame: drop the connection
+			return // EOF, idle timeout or malformed frame: drop the connection
 		}
 		var out []byte
 		var err error
@@ -162,6 +168,9 @@ func serveConn(ctx context.Context, conn net.Conn, eng Engine) {
 		resp := signerResp{OK: err == nil, Out: out}
 		if err != nil {
 			resp.Error = err.Error()
+			if errors.Is(err, ErrVerifyFailed) {
+				resp.Code = "verify_failed"
+			}
 		}
 		if werr := writeFrame(conn, resp); werr != nil {
 			return
@@ -227,6 +236,9 @@ func (r *RemoteEngine) call(ctx context.Context, req signerReq) ([]byte, error) 
 	_ = conn.SetDeadline(time.Time{})
 	r.put(conn)
 	if !resp.OK {
+		if resp.Code == "verify_failed" {
+			return nil, fmt.Errorf("%w: %s", ErrVerifyFailed, resp.Error)
+		}
 		return nil, errors.New(resp.Error)
 	}
 	return resp.Out, nil

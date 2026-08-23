@@ -45,6 +45,20 @@ metrics:
 signer:
   enabled: false
 
+# P2.2 network policies: default-deny posture for the Sunder pods. Requires
+# a CNI that enforces NetworkPolicy (Cilium, Calico, ...).
+networkPolicy:
+  enabled: false
+  # Only pods carrying <clientLabel>: "true" may call the API.
+  clientLabel: sunder-client
+  # Additional namespaces allowed to call the API (by name).
+  allowedNamespaces: []
+  dbPort: 5432
+  # Narrow DB egress to the database subnet, e.g. 10.12.0.0/24.
+  dbCIDR: ""
+  # Narrow HTTPS/Vault egress (TSA, Vault, webhook receivers); empty = any.
+  egressCIDRs: []
+
 # Deployment tunables (docs/CONFIG.md). Empty = server default. These are
 # security trade-offs, not preferences - read the docs before changing.
 tunables:

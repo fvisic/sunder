@@ -91,7 +91,7 @@ same-transaction audit record per operation*.
 
 | Path | Contents |
 |---|---|
-| `cmd/sunder`, `internal/` | the service + CLI (`serve`, `migrate`, `client`, `keys rotate/rekey/retire`, `anchor`, `verify-audit`, `webhook`, `retention`, `dsr`) |
+| `cmd/sunder`, `internal/` | the service + CLI (`serve`, `signer`, `migrate`, `client create/rotate-secret`, `keys rotate/rekey/retire`, `anchor`, `verify-audit`, `webhook`, `retention`, `dsr`) |
 | `api/` | OpenAPI 3.1 contract (also served at `/openapi.yaml`) + Postman collection |
 | `sdks/` | the five SDKs, each with a mock-server test suite |
 | `demo/` | narrated demos: lookup + one-time handoff, escalation e-mail handoff |

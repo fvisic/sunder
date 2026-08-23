@@ -188,7 +188,10 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 		}
 	}
 	if _, err := o.Eng.VerifyToken(ctx, crypto.SigningKeyName+"/"+claims.KeyID, token); err != nil {
-		return "", ErrTokenInvalid
+		if errors.Is(err, crypto.ErrVerifyFailed) {
+			return "", ErrTokenInvalid
+		}
+		return "", err // environment (keystore/signer down): surface as 5xx, not "invalid"
 	}
 	if claims.Audience != audience {
 		return "", ErrAudienceMismatch
