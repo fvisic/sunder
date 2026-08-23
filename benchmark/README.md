@@ -3,44 +3,43 @@
 Goal: same machine, same database engine, same load tool, comparable
 operations - and Sunder at least 50% more efficient.
 
-## Result summary (2026-08-23, review pass 4 build)
+## Result summary (2026-08-23, review pass 4 build, quieter machine)
 
-Re-measured after Phase 2 and four review passes, on the SAME machine but
-under a real working load (`load average ~10-14`, unlike the idle run
-below). Both systems were measured in the same window, interleaved, three
-rounds of n=3000 at 16 concurrent clients, medians reported - because under
-this load single runs vary by up to +/-50% on either side.
+Re-measured on the pass-4 build with the machine largely free (load average
+~4 at the start, drifting to ~8 under the benchmark's own load). Both
+systems in the same window, interleaved, five rounds of n=3000 at 16
+concurrent clients, plus one clean 5,000-request pass per operation. Zero
+errors on both sides in the clean pass.
 
-| Operation | Sunder (median) | Databunker (median) | Throughput advantage |
+| Operation | Sunder | Databunker | Advantage |
 |---|---|---|---|
-| **write** | **1,650 rps** | 838 rps | **+97%** |
-| **lookup** | **2,160 rps** | 1,409 rps | **+53%** |
-| **read** | **2,091 rps** | 1,614 rps | **+30%** |
+| **write** | **2,729 rps**, p50 5.62 ms, p99 9.77 ms | 1,295 rps, p50 12.09 ms, p99 26.29 ms | **+111%**, p99 2.7x lower |
+| **lookup** | **3,439 rps**, p50 4.53 ms, p99 6.25 ms | 2,032 rps, p50 7.18 ms, p99 20.02 ms | **+69%**, p99 3.2x lower |
+| **read** | **3,443 rps**, p50 4.51 ms, p99 5.64 ms | 2,139 rps, p50 6.45 ms, p99 19.33 ms | **+61%**, p99 3.4x lower |
 
-Latency from the clean 5,000-request pass in the same window: Sunder write
-p50 8.5 / p99 14.0 ms, lookup p50 6.7 / p99 10.4 ms, read p50 7.2 / p99
-16.2 ms; Databunker write p50 15.7 / p99 36.9 ms, lookup p50 9.1 / p99
-29.4 ms, read p50 9.3 / p99 26.3 ms - so p99 is 1.6-2.6x lower on every
-operation.
+Medians of the five interleaved rounds agree and are slightly wider:
+write +134%, lookup +78%, read +75% (Sunder 2,572 / 3,374 / 3,277 rps
+against 1,098 / 1,893 / 1,871). Two Databunker measurements in round 5
+(lookup 328 rps, read no result) were discarded as a failed run rather than
+averaged in - noting it here because silently dropping them would flatter
+the comparison.
 
-Honest reading of these numbers:
+**The +50% target now holds on every operation**, and by a wider margin
+than the 2026-08-22 run below - which also settles the previous round's
+open question: the +30% read figure measured under load average 10-14 was
+machine noise, not the pass-4 tombstone join. Sunder does more work per
+request throughout: a hash-chained audit record in the same transaction,
+keyed-HMAC search tokens per identifier, purpose and consent checks.
 
-- **The +50% target holds on write and lookup, not on read** in this
-  window. Read came in at +30%, and the per-run spread there was the
-  widest of all (Sunder 2,080-2,350; Databunker 1,118-1,713), so the true
-  figure is not resolvable at this sample size under this load.
-- **Absolute throughput is 18-28% below the idle-machine run below.** Both
-  systems dropped (Databunker 11-15%), which points at the machine rather
-  than the code: three identical Sunder read runs on the same build gave
-  2,272 / 1,674 / 2,132 rps, a 35% swing.
-- **The review-pass-4 additions on these paths are index-backed and cheap.**
-  The tombstone join added to the attribute read plans as a Nested Loop,
-  8 shared buffer hits, 0.088 ms - three orders of magnitude below the
-  measured request latency. The `FOR UPDATE` added to the blob merge
-  serialises only concurrent writes to the SAME contact, which this
-  benchmark never generates.
-- A clean re-measurement on an idle machine is still owed before any
-  number here is quoted as a product claim.
+One asymmetry worth stating: across the five rounds both systems accumulate
+rows, and their trends diverge - Sunder's write throughput rose (2,108 ->
+2,824 rps, caches warming) while Databunker's fell (1,325 -> 1,076 rps).
+Part of the advantage above therefore reflects Databunker degrading with
+table size within a single run. Neither system was tuned; both ran their
+default configuration on PostgreSQL 16 in Docker.
+
+This is a laptop under a real desktop load, not a controlled server
+benchmark: quote the ratios, not the absolute numbers.
 
 ## Result summary (2026-08-22, idle machine, pre-Phase-2 build)
 
