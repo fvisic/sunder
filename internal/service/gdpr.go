@@ -177,10 +177,27 @@ func (g *GDPR) Access(ctx context.Context, client *auth.Client, cid string) (map
 	if err != nil {
 		return nil, err
 	}
+	scopes, trail, err := g.accessPerson(ctx, personID)
+	if err != nil {
+		return nil, err
+	}
+	if err := audit.Append(ctx, g.Pool, audit.Entry{
+		ClientID: client.ID, Action: "dsr.access", CID: cid,
+		Detail: map[string]any{"scopes": len(scopes)},
+	}); err != nil {
+		return nil, fmt.Errorf("audit append: %w", err)
+	}
+	return map[string]any{"scopes": scopes, "audit_trail": trail}, nil
+}
+
+// accessPerson gathers everything every scope stored about a person plus
+// the audit trail - shared by the privacy officer's Access and the
+// self-service portal (which authenticates the person directly).
+func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, []AuditTrailEntry, error) {
 	rows, err := g.Pool.Query(ctx,
 		`SELECT cid, scope, pii_encrypted, COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE person_id=$1 ORDER BY scope`, personID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	var scopes []ScopeData
@@ -190,50 +207,43 @@ func (g *GDPR) Access(ctx context.Context, client *auth.Client, cid string) (map
 		var blob []byte
 		var keyID, alg string
 		if err := rows.Scan(&sd.CID, &sd.Scope, &blob, &keyID, &alg); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		sd.Attributes = map[string]string{}
 		if len(blob) > 0 {
 			if sd.Attributes, err = g.Contacts.PII.Decrypt(ctx, sd.CID, blob, keyID, alg); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		if sd.Consents, err = consentsFor(ctx, g.Pool, sd.CID); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		scopes = append(scopes, sd)
 		cidList = append(cidList, sd.CID)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	trailRows, err := g.Pool.Query(ctx,
 		`SELECT seq, ts, COALESCE(client_id,''), action, COALESCE(cid,'')
 		 FROM audit WHERE cid = ANY($1) ORDER BY seq LIMIT $2`, cidList, accessTrailLimit)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer trailRows.Close()
 	trail := []AuditTrailEntry{}
 	for trailRows.Next() {
 		var e AuditTrailEntry
 		if err := trailRows.Scan(&e.Seq, &e.TS, &e.ClientID, &e.Action, &e.CID); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		trail = append(trail, e)
 	}
 	if err := trailRows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	if err := audit.Append(ctx, g.Pool, audit.Entry{
-		ClientID: client.ID, Action: "dsr.access", CID: cid,
-		Detail: map[string]any{"scopes": len(scopes)},
-	}); err != nil {
-		return nil, err
-	}
-	return map[string]any{"scopes": scopes, "audit_trail": trail}, nil
+	return scopes, trail, nil
 }
 
 // Export implements data portability for the CALLER'S scope only: a
@@ -284,6 +294,14 @@ func (g *GDPR) Erase(ctx context.Context, client *auth.Client, cid string) (eras
 	if err != nil {
 		return 0, 0, err
 	}
+	return g.erasePerson(ctx, client.ID, cid, personID)
+}
+
+// erasePerson runs the full erasure for a person - shared by the privacy
+// officer's Erase and the self-service portal. actor lands in the audit
+// record and the erasure row; auditCID is the pseudonym the request came in
+// under (portal erasures use the person's first CID).
+func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string) (erasureID int64, scopes int, err error) {
 	tx, err := g.Pool.Begin(ctx)
 	if err != nil {
 		return 0, 0, err
@@ -303,7 +321,7 @@ func (g *GDPR) Erase(ctx context.Context, client *auth.Client, cid string) (eras
 
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO erasures (person_id, requested_by) VALUES ($1,$2) RETURNING id`,
-		personID, client.ID).Scan(&erasureID); err != nil {
+		personID, actor).Scan(&erasureID); err != nil {
 		return 0, 0, err
 	}
 	rows, err := tx.Query(ctx, `SELECT cid, scope FROM cids WHERE person_id=$1`, personID)
@@ -350,7 +368,7 @@ func (g *GDPR) Erase(ctx context.Context, client *auth.Client, cid string) (eras
 		return 0, 0, err
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
-		ClientID: client.ID, Action: "dsr.erase", CID: cid,
+		ClientID: actor, Action: "dsr.erase", CID: auditCID,
 		Detail: map[string]any{"erasure_id": erasureID, "scopes": len(all)},
 	}); err != nil {
 		return 0, 0, err

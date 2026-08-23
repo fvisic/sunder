@@ -59,6 +59,15 @@ notes before changing it.
 | `SUNDER_WEBHOOK_MAX_ATTEMPTS` | `10` | ≥ `1` | Failed deliveries before an erasure event is marked `FAILED` (audited). A higher cap tolerates flakier receivers but lets one dead endpoint occupy the retry queue longer. |
 | `SUNDER_DELIVER_INTERVAL` | `1m` | `5s`–`1h` | Cadence of the background webhook retry worker. `Erase` always attempts one inline delivery regardless. |
 
+## Privacy portal
+
+The portal (P2.5) needs no configuration beyond one webhook: register the
+org's mailer endpoint under the reserved scope `_portal`
+(`sunder webhook set -scope _portal -url ...`). Without it, login links are
+silently dropped (the citizen-facing response never reveals whether an
+address exists or the mailer works). Portal routes carry their own per-IP
+rate limits.
+
 Invalid values (unparseable durations, out-of-range numbers, unknown
 algorithm names) fail startup with a specific error - a typo can never
 silently fall back to a default.

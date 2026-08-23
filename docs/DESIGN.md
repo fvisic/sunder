@@ -60,6 +60,11 @@ own contacts.
   storage means dedup onto a shared person never exposes attributes another
   scope stored. Reads are field-level, purpose-checked, consent-checked and
   audited; encryption keys never leave the service.
+- **Self-service privacy portal** - citizens authenticate with a
+  single-use magic link (delivered by the org's own mailer via a signed
+  webhook), see everything every scope stores about them, flip consents,
+  and erase with a mandatory second confirmation. No enumeration oracle:
+  the start endpoint answers identically for known and unknown addresses.
 - **Selective disclosure (predicate claims)** - an OTI can carry
   issuer-authorized predicates (`age_gte`, `exists`) evaluated against the
   issuer's data at verification. The verifier receives booleans; the value
