@@ -87,6 +87,14 @@ func (o *OTI) IssueFull(ctx context.Context, client *auth.Client, in IssueInput)
 	if err := validatePredicates(in.SharePredicates); err != nil {
 		return "", time.Time{}, err
 	}
+	if len(shareAttrs) > 32 {
+		return "", time.Time{}, fmt.Errorf("%w: at most 32 shared attributes per token", ErrValidation)
+	}
+	for _, a := range shareAttrs {
+		if a == "" || len(a) > 64 {
+			return "", time.Time{}, fmt.Errorf("%w: shared attribute names must be 1-64 chars", ErrValidation)
+		}
+	}
 	if !client.Can(auth.ActOTIIssue) {
 		return "", time.Time{}, ErrForbidden
 	}
@@ -247,6 +255,13 @@ func (o *OTI) VerifyFull(ctx context.Context, client *auth.Client, token, purpos
 	}
 	if time.Now().After(exp) {
 		return nil, ErrTokenExpired
+	}
+	// Consent is checked at ISSUE and re-checked here: a withdrawal within
+	// the token's 5-minute life must stop the handoff (review finding P2.3).
+	if denied, err := consentDenied(ctx, o.Pool, claims.CID, purpose); err != nil {
+		return nil, err
+	} else if denied {
+		return nil, ErrConsentDenied
 	}
 
 	// One transaction end to end: a failure anywhere rolls the row back to

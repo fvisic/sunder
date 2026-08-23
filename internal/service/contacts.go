@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -144,6 +145,11 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 	for k := range in.Attributes {
 		if reservedAttr.MatchString(k) {
 			return "", fmt.Errorf("%w: %q is a reserved attribute name", ErrValidation, k)
+		}
+		// '@' namespaces external-issuer provenance (claims.external): a
+		// self-registered "age_gte_18@gov.wallet" would forge attestation.
+		if strings.ContainsRune(k, '@') {
+			return "", fmt.Errorf("%w: attribute names must not contain '@' (reserved for external claims)", ErrValidation)
 		}
 	}
 	attrs := map[string]string{}
@@ -465,8 +471,16 @@ func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid string, att
 	if err != nil {
 		return err
 	}
+	// A blob past this size would eventually exceed the signer IPC frame
+	// cap and brick every crypto op on the row - refuse the write instead.
+	if len(blob) > maxBlobBytes {
+		return fmt.Errorf("%w: attribute blob exceeds %d bytes", ErrValidation, maxBlobBytes)
+	}
 	_, err = tx.Exec(ctx,
 		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4, updated_at=now() WHERE cid=$1`,
 		cid, blob, keyID, c.PII.Algorithm())
 	return err
 }
+
+// maxBlobBytes caps a scope blob far below the 4 MiB signer frame limit.
+const maxBlobBytes = 256 * 1024

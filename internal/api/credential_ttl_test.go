@@ -68,7 +68,7 @@ func TestCredentialExpiry(t *testing.T) {
 	}
 
 	// Rotation: new credential works, the old one dies instantly.
-	rotated, err := auth.RotateSecret(ctx, st.Pool, "new", nil)
+	rotated, err := auth.RotateSecret(ctx, st.Pool, "new", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,43 @@ func TestCredentialExpiry(t *testing.T) {
 	if code, _ = do(rotated); code == 401 {
 		t.Fatal("rotated credential must authenticate")
 	}
-	if _, err := auth.RotateSecret(ctx, st.Pool, "ghost", nil); err == nil {
+	if _, err := auth.RotateSecret(ctx, st.Pool, "ghost", nil, false); err == nil {
 		t.Fatal("rotating an unknown client must error")
+	}
+}
+
+// Review finding: authentication failures must be throttled per source IP.
+func TestAuthFailureThrottle(t *testing.T) {
+	st := testutil.NewDB(t)
+	srv, err := New(config.Config{Listen: ":0", Keystore: "file", KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got429 bool
+	for i := 0; i < 80; i++ {
+		req := httptest.NewRequest("POST", "/v1/lookup", strings.NewReader(`{}`))
+		req.RemoteAddr = "198.51.100.9:4444"
+		req.Header.Set("Authorization", "Bearer ghost.wrong")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code == 429 {
+			got429 = true
+			break
+		}
+		if rec.Code != 401 {
+			t.Fatalf("attempt %d: %d", i, rec.Code)
+		}
+	}
+	if !got429 {
+		t.Fatal("80 failed auth attempts from one IP must hit the throttle")
+	}
+	// A different IP is unaffected.
+	req := httptest.NewRequest("POST", "/v1/lookup", strings.NewReader(`{}`))
+	req.RemoteAddr = "198.51.100.10:4444"
+	req.Header.Set("Authorization", "Bearer ghost.wrong")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Fatalf("other IPs must not be throttled: %d", rec.Code)
 	}
 }

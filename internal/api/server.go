@@ -139,6 +139,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("GET /v1/dsr/access", s.handleDSRAccess)
 		v1.HandleFunc("POST /v1/dsr/erase", s.handleDSRErase)
 		v1.HandleFunc("GET /v1/dsr/export", s.handleDSRExport)
+		s.Auth.Limiter = s.Limiter
 		s.mux.Handle("/v1/", s.Auth.Middleware(v1))
 		s.registerPortal()
 	}

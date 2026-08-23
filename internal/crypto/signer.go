@@ -145,6 +145,10 @@ func serveConn(ctx context.Context, conn net.Conn, eng Engine) {
 		if err := readFrame(conn, &req); err != nil {
 			return // EOF, idle timeout or malformed frame: drop the connection
 		}
+		if req.V != 1 {
+			_ = writeFrame(conn, signerResp{OK: false, Error: "signer: unsupported protocol version"})
+			return
+		}
 		var out []byte
 		var err error
 		switch req.Op {
@@ -190,16 +194,20 @@ type RemoteEngine struct {
 
 func NewRemoteEngine(socket string) *RemoteEngine { return &RemoteEngine{Socket: socket} }
 
-func (r *RemoteEngine) get() (net.Conn, error) {
+// get returns a connection and whether it came from the idle pool - a
+// pooled conn may have been closed server-side (idle cap, signer restart)
+// and is retried once on a fresh dial; a fresh dial is never retried.
+func (r *RemoteEngine) get() (net.Conn, bool, error) {
 	r.mu.Lock()
 	if n := len(r.idle); n > 0 {
 		c := r.idle[n-1]
 		r.idle = r.idle[:n-1]
 		r.mu.Unlock()
-		return c, nil
+		return c, true, nil
 	}
 	r.mu.Unlock()
-	return net.DialTimeout("unix", r.Socket, 2*time.Second)
+	c, err := net.DialTimeout("unix", r.Socket, 2*time.Second)
+	return c, false, err
 }
 
 func (r *RemoteEngine) put(c net.Conn) {
@@ -215,9 +223,23 @@ func (r *RemoteEngine) put(c net.Conn) {
 
 func (r *RemoteEngine) call(ctx context.Context, req signerReq) ([]byte, error) {
 	req.V = 1
-	conn, err := r.get()
+	resp, err := r.attempt(ctx, req, true)
 	if err != nil {
-		return nil, fmt.Errorf("signer unreachable: %w", err)
+		return nil, err
+	}
+	if !resp.OK {
+		if resp.Code == "verify_failed" {
+			return nil, fmt.Errorf("%w: %s", ErrVerifyFailed, resp.Error)
+		}
+		return nil, errors.New(resp.Error)
+	}
+	return resp.Out, nil
+}
+
+func (r *RemoteEngine) attempt(ctx context.Context, req signerReq, allowRetry bool) (signerResp, error) {
+	conn, pooled, err := r.get()
+	if err != nil {
+		return signerResp{}, fmt.Errorf("signer unreachable: %w", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
@@ -227,21 +249,28 @@ func (r *RemoteEngine) call(ctx context.Context, req signerReq) ([]byte, error) 
 	var resp signerResp
 	if err := writeFrame(conn, req); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("signer write: %w", err)
+		// A stale pooled conn (signer restart, idle cap) fails on first
+		// write; one retry on a FRESH dial is safe - nothing reached the
+		// signer. Fresh-dial failures are never retried.
+		if pooled && allowRetry {
+			return r.attempt(ctx, req, false)
+		}
+		return signerResp{}, fmt.Errorf("signer write: %w", err)
 	}
 	if err := readFrame(conn, &resp); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("signer read: %w", err)
+		if pooled && allowRetry {
+			// The write "succeeded" into a dead socket's buffer and the
+			// read failed with no response bytes: the request cannot have
+			// been half-applied on a conn that was already closed, so one
+			// fresh-dial retry is still safe for a POOLED conn only.
+			return r.attempt(ctx, req, false)
+		}
+		return signerResp{}, fmt.Errorf("signer read: %w", err)
 	}
 	_ = conn.SetDeadline(time.Time{})
 	r.put(conn)
-	if !resp.OK {
-		if resp.Code == "verify_failed" {
-			return nil, fmt.Errorf("%w: %s", ErrVerifyFailed, resp.Error)
-		}
-		return nil, errors.New(resp.Error)
-	}
-	return resp.Out, nil
+	return resp, nil
 }
 
 func (r *RemoteEngine) MAC(ctx context.Context, key string, data []byte) ([]byte, error) {

@@ -169,3 +169,37 @@ func TestPredicatesCombineWithAttributeSharing(t *testing.T) {
 		t.Fatal("birthdate must NOT cross the boundary via a predicate")
 	}
 }
+
+// Review finding: the exact-birthday boundary. Someone born exactly N years
+// ago today IS N years old from 00:00 UTC.
+func TestPredicateBirthdayBoundary(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	today18 := time.Now().UTC().AddDate(-18, 0, 0).Format("2006-01-02")
+	tomorrow18 := time.Now().UTC().AddDate(-18, 0, 1).Format("2006-01-02")
+
+	for _, tc := range []struct {
+		birthdate string
+		want      bool
+	}{
+		{today18, true},     // 18th birthday is today: already 18
+		{tomorrow18, false}, // 18th birthday is tomorrow: still 17
+	} {
+		cid, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email:      tc.birthdate + "@example.com",
+			Attributes: map[string]string{"birthdate": tc.birthdate},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tok := issueWithPreds(t, e, cid, []service.Predicate{{Attr: "birthdate", Op: "age_gte", Value: 18}})
+		out, err := e.oti.VerifyFull(ctx, e.verifier(), tok, "support", "billing")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Predicates[0].Result != tc.want || !out.Predicates[0].Known {
+			t.Fatalf("birthdate %s: result=%v known=%v, want %v/true",
+				tc.birthdate, out.Predicates[0].Result, out.Predicates[0].Known, tc.want)
+		}
+	}
+}

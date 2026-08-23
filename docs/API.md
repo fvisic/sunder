@@ -146,9 +146,11 @@ Action: `claims.external`; `cid` must belong to the caller's scope.
 
 The envelope is a PASETO v4.public token signed by a REGISTERED issuer
 (`sunder issuer add`, see docs/DESIGN-EUDI-GATEWAY.md) whose payload is
-`{"iss": "gov.wallet", "claims": {"age_gte_18": "true"}, "iat": ..., "exp": ...}`.
+`{"iss": "gov.wallet", "jti": "<unique>", "cid": "CID-...", "claims": {"age_gte_18": "true"}, "iat": ..., "exp": ...}`.
 Accepted only when the issuer is trusted, the signature verifies, `exp` is
-in the future and every claim is in the issuer's allowlist. Claims are
+in the future, the SIGNED `cid` matches the target (subject binding), the
+`jti` was never used before (anti-replay) and every claim is in the
+issuer's allowlist (`*` = any, empty = none). Claims are
 stored as normal attributes with provenance in the name
 (`age_gte_18@gov.wallet`), audited.
 
