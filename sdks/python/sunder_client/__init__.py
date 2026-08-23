@@ -271,8 +271,9 @@ class SunderClient:
     def verify_oti_full(self, token: str, purpose: str, audience: str) -> dict:
         """Like verify_oti but returns the full result: {"cid", and when
         present "shared" (copied attribute names) and "predicates" (each
-        {"attr","op","value","result","known"}; known=False means the
-        attribute was absent - NOT a failed check)."""
+        {"attr","op","value","result","known"}). For age_gte, known=False
+        means the attribute was absent or unparseable - NOT a failed check;
+        for exists, known is always True because absence is the answer."""
         return self._request("POST", "/v1/oti/verify",
                              body={"token": token, "purpose": purpose,
                                    "audience": audience})

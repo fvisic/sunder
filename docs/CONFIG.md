@@ -61,12 +61,29 @@ notes before changing it.
 
 ## Privacy portal
 
-The portal (P2.5) needs no configuration beyond one webhook: register the
-org's mailer endpoint under the reserved scope `_portal`
-(`sunder webhook set -scope _portal -url ...`). Without it, login links are
-silently dropped (the citizen-facing response never reveals whether an
-address exists or the mailer works). Portal routes carry their own per-IP
-rate limits.
+The self-service portal is **off by default**: an upgrade must never
+silently open a new unauthenticated public surface.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SUNDER_PORTAL_ENABLED` | `false` | `true` mounts the citizen-facing portal. |
+| `SUNDER_PORTAL_LISTEN` | - | Separate bind address for the portal (e.g. `:8081`). **Required when the API runs with mTLS**: browsers cannot present a client certificate, so a portal on the API listener would refuse every citizen. |
+| `SUNDER_PORTAL_BASE_URL` | - | Public base URL used to build the magic link in the mail payload (`https://privacy.acme.example` -> `.../portal/#token=...`). Without it the payload carries only the raw code. Must be https (loopback http allowed for development). |
+| `SUNDER_PORTAL_COOKIE_INSECURE` | `false` | Drops `Secure` from the session cookie. Local development only - the default keeps it set even when TLS terminates at the ingress. |
+| `SUNDER_PORTAL_CLIENT_IP_HEADER` | - | Header trusted for per-requester rate limiting behind a proxy (e.g. `X-Forwarded-For`). Opt-in: unset means `RemoteAddr`, which behind an ingress is the proxy for everyone. |
+
+Also required: the org's mailer endpoint registered under the reserved
+scope `_portal` (`sunder webhook set -scope _portal -url ...`). Sunder
+sends no e-mail itself - it POSTs a signed `portal_login` /
+`portal_erase_confirm` event and the org turns it into a message. Without a
+mailer, links are queued and marked `NO_MAILER`; the citizen-facing
+response never reveals whether an address exists or the mailer works.
+
+Portal rate limits are per route and per requester: the mail-sending route
+is the strictest (5/min), reads are 60/min, and there is an independent
+per-address cap of 3 login mails per 15 minutes so one requester cannot
+mail-bomb a chosen victim. On the portal surface the limiter always fails
+**closed** if Redis is unreachable.
 
 Invalid values (unparseable durations, out-of-range numbers, unknown
 algorithm names) fail startup with a specific error - a typo can never

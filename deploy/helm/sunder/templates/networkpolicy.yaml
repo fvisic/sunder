@@ -28,6 +28,16 @@ spec:
         {{- end }}
       ports:
         - {port: 8080, protocol: TCP}
+    {{- if .Values.networkPolicy.monitoringNamespace }}
+    # The Prometheus scrape docs/PROVISIONING.md recommends would otherwise
+    # be blocked by the client-label selector above (review N18).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - {port: 8080, protocol: TCP}
+    {{- end }}
   egress:
     # DNS
     - ports:
@@ -40,6 +50,16 @@ spec:
       to:
         - ipBlock: {cidr: {{ . }}}
       {{- end }}
+    {{- if .Values.redis.addr }}
+    # Redis: without this, fail-closed limiting turns every lookup into a
+    # 503 and fail-open silently degrades to per-replica windows (N18).
+    - ports:
+        - {port: {{ .Values.networkPolicy.redisPort }}, protocol: TCP}
+      {{- with .Values.networkPolicy.redisCIDR }}
+      to:
+        - ipBlock: {cidr: {{ . }}}
+      {{- end }}
+    {{- end }}
     # HTTPS out: TSA anchoring, Vault, webhook receivers. Narrow with
     # egressCIDRs when the receiver set is known.
     - ports:

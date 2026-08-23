@@ -519,6 +519,20 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 // RunRetention applies per-scope contact TTLs (blob wipe, audited) and
 // prunes long-expired OTI rows. Audit rows are NEVER pruned: the hash chain
 // plus external anchors are the tamper evidence.
+// PruneEnvelopes deletes consumed external envelopes whose replay window
+// has closed. Safe because envelopes carry a bounded lifetime: past
+// expires_at no envelope with that jti can still be accepted, so the row
+// no longer has anti-replay value - and issuer-chosen jtis may reference a
+// subject, so keeping them past an Article 17 erasure is not acceptable
+// (review N16).
+func PruneEnvelopes(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	tag, err := pool.Exec(ctx, `DELETE FROM external_envelopes WHERE expires_at < now()`)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 func RunRetention(ctx context.Context, pool *pgxpool.Pool) (wiped int64, otiPruned int64, err error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {

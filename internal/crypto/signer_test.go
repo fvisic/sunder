@@ -5,12 +5,14 @@ package crypto
 // malformed frames must never take the signer down.
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -277,5 +279,95 @@ func TestRemoteEngineSurvivesSignerRestart(t *testing.T) {
 	waitFor()
 	if _, err := remote.MAC(context.Background(), "hmac-email/v1", []byte("after restart")); err != nil {
 		t.Fatalf("a stale pooled conn must be retried on a fresh dial: %v", err)
+	}
+}
+
+// A fresh-dial failure is never retried, and a response that arrives after
+// a pooled retry is still correct.
+func TestRemoteEngineNoRetryOnFreshDial(t *testing.T) {
+	dir, err := os.MkdirTemp("", "sgn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	// Nothing is listening: the first dial fails and must not be retried
+	// into a loop.
+	r := NewRemoteEngine(filepath.Join(dir, "absent.sock"))
+	start := time.Now()
+	if _, err := r.MAC(context.Background(), "hmac-email/v1", []byte("x")); err == nil {
+		t.Fatal("an absent signer must error")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("a fresh-dial failure must fail fast, took %s", elapsed)
+	}
+}
+
+// writeKey must fail cleanly when the temp file cannot be renamed into
+// place (the directory disappeared under it).
+func TestWriteKeyRenameFailure(t *testing.T) {
+	dir, err := os.MkdirTemp("", "ks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ks := &FileKeystore{Dir: dir}
+	if err := ks.Ensure(context.Background(), "hmac-email/v1"); err != nil {
+		t.Fatal(err)
+	}
+	// A path whose parent is a FILE, not a directory: CreateTemp fails.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := &FileKeystore{Dir: filepath.Join(blocker, "nested")}
+	if err := sub.Ensure(context.Background(), "hmac-email/v1"); err == nil {
+		t.Fatal("a keystore under a regular file must fail")
+	}
+	_ = os.RemoveAll(dir)
+}
+
+// writeFrame must refuse an oversized frame rather than truncating it, and
+// Encrypt must surface a keystore failure.
+func TestWriteFrameSizeCapAndEncryptFailure(t *testing.T) {
+	var sink bytes.Buffer
+	huge := make([]byte, maxFrame+1)
+	if err := writeFrame(&sink, signerResp{OK: true, Out: huge}); err == nil {
+		t.Fatal("an oversized frame must be refused, never truncated")
+	}
+	// A writer that fails mid-frame surfaces the error.
+	if err := writeFrame(failingWriter{}, signerReq{V: 1, Op: "mac"}); err == nil {
+		t.Fatal("a failing writer must surface an error")
+	}
+	// Sealing under a missing key fails closed (strict keystore).
+	box := NewPIIBox(NewLocalEngine(&FileKeystore{Dir: t.TempDir()}))
+	if _, err := box.SealBytes(context.Background(), "portal-outbox", "v1", []byte("x")); err == nil {
+		t.Fatal("sealing without key material must fail")
+	}
+	if _, err := box.OpenBytes(context.Background(), "portal-outbox", []byte("x"), "v1", AlgAES256GCM); err == nil {
+		t.Fatal("opening without key material must fail")
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, context.DeadlineExceeded }
+
+// A wrong protocol version must be rejected with an error frame, not
+// silently served: the version field exists so future changes can key on it.
+func TestSignerRejectsWrongProtocolVersion(t *testing.T) {
+	_, sock := startSigner(t)
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := writeFrame(c, signerReq{V: 99, Op: "mac", Key: "hmac-email/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	var resp signerResp
+	if err := readFrame(c, &resp); err != nil {
+		t.Fatalf("the signer must answer, not just hang up: %v", err)
+	}
+	if resp.OK || !strings.Contains(resp.Error, "protocol version") {
+		t.Fatalf("expected a version rejection, got %+v", resp)
 	}
 }

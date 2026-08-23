@@ -32,6 +32,8 @@ export type SunderErrorCode =
   // The data subject withdrew consent for this purpose - distinct from
   // PurposeNotAllowed (a missing client grant).
   | "ConsentDenied"
+  // The secret is correct but past its expiry: rotate it, do not retry.
+  | "CredentialExpired"
   | "Unknown";
 
 /**
@@ -92,7 +94,7 @@ export class SunderError extends Error {
 // use, so a server code maps identically everywhere (review finding F15).
 const CODE_MAP: Record<string, SunderErrorCode> = {
   unauthorized: "Unauthorized",
-  credential_expired: "Unauthorized",
+  credential_expired: "CredentialExpired",
   forbidden: "Forbidden",
   consent_denied: "ConsentDenied",
   purpose_not_allowed: "PurposeNotAllowed",
@@ -172,14 +174,22 @@ export interface SharePredicate {
   attr: string;
   /** "age_gte" (attr read as an ISO date) or "exists". */
   op: "age_gte" | "exists";
-  /** age_gte only. */
+  /**
+   * Required for "age_gte" - an omitted threshold is rejected at issue
+   * time, never treated as 0. Must be absent for "exists".
+   */
   value?: number;
 }
 
 /** An evaluated predicate: booleans only, the value never crosses scopes. */
 export interface PredicateResult extends SharePredicate {
   result: boolean;
-  /** false = attribute absent/unparseable - distinct from a failed check. */
+  /**
+   * Op-specific. For "age_gte": false when the attribute is absent or
+   * unparseable, so "we do not know the birthdate" never reads as "under
+   * 18". For "exists": always true - absence is the answer that predicate
+   * asks for.
+   */
   known: boolean;
 }
 

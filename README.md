@@ -59,7 +59,7 @@ HTTP request as it goes.
 The benchmark harness and raw results are in [`benchmark/`](benchmark/) -
 reproduce them with one script. Sunder is 50-99% faster than Databunker on
 every operation with p99 latency 2.2-3.3x lower, *while writing a
-same-transaction audit record per operation*.
+hash-chained audit record per operation*.
 
 ## What you get
 
@@ -119,7 +119,7 @@ Configuration is environment-only; see `docs/CONFIG.md` for the full
 `SUNDER_*` reference (deployment tunables - OTI TTL, PII encryption
 algorithm, webhook delivery caps - included).
 
-Test coverage is gated at **>= 88%** in CI (currently ~90% across the
+Test coverage is gated at **>= 90%** in CI (currently ~90% across the
 server and CLI - the uncovered remainder is almost entirely defensive
 branches for mid-transaction database failures); the SDKs carry their own
 mock-server suites, and the CI `e2e-demo` job boots the real stack and

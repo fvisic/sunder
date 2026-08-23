@@ -98,3 +98,31 @@ func TestGCEvictsStaleEntries(t *testing.T) {
 		t.Fatal("stale entry survived GC")
 	}
 }
+
+// The in-memory detector's GC path and the two backends' identical ceiling.
+func TestDetectorGCAndBackendParity(t *testing.T) {
+	d := NewDetector()
+	// Enough misses to cross the GC interval.
+	for i := 0; i < gcEvery+10; i++ {
+		d.Miss("client")
+	}
+	if got := d.Miss("client"); got == 0 {
+		t.Fatal("the detector must keep counting across a GC pass")
+	}
+	// The in-memory limiter denies AT the limit, which the Redis backend
+	// now matches exactly (review N10).
+	l := NewLimiter()
+	const limit = 3
+	allowed := 0
+	for i := 0; i < 10; i++ {
+		if l.Allow("c", limit) {
+			allowed++
+		}
+	}
+	if allowed != limit {
+		t.Fatalf("limit %d must allow exactly %d, allowed %d", limit, limit, allowed)
+	}
+	if l.Allow("c", 0) {
+		t.Fatal("a zero limit must deny")
+	}
+}

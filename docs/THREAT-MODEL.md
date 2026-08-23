@@ -38,3 +38,43 @@ data-subject rights layer shipped in v1.5: consent enforcement,
 org-wide right of access and erasure with signed webhooks, portability
 export, and per-scope retention. The self-service privacy portal remains
 v2 (it requires citizen authentication - wallet/OTP - outside this layer).
+
+
+## Audit content boundary (P2.3 decision)
+
+The audit chain deliberately stores no attribute values and no derived
+assertions about a person - only the operation, the actor, the pseudonym
+and what was requested. Predicate verifications therefore record
+`predicates_asked: ["birthdate age_gte 18"]` and not the boolean result.
+
+Consequence accepted: from the chain alone you cannot reconstruct what a
+verifier concluded, only what it was authorised to ask and when. That is
+the intended trade-off - the chain is an accountability record, not a
+derived-data warehouse, and it is the one store that survives erasure.
+
+
+## Portal enumeration resistance (P2.5, measured)
+
+The login-start endpoint answers identically for known and unknown
+addresses in body, status AND timing. The last part is not free:
+
+- mail delivery is queued to `portal_outbox` and sent by the background
+  worker, so no request blocks on a network round-trip;
+- the address lookup queries every live key version on both outcomes;
+- a **constant-time floor** (40 ms) dominates the remaining difference (the
+  hit path does one extra sealed INSERT, about 2 ms, which separated
+  perfectly under measurement before the floor was added);
+- the route is capped at 5 requests/minute per requester, plus 3 mails per
+  address per 15 minutes, and the limiter fails CLOSED here.
+
+`internal/api/portal_hardening_test.go` measures the hit/miss distributions
+and fails the build on perfect separation - the property is tested, not
+asserted.
+
+## Portal data at rest
+
+The outbox holds a live login token. It is therefore SEALED with the PII
+KEK through the crypto engine (AAD-bound like attribute blobs), and the
+per-address send throttle is keyed by an HMAC search token, never a bare
+hash of the address. A database reader without key access can neither log
+in as anyone nor enumerate registered addresses from these tables.

@@ -220,8 +220,9 @@ final class SunderClient
     /**
      * Like verifyOti but returns the full result: ['cid' => ..., and when
      * present 'shared' (copied attribute names) and 'predicates' (each
-     * ['attr','op','value','result','known']; known=false means the
-     * attribute was absent - NOT a failed check).
+     * ['attr','op','value','result','known']). For age_gte, known=false
+     * means the attribute was absent or unparseable - NOT a failed check;
+     * for exists, known is always true because absence is the answer.
      *
      * @return array<string, mixed>
      */

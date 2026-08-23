@@ -111,6 +111,15 @@ func (s *Server) logErr(r *http.Request, err error) {
 // federation) and merges its claims into the caller-scope blob with
 // provenance. Action: claims.external.
 func (s *Server) handleExternalClaims(w http.ResponseWriter, r *http.Request) {
+	client := auth.FromContext(r.Context())
+	// Every accepted or rejected envelope appends to the audit chain, which
+	// takes a global advisory lock: without a limit here one client can
+	// serialise the whole instance (review N4).
+	if s.Limiter != nil && !s.Limiter.Allow("claims:"+client.ID, client.RateLimit) {
+		s.Metrics.Inc(`sunder_ratelimited_total{client="` + client.ID + `"}`)
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+		return
+	}
 	in, ok := decode[struct {
 		CID      string `json:"cid"`
 		Envelope string `json:"envelope"`
@@ -118,7 +127,7 @@ func (s *Server) handleExternalClaims(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	stored, err := s.Contacts.ExternalClaims(r.Context(), auth.FromContext(r.Context()), in.CID, in.Envelope)
+	stored, err := s.Contacts.ExternalClaims(r.Context(), client, in.CID, in.Envelope)
 	if err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)

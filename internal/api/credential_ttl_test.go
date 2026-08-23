@@ -118,3 +118,28 @@ func TestAuthFailureThrottle(t *testing.T) {
 		t.Fatalf("other IPs must not be throttled: %d", rec.Code)
 	}
 }
+
+// CreateTx must reject a bad id and a duplicate inside the caller's
+// transaction, so bootstrap can roll everything back together.
+func TestCreateTxValidationAndDuplicate(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	tx, err := st.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := auth.CreateTx(ctx, tx, auth.Client{ID: "Bad.Id", Scope: "s"}); err == nil {
+		t.Fatal("an id with a dot would make the credential ambiguous")
+	}
+	cred, err := auth.CreateTx(ctx, tx, auth.Client{ID: "ok", Name: "OK", Scope: "s",
+		AllowedActions: []string{auth.ActLookup}, AllowedPurposes: []string{"support"}, RateLimit: 10})
+	if err != nil || !strings.HasPrefix(cred, "ok.") {
+		t.Fatalf("create: %q %v", cred, err)
+	}
+	if _, err := auth.CreateTx(ctx, tx, auth.Client{ID: "ok", Name: "OK", Scope: "s",
+		AllowedActions: []string{auth.ActLookup}, AllowedPurposes: []string{}}); err == nil {
+		t.Fatal("a duplicate id must error inside the transaction")
+	}
+}

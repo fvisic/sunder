@@ -7,27 +7,55 @@ package api
 // self-contained.
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"net"
 	"net/http"
-	"time"
+	"strings"
 
 	"github.com/fvisic/sunder/internal/service"
 )
 
 const portalSessionCookie = "sunder_portal"
 
-// portalLimit applies a per-IP rate limit to portal routes (magic-link
-// starts are abuse bait: mail bombing, token grinding).
-func (s *Server) portalLimit(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ip = r.RemoteAddr
+// portalClientIP identifies the requester for rate limiting. RemoteAddr by
+// default; a proxy header only when the operator explicitly names one
+// (SUNDER_PORTAL_CLIENT_IP_HEADER) - a blindly trusted header is a limiter
+// bypass, and behind an ingress RemoteAddr alone collapses every citizen
+// into one bucket (review N9).
+func (s *Server) portalClientIP(r *http.Request) string {
+	if h := s.Cfg.PortalClientIPHeader; h != "" {
+		if v := r.Header.Get(h); v != "" {
+			if i := strings.IndexByte(v, ','); i > 0 {
+				v = v[:i] // left-most entry is the original client
+			}
+			return strings.TrimSpace(v)
 		}
-		if s.Limiter != nil && !s.Limiter.Allow("portal:"+ip, 30) {
+	}
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
+}
+
+// portalLimit applies a PER-ROUTE, per-requester rate limit: the mail-
+// sending route is abuse bait and must be far stricter than reading your
+// own data, and one bucket for all six routes let 31 requests lock every
+// citizen out of the portal entirely (review N9).
+func (s *Server) portalLimit(bucket string, limit int, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.Limiter != nil && !s.Limiter.Allow("portal:"+bucket+":"+s.portalClientIP(r), limit) {
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
 			return
 		}
+		// Portal responses carry decrypted PII and the cross-scope audit
+		// trail: never cacheable, never in bfcache or on disk after the
+		// session dies (review N13).
+		w.Header().Set("Cache-Control", "no-store, max-age=0")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
 		next(w, r)
 	}
 }
@@ -62,10 +90,14 @@ func (s *Server) handlePortalSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Secure unless explicitly opted out for local development: TLS usually
+	// terminates at the ingress, so keying this off our own certificate
+	// left the cookie unprotected in the standard deployment (review N11).
 	http.SetCookie(w, &http.Cookie{
 		Name: portalSessionCookie, Value: session, Path: "/portal",
-		HttpOnly: true, Secure: s.Cfg.TLSCert != "", SameSite: http.SameSiteStrictMode,
-		MaxAge: int((30 * time.Minute).Seconds()),
+		HttpOnly: true, Secure: !s.Cfg.PortalCookieInsecure,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(service.PortalSessionTTL.Seconds()),
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "session started"})
 }
@@ -115,16 +147,17 @@ func (s *Server) handlePortalConsent(w http.ResponseWriter, r *http.Request, per
 }
 
 func (s *Server) handlePortalEraseRequest(w http.ResponseWriter, r *http.Request, personID string) {
-	token, err := s.Portal.RequestErase(r.Context(), personID)
-	if err != nil {
+	if err := s.Portal.RequestErase(r.Context(), personID); err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)
 		return
 	}
-	// The confirmation token goes back to the SAME authenticated session -
-	// the second step guards against a hijacked session firing erasure in
-	// one call, and gives the UI a deliberate "are you sure" moment.
-	writeJSON(w, http.StatusOK, map[string]string{"confirm_token": token})
+	// The confirmation token is NOT in this response: it is mailed to the
+	// address on file, so holding the session cookie is not enough to
+	// finish an irreversible cross-scope erasure (review N3).
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"status": "a confirmation link has been sent to the address on file",
+	})
 }
 
 func (s *Server) handlePortalEraseConfirm(w http.ResponseWriter, r *http.Request, personID string) {
@@ -148,20 +181,59 @@ func (s *Server) registerPortal() {
 	if s.Portal == nil {
 		return
 	}
-	s.mux.HandleFunc("POST /portal/api/start", s.portalLimit(s.handlePortalStart))
-	s.mux.HandleFunc("POST /portal/api/session", s.portalLimit(s.handlePortalSession))
-	s.mux.HandleFunc("GET /portal/api/me", s.portalLimit(s.portalSession(s.handlePortalData)))
-	s.mux.HandleFunc("POST /portal/api/consent", s.portalLimit(s.portalSession(s.handlePortalConsent)))
-	s.mux.HandleFunc("POST /portal/api/erase", s.portalLimit(s.portalSession(s.handlePortalEraseRequest)))
-	s.mux.HandleFunc("POST /portal/api/erase/confirm", s.portalLimit(s.portalSession(s.handlePortalEraseConfirm)))
-	s.mux.HandleFunc("GET /portal/", func(w http.ResponseWriter, r *http.Request) {
-		// Locked-down CSP: the SPA is a single self-contained file.
-		w.Header().Set("Content-Security-Policy",
-			"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(portalSPA)
-	})
+	mux := s.portalMux()
+	s.mux.Handle("/portal/", mux)
 }
 
-var _ = service.PortalMailerScope // documented linkage
+// portalMux builds the portal routes. Returned separately so the portal can
+// also be served on its own listener (SUNDER_PORTAL_LISTEN), which is how a
+// deployment keeps mTLS on the API while citizens reach the portal without
+// a client certificate (review N12).
+func (s *Server) portalMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	// Mail-sending is the abuse-bait route; reads are cheap and shared.
+	mux.HandleFunc("POST /portal/api/start", s.portalLimit("start", 5, s.handlePortalStart))
+	mux.HandleFunc("POST /portal/api/session", s.portalLimit("session", 20, s.handlePortalSession))
+	mux.HandleFunc("GET /portal/api/me", s.portalLimit("read", 60, s.portalSession(s.handlePortalData)))
+	mux.HandleFunc("POST /portal/api/consent", s.portalLimit("write", 30, s.portalSession(s.handlePortalConsent)))
+	mux.HandleFunc("POST /portal/api/erase", s.portalLimit("erase", 5, s.portalSession(s.handlePortalEraseRequest)))
+	mux.HandleFunc("POST /portal/api/erase/confirm", s.portalLimit("erase", 5, s.portalSession(s.handlePortalEraseConfirm)))
+	mux.HandleFunc("POST /portal/api/logout", s.portalLimit("write", 30, s.handlePortalLogout))
+	mux.HandleFunc("GET /portal/", s.handlePortalSPA)
+	return mux
+}
+
+func (s *Server) handlePortalLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(portalSessionCookie); err == nil {
+		if err := s.Portal.Logout(r.Context(), c.Value); err != nil {
+			s.logErr(r, err)
+		}
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: portalSessionCookie, Value: "", Path: "/portal",
+		HttpOnly: true, Secure: !s.Cfg.PortalCookieInsecure,
+		SameSite: http.SameSiteStrictMode, MaxAge: -1,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "signed out"})
+}
+
+// handlePortalSPA serves the single-file UI. The script carries a
+// per-response nonce and the page has no inline event handlers, so the CSP
+// needs no 'unsafe-inline' and actually mitigates XSS (review N14).
+func (s *Server) handlePortalSPA(w http.ResponseWriter, r *http.Request) {
+	nonceRaw := make([]byte, 16)
+	if _, err := rand.Read(nonceRaw); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal"})
+		return
+	}
+	nonce := base64.StdEncoding.EncodeToString(nonceRaw)
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'none'; script-src 'nonce-"+nonce+"'; style-src 'unsafe-inline'; "+
+			"connect-src 'self'; img-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "no-store, max-age=0")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(strings.Replace(string(portalSPA), "__NONCE__", nonce, 1)))
+}

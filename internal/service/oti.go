@@ -229,7 +229,7 @@ func (o *OTI) VerifyFull(ctx context.Context, client *auth.Client, token, purpos
 		// A freshly rotated key may not be in this replica's 30s cache yet;
 		// refresh once before rejecting (only on the unknown-kid path, so
 		// forged kids cannot turn this into a cache-busting vector at scale).
-		o.Ring.Invalidate()
+		o.Ring.InvalidateThrottled()
 		if live, err = o.Ring.Versions(ctx, crypto.SigningKeyName); err != nil {
 			return nil, err
 		}
@@ -336,10 +336,25 @@ func (o *OTI) VerifyFull(ctx context.Context, client *auth.Client, token, purpos
 	if err != nil {
 		return nil, err
 	}
+	// The chain records WHAT WAS ASKED, never what the data said: attribute
+	// reads log the attribute name and not its value, and a predicate
+	// result is that value, one bit wide. Logging it would put a derived
+	// personal-data assertion ("this person is over 18") into a log that is
+	// never pruned and survives erasure as a tombstone-keyed row. The
+	// disclosure event is fully accounted for by the request itself
+	// (user review finding N22).
+	askedPredicates := make([]string, 0, len(predResults))
+	for _, r := range predResults {
+		if r.Op == PredAgeGTE {
+			askedPredicates = append(askedPredicates, fmt.Sprintf("%s %s %d", r.Attr, r.Op, r.Threshold()))
+			continue
+		}
+		askedPredicates = append(askedPredicates, r.Attr+" "+r.Op)
+	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
 		ClientID: client.ID, Action: "oti.verify", CID: verifierCID,
 		Detail: map[string]any{"jti": claims.JTI, "purpose": purpose, "audience": audience,
-			"shared": shared, "predicates": predResults},
+			"shared": shared, "predicates_asked": askedPredicates},
 	}); err != nil {
 		return nil, fmt.Errorf("audit append: %w", err)
 	}

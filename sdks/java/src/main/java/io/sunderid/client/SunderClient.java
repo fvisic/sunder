@@ -213,8 +213,9 @@ public final class SunderClient {
     /**
      * Like {@link #verifyOti} but returns the full result map: "cid", and
      * when present "shared" (copied attribute names) and "predicates" (each
-     * a map with attr/op/value/result/known; known=false means the attribute
-     * was absent - NOT a failed check).
+     * a map with attr/op/value/result/known). For age_gte, known=false means
+     * the attribute was absent or unparseable - NOT a failed check; for
+     * exists, known is always true because absence is the answer.
      */
     public Map<String, Object> verifyOtiFull(String token, String purpose, String audience) {
         Map<String, Object> body = new LinkedHashMap<>();

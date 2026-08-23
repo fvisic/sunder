@@ -1,3 +1,6 @@
+{{- if ne .Values.keystore.type "vault" }}
+{{- fail "this chart supports keystore.type=vault only: the file driver needs a shared writable volume, which would CrashLoopBackOff under readOnlyRootFilesystem" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

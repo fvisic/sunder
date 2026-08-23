@@ -265,6 +265,132 @@ paths:
         '500':
           $ref: '#/components/responses/Internal'
 
+  /portal/api/start:
+    post:
+      tags: [portal]
+      operationId: portalStart
+      summary: Request a portal login link (citizen-facing, unauthenticated)
+      description: |
+        Self-service privacy portal (SUNDER_PORTAL_ENABLED). No client
+        credential: the data subject authenticates with a one-time link.
+
+        Always answers 202 with the same body whether or not the address is
+        known, and never blocks on the mailer - the link is queued to the
+        webhook registered under the reserved scope `_portal` and delivered
+        by a background worker, so response timing does not reveal whether
+        an address exists.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: {type: string, format: email}
+      responses:
+        '202':
+          description: Accepted. Identical for known, unknown and malformed addresses.
+        '429':
+          description: Per-requester rate limit (this route is deliberately the strictest).
+
+  /portal/api/session:
+    post:
+      tags: [portal]
+      operationId: portalSession
+      summary: Redeem a login token for a portal session
+      description: Single-use, 15-minute token; sets an HttpOnly, Secure, SameSite=Strict session cookie valid 30 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: {type: string}
+      responses:
+        '200':
+          description: Session started; the cookie is set.
+        '404':
+          description: Unknown, expired or already-used token.
+
+  /portal/api/me:
+    get:
+      tags: [portal]
+      operationId: portalData
+      summary: Everything every scope stores about the signed-in person
+      description: Cookie-authenticated. Returns each scope's decrypted attributes and consents plus the cross-scope audit trail. Never cacheable (no-store).
+      responses:
+        '200':
+          description: The person's own data across all scopes.
+        '401':
+          description: No session, or the session expired (also after erasure).
+
+  /portal/api/consent:
+    post:
+      tags: [portal]
+      operationId: portalSetConsent
+      summary: Grant or withdraw a consent on one of your own pseudonyms
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cid, purpose, granted]
+              properties:
+                cid: {$ref: '#/components/schemas/Cid'}
+                purpose: {type: string}
+                granted: {type: boolean}
+      responses:
+        '200':
+          description: Recorded; it takes effect immediately on reads and handoffs.
+        '404':
+          description: The CID does not belong to the signed-in person.
+
+  /portal/api/erase:
+    post:
+      tags: [portal]
+      operationId: portalRequestErase
+      summary: Start an erasure (step 1 of 2)
+      description: |
+        Mails a confirmation code to the address on file. The code is NOT
+        returned in the response: holding the session cookie must not be
+        enough to complete an irreversible cross-scope erasure.
+      responses:
+        '202':
+          description: A confirmation link has been queued to the address on file.
+
+  /portal/api/erase/confirm:
+    post:
+      tags: [portal]
+      operationId: portalConfirmErase
+      summary: Confirm an erasure (step 2 of 2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm_token]
+              properties:
+                confirm_token: {type: string}
+      responses:
+        '200':
+          description: Erased; every scope is notified via its signed webhook.
+        '404':
+          description: Unknown, expired, already-used, or issued for a different person.
+
+  /portal/api/logout:
+    post:
+      tags: [portal]
+      operationId: portalLogout
+      summary: End the portal session immediately
+      responses:
+        '200':
+          description: Signed out; the session row is deleted and the cookie cleared.
+
   /v1/claims/external:
     post:
       tags: [contacts]
@@ -653,7 +779,8 @@ components:
         result: {type: boolean}
         known:
           type: boolean
-          description: false = the attribute was absent or unparseable - deliberately distinct from a failed check ("we do not know the birthdate" must never read as "under 18").
+          description: |
+            Op-specific. For age_gte: false when the attribute is absent or unparseable, so "we do not know the birthdate" never reads as "under 18". For exists: always true, because absence is the answer that predicate asks for.
 
     OtiVerifyResponse:
       type: object
@@ -782,7 +909,7 @@ components:
             properties:
               attr: {type: string, maxLength: 64, description: Attribute name in the issuer's scope.}
               op: {type: string, enum: [age_gte, exists]}
-              value: {type: integer, minimum: 0, maximum: 150, description: age_gte only.}
+              value: {type: integer, minimum: 1, maximum: 150, description: "Required for age_gte (an omitted threshold is rejected at issue time, not treated as 0); must be absent for exists."}
 
     OtiIssueResponse:
       type: object

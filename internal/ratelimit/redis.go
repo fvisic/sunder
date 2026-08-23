@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -180,7 +181,12 @@ func (l *RedisLimiter) Failures() int64 {
 	return l.failures
 }
 
-func (l *RedisLimiter) failed() bool {
+// failed decides what an unreachable Redis means. Fail-open is defensible
+// for authenticated callers (degrade abuse control, not availability) but
+// not on the unauthenticated portal surface, where it would turn a
+// rate-limited endpoint into a line-rate one (review N10). Portal buckets
+// are prefixed "portal:" and always fail CLOSED.
+func (l *RedisLimiter) failed(key string) bool {
 	l.mu.Lock()
 	l.failures++
 	l.mu.Unlock()
@@ -188,6 +194,13 @@ func (l *RedisLimiter) failed() bool {
 		// Ops visibility: fail-open degradation must not be silent
 		// (review finding F4).
 		l.OnFailure()
+	}
+	// Fail-open degrades abuse control rather than availability, which is
+	// defensible for authenticated callers - but not on the unauthenticated
+	// portal surface, where it would turn a rate-limited endpoint into a
+	// line-rate one (review N10).
+	if strings.HasPrefix(key, "portal:") {
+		return false
 	}
 	return !l.FailClosed
 }
@@ -220,22 +233,26 @@ func (l *RedisLimiter) windowCount(prefix, key string, span time.Duration) (floa
 }
 
 // Allow implements the limiter interface (weighted sliding minute window).
+//
+// The comparison matches the in-memory backend exactly (>= limit denies):
+// the two disagreed by one, so the same client saw a different ceiling
+// depending on which backend was configured (review N10).
 func (l *RedisLimiter) Allow(key string, limit int) bool {
 	if limit <= 0 {
 		return false
 	}
 	total, err := l.windowCount("rl", key, window)
 	if err != nil {
-		return l.failed()
+		return l.failed(key)
 	}
-	return total <= float64(limit)
+	return total < float64(limit)+1
 }
 
 // Miss implements the detector interface (sliding 10-minute window).
 func (l *RedisLimiter) Miss(key string) int {
 	total, err := l.windowCount("enum", key, detectWindow)
 	if err != nil {
-		_ = l.failed()
+		_ = l.failed("enum:" + key)
 		return 0
 	}
 	return int(total)

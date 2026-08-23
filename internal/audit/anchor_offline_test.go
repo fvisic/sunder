@@ -327,3 +327,35 @@ func TestVerifyTokenOpenSSLGarbageOutput(t *testing.T) {
 		t.Fatalf("exit-0 without Verification: OK must be a clean failure: %v %v", ok, err)
 	}
 }
+
+// Anchor/verify error branches: unreadable CA, unreadable export directory,
+// and a TSA reply that is not a token.
+func TestAnchorEnvironmentErrors(t *testing.T) {
+	needsOpenSSL(t)
+	s := testPool(t)
+	ctx := context.Background()
+	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "seed"}); err != nil {
+		t.Fatal(err)
+	}
+	srv := fakeTSA(t, 200, fixture(t))
+
+	// A CA path that does not exist is an ENVIRONMENT error, never a
+	// verification verdict.
+	if _, _, err := Anchor(ctx, s.Pool, srv.URL, "/nope/ca.pem", t.TempDir()); err == nil {
+		t.Fatal("a missing CA bundle must error")
+	}
+	if _, err := VerifyToken(fixture(t), fixtureDigest, "/nope/ca.pem"); err == nil {
+		t.Fatal("VerifyToken with a missing CA must be an environment error")
+	}
+	// An unwritable export directory fails the anchor rather than storing a
+	// token with no off-host copy.
+	if _, _, err := Anchor(ctx, s.Pool, srv.URL, "", "/definitely/not/writable"); err == nil {
+		t.Fatal("an unwritable export directory must fail the anchor")
+	}
+	// A missing export directory is not an error: it means no exports have
+	// been synced yet, and the DB-side check must still run (the orphan
+	// detection is what would flag a deleted export).
+	if _, err := VerifyAnchors(ctx, s.Pool, "", "/definitely/not/a/dir"); err != nil {
+		t.Fatalf("a missing export directory must not fail the chain check: %v", err)
+	}
+}
