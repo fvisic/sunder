@@ -191,3 +191,65 @@ is the failure mode this file exists to prevent.
   command is `-coverpkg=./internal/...,./cmd/...`. Excluding test helpers
   would raise the number by roughly 0.3 points, which is exactly why it
   would look like moving the goalposts mid-review. Left as-is.
+
+---
+
+# Pass 5 - reviewer verification of the pass-4 resolution log
+
+Baseline `9de2eb8`, clean working tree. Every claim in the log above was
+checked against the production call path, and the load-bearing ones with
+executable probes. **All of them hold.** This is the first pass where
+nothing claimed as fixed turned out to be unwired.
+
+## Verified with a probe
+
+| Finding | Probe | Result |
+|---|---|---|
+| **P0-a** | Captured a live blob, erased the person, wrote the blob back onto the tombstone, then read the attribute | `404 not_found`, and `attributes.read` audit rows unchanged (0 → 0). A real guard now, not the NULL-blob accident |
+| **P0-b** | Planted the identity point `01 00…00` straight into `trusted_issuers` (bypassing the CLI) and submitted an envelope signed with `01`+zeros | `403 forbidden` - while raw `ed25519.Verify` still accepts the same forgery, confirming the guard and not the primitive is doing the work |
+| **N19** | `helm template --set anchor.caPath=/custom/my-ca.pem` | Renders `-ca "/custom/my-ca.pem"`. `--set anchor.caSecretName=my-tsa-ca` mounts the secret at `/etc/sunder/tsa-ca`. Wired this time |
+| **Anchor flake** | 3 full-suite `-race` runs | Clean. No test mutates global `PATH` any more; `opensslBin` is an injectable package variable, so the root cause is gone rather than retried |
+| **Coverage** | Exact CI invocation with the full CI environment | **90.0%, gate PASS** |
+
+## Verified by reading the call path
+
+`ValidEd25519PublicKey` is called from both places its own doc requires -
+`cmd/sunder/main.go:662` (registration) and `internal/service/external.go:114`
+(verify). The blocklist is libsodium's canonical seven points. Retired
+issuers are genuinely excluded: `external.go:98-99` filters
+`revoked_at IS NULL`, so `revoked_at` is load-bearing and not cosmetic.
+`FOR UPDATE SKIP LOCKED` is present in both workers (`portal.go:235`,
+`gdpr.go:450`). The `claims:` bucket is in the fail-closed prefix list
+(`redis.go:204`). `allowEmailSend` takes the transaction. The portal
+listener carries all four timeouts. `erasePerson` deletes sessions, tokens,
+queued mail and the person's envelope rows. `validWebhookURL` parses rather
+than prefix-matches, so `http://localhost.attacker.example/` is refused.
+Envelope pruning keeps a one-hour margin against clock skew. Every one of
+the ten test names cited in the log exists.
+
+## Correction to pass 4
+
+My pass-4 report said coverage was 89.8% and CI would fail the gate. **That
+was my measurement error, not a defect.** I ran with `SUNDER_TEST_DB_URL`
+but without `SUNDER_TEST_REDIS_ADDR`, so the Redis-backed limiter tests
+skipped. With the full CI environment the figure is exactly 90.0% and the
+gate passes. The claim in the log was correct.
+
+## One residual (cosmetic)
+
+`internal/service/portal.go:91-92` still carries a stale bullet - "the audit
+row is written on both branches with the outcome the server actually knows
+at that point" - ten lines above the new comment that correctly says "NO
+audit row in this request path, deliberately". No functional impact, but
+this file exists because stale assertions in comments are what stopped
+earlier gaps from being looked at.
+
+## On the deliberate exclusions
+
+All four are reasonable and, more usefully, correctly characterised: the
+blob-cap trade-off names the worse failure it avoids; `main()` coverage
+names what a test would actually assert; the timing test is described as
+weak-form and credits the 40 ms floor rather than the test; and keeping
+`internal/testutil` in the coverage denominator is the right call for
+exactly the reason given. Nothing here is a finding recorded as resolved
+without an argument.

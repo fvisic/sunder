@@ -87,9 +87,7 @@ func (p *Portal) Start(ctx context.Context, email string) error {
 	//   - a hit ENQUEUES the mail into portal_outbox and returns; the
 	//     delivery (a network round-trip that used to run inline and made
 	//     the two branches trivially separable) happens in the background
-	//     worker;
-	//   - the audit row is written on both branches with the outcome the
-	//     server actually knows at that point.
+	//     worker.
 	// This is not cryptographic constant time - the hit path does one more
 	// INSERT - but the observable difference is no longer a network
 	// round-trip, which is what made enumeration practical (review N2).
