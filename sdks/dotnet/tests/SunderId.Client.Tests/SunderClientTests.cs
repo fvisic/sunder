@@ -173,6 +173,31 @@ public class SunderClientTests
     }
 
     [Fact]
+    public async Task PredicateClaims_Roundtrip()
+    {
+        var (client, handler) = NewClient();
+        handler.Enqueue(HttpStatusCode.Created,
+            "{\"token\":\"v4.public.p\",\"expires_at\":\"2026-01-01T00:00:00Z\"}");
+        await client.IssueOtiAsync("CID-1", "age_check", "webshop", null,
+            new[] { (IReadOnlyDictionary<string, object>)new Dictionary<string, object>
+                { ["attr"] = "birthdate", ["op"] = "age_gte", ["value"] = 18 } });
+        var issueReq = Assert.Single(handler.Requests);
+        using (var doc = JsonDocument.Parse(issueReq.Body!))
+        {
+            var preds = doc.RootElement.GetProperty("share_predicates");
+            Assert.Equal("age_gte", preds[0].GetProperty("op").GetString());
+        }
+
+        handler.Enqueue(HttpStatusCode.OK,
+            "{\"cid\":\"CID-web\",\"predicates\":[{\"attr\":\"birthdate\",\"op\":\"age_gte\",\"value\":18,\"result\":true,\"known\":true}]}");
+        var outp = await client.VerifyOtiFullAsync("v4.public.p", "age_check", "webshop");
+        Assert.Equal("CID-web", outp.GetProperty("cid").GetString());
+        var first = outp.GetProperty("predicates")[0];
+        Assert.True(first.GetProperty("result").GetBoolean());
+        Assert.True(first.GetProperty("known").GetBoolean());
+    }
+
+    [Fact]
     public async Task VerifyOti_ReturnsVerifierScopedCid()
     {
         var (client, handler) = NewClient();

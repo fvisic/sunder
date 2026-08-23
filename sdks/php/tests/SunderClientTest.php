@@ -262,6 +262,27 @@ final class SunderClientTest extends TestCase
         );
     }
 
+    public function testPredicateClaims(): void
+    {
+        $this->queue([201, ['token' => 'v4.public.p', 'expires_at' => '2026-01-01T00:00:00Z']]);
+        $this->client->issueOti('CID-1', 'age_check', 'webshop', null,
+            [['attr' => 'birthdate', 'op' => 'age_gte', 'value' => 18]]);
+        $reqs = $this->requests();
+        $this->assertSame(
+            [['attr' => 'birthdate', 'op' => 'age_gte', 'value' => 18]],
+            $reqs[0]['body']['share_predicates']
+        );
+
+        $this->queue([200, ['cid' => 'CID-web', 'predicates' => [
+            ['attr' => 'birthdate', 'op' => 'age_gte', 'value' => 18,
+             'result' => true, 'known' => true],
+        ]]]);
+        $out = $this->client->verifyOtiFull('v4.public.p', 'age_check', 'webshop');
+        $this->assertSame('CID-web', $out['cid']);
+        $this->assertTrue($out['predicates'][0]['result']);
+        $this->assertTrue($out['predicates'][0]['known']);
+    }
+
     public function testVerifyOti(): void
     {
         $this->queue([200, ['cid' => 'CID-erp-9']]);

@@ -204,7 +204,8 @@ public sealed class SunderClient : IDisposable
     /// purpose. Safe to retry (retries once on 5xx / network failure).
     /// </summary>
     public async Task<OtiResult> IssueOtiAsync(string cid, string purpose, string audience,
-        IEnumerable<string>? shareAttributes = null)
+        IEnumerable<string>? shareAttributes = null,
+        IEnumerable<IReadOnlyDictionary<string, object>>? sharePredicates = null)
     {
         var body = new Dictionary<string, object>
         {
@@ -217,6 +218,16 @@ public sealed class SunderClient : IDisposable
         {
             // Issuer-authorized attributes copied into the verifier's scope.
             body["share_attributes"] = share;
+        }
+        var preds = sharePredicates is null
+            ? null
+            : new List<IReadOnlyDictionary<string, object>>(sharePredicates);
+        if (preds is { Count: > 0 })
+        {
+            // Issuer-authorized predicate claims, e.g.
+            // {"attr": "birthdate", "op": "age_gte", "value": 18}; the
+            // verifier receives booleans only, never the value.
+            body["share_predicates"] = preds;
         }
         var root = await RequestAsync(
             HttpMethod.Post, "/v1/oti",
@@ -233,7 +244,19 @@ public sealed class SunderClient : IDisposable
     /// </summary>
     public async Task<string> VerifyOtiAsync(string token, string purpose, string audience)
     {
-        var root = await RequestAsync(
+        var root = await VerifyOtiFullAsync(token, purpose, audience).ConfigureAwait(false);
+        return GetStringField(root, "cid");
+    }
+
+    /// <summary>
+    /// Like <see cref="VerifyOtiAsync" /> but returns the full JSON result:
+    /// "cid", and when present "shared" (copied attribute names) and
+    /// "predicates" (attr/op/value/result/known; known=false means the
+    /// attribute was absent - NOT a failed check).
+    /// </summary>
+    public async Task<JsonElement> VerifyOtiFullAsync(string token, string purpose, string audience)
+    {
+        return await RequestAsync(
             HttpMethod.Post, "/v1/oti/verify",
             JsonSerializer.Serialize(new Dictionary<string, string>
             {
@@ -242,7 +265,6 @@ public sealed class SunderClient : IDisposable
                 ["audience"] = audience,
             }),
             retryOnce: false).ConfigureAwait(false); // single-use token - see method doc
-        return GetStringField(root, "cid");
     }
 
     // -- ops -------------------------------------------------------------------

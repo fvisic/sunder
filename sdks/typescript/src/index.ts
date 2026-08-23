@@ -127,6 +127,30 @@ export interface CidResult {
   cid: string;
 }
 
+/** One issuer-authorized predicate claim (P2.3 selective disclosure). */
+export interface SharePredicate {
+  attr: string;
+  /** "age_gte" (attr read as an ISO date) or "exists". */
+  op: "age_gte" | "exists";
+  /** age_gte only. */
+  value?: number;
+}
+
+/** An evaluated predicate: booleans only, the value never crosses scopes. */
+export interface PredicateResult extends SharePredicate {
+  result: boolean;
+  /** false = attribute absent/unparseable - distinct from a failed check. */
+  known: boolean;
+}
+
+export interface VerifyResult {
+  cid: string;
+  /** Attribute names copied into the verifier scope, when requested. */
+  shared?: string[];
+  /** Evaluated predicate claims, when the token carried any. */
+  predicates?: PredicateResult[];
+}
+
 export interface AttributeResult {
   value: string;
 }
@@ -309,6 +333,8 @@ export class SunderClient {
     options?: RequestOptions & {
       /** Issuer-authorized attributes copied into the verifier's scope. */
       shareAttributes?: string[];
+      /** Issuer-authorized predicate claims (evaluated at verification). */
+      sharePredicates?: SharePredicate[];
     },
   ): Promise<OtiResult> {
     const raw = await this.request<{ token: string; expires_at: string }>({
@@ -319,6 +345,7 @@ export class SunderClient {
         purpose,
         audience,
         ...(options?.shareAttributes ? { share_attributes: options.shareAttributes } : {}),
+        ...(options?.sharePredicates ? { share_predicates: options.sharePredicates } : {}),
       },
       retryOnce: true,
       options,
@@ -337,8 +364,8 @@ export class SunderClient {
     purpose: string,
     audience: string,
     options?: RequestOptions,
-  ): Promise<CidResult> {
-    return this.request<CidResult>({
+  ): Promise<VerifyResult> {
+    return this.request<VerifyResult>({
       method: "POST",
       path: "/v1/oti/verify",
       body: { token, purpose, audience },

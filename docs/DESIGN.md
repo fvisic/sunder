@@ -60,6 +60,11 @@ own contacts.
   storage means dedup onto a shared person never exposes attributes another
   scope stored. Reads are field-level, purpose-checked, consent-checked and
   audited; encryption keys never leave the service.
+- **Selective disclosure (predicate claims)** - an OTI can carry
+  issuer-authorized predicates (`age_gte`, `exists`) evaluated against the
+  issuer's data at verification. The verifier receives booleans; the value
+  never crosses the scope boundary. Attribute absence reports
+  `known: false`, deliberately distinct from a failed check.
 - **Algorithm agility** - each blob records its algorithm (`cids.pii_alg`);
   reads follow the stored value, writes use the configured one, and the
   `keys rekey` sweep converts the backlog. Should the current AEAD ever be

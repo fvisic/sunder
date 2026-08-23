@@ -68,7 +68,25 @@ type otiClaims struct {
 // the mechanism behind delayed flows like escalation e-mails: the verifier
 // stores no PII itself and fetches just-in-time, yet a handoff shares
 // nothing unless the issuer explicitly says so.
-func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audience string, shareAttrs []string) (token string, expiresAt time.Time, err error) {
+// IssueInput carries the optional sharing directives for a handoff.
+type IssueInput struct {
+	CID             string      `json:"cid"`
+	Purpose         string      `json:"purpose"`
+	Audience        string      `json:"audience"`
+	ShareAttributes []string    `json:"share_attributes"`
+	SharePredicates []Predicate `json:"share_predicates"`
+}
+
+// Issue keeps the pre-P2.3 signature; predicate-bearing handoffs use IssueFull.
+func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audience string, shareAttrs []string) (string, time.Time, error) {
+	return o.IssueFull(ctx, client, IssueInput{CID: cid, Purpose: purpose, Audience: audience, ShareAttributes: shareAttrs})
+}
+
+func (o *OTI) IssueFull(ctx context.Context, client *auth.Client, in IssueInput) (token string, expiresAt time.Time, err error) {
+	cid, purpose, audience, shareAttrs := in.CID, in.Purpose, in.Audience, in.ShareAttributes
+	if err := validatePredicates(in.SharePredicates); err != nil {
+		return "", time.Time{}, err
+	}
 	if !client.Can(auth.ActOTIIssue) {
 		return "", time.Time{}, ErrForbidden
 	}
@@ -118,14 +136,22 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 	if shareAttrs == nil {
 		shareAttrs = []string{}
 	}
+	preds := in.SharePredicates
+	if preds == nil {
+		preds = []Predicate{}
+	}
+	predsJSON, err := json.Marshal(preds)
+	if err != nil {
+		return "", time.Time{}, err
+	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO oti (jti, cid, purpose, audience, expires_at, share_attrs) VALUES ($1,$2,$3,$4,$5,$6)`,
-		claims.JTI, cid, purpose, audience, expiresAt, shareAttrs); err != nil {
+		`INSERT INTO oti (jti, cid, purpose, audience, expires_at, share_attrs, share_predicates) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		claims.JTI, cid, purpose, audience, expiresAt, shareAttrs, predsJSON); err != nil {
 		return "", time.Time{}, err
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
 		ClientID: client.ID, Action: "oti.issue", CID: cid,
-		Detail: map[string]any{"jti": claims.JTI, "purpose": purpose, "audience": audience, "share_attrs": shareAttrs},
+		Detail: map[string]any{"jti": claims.JTI, "purpose": purpose, "audience": audience, "share_attrs": shareAttrs, "share_predicates": preds},
 	}); err != nil {
 		return "", time.Time{}, fmt.Errorf("audit append: %w", err)
 	}
@@ -138,34 +164,50 @@ func (o *OTI) Issue(ctx context.Context, client *auth.Client, cid, purpose, audi
 // Verify checks signature, purpose, audience and expiry, atomically marks
 // the token USED, and returns the VERIFIER'S OWN scoped CID for the person -
 // the issuer's pseudonym never crosses the scope boundary (docs/DESIGN.md).
+// VerifyOutcome is the verifier's full view of a consumed handoff.
+type VerifyOutcome struct {
+	CID        string            `json:"cid"`
+	Shared     []string          `json:"shared,omitempty"`
+	Predicates []PredicateResult `json:"predicates,omitempty"`
+}
+
+// Verify keeps the pre-P2.3 signature; predicate consumers use VerifyFull.
 func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, audience string) (string, error) {
+	out, err := o.VerifyFull(ctx, client, token, purpose, audience)
+	if err != nil {
+		return "", err
+	}
+	return out.CID, nil
+}
+
+func (o *OTI) VerifyFull(ctx context.Context, client *auth.Client, token, purpose, audience string) (*VerifyOutcome, error) {
 	if !client.Can(auth.ActOTIVerify) {
-		return "", ErrForbidden
+		return nil, ErrForbidden
 	}
 	// The purpose cap applies to the verifier too: revoking a purpose from a
 	// client must also stop it consuming tokens for that purpose.
 	if !client.CanUse(purpose) {
-		return "", ErrPurposeNotAllowed
+		return nil, ErrPurposeNotAllowed
 	}
 	// You can only verify tokens addressed to you.
 	if audience != client.Scope {
-		return "", ErrAudienceMismatch
+		return nil, ErrAudienceMismatch
 	}
 
 	payload, err := crypto.PasetoPayload(token)
 	if err != nil {
-		return "", ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
 	var claims otiClaims
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
 	// kid is read pre-verification (necessarily), but only key versions the
 	// ring lists as live are ever tried - an attacker cannot point at
 	// arbitrary key names.
 	live, err := o.Ring.Versions(ctx, crypto.SigningKeyName)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	isLive := func() bool {
 		for _, v := range live {
@@ -181,30 +223,30 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 		// forged kids cannot turn this into a cache-busting vector at scale).
 		o.Ring.Invalidate()
 		if live, err = o.Ring.Versions(ctx, crypto.SigningKeyName); err != nil {
-			return "", err
+			return nil, err
 		}
 		if !isLive() {
-			return "", ErrTokenInvalid
+			return nil, ErrTokenInvalid
 		}
 	}
 	if _, err := o.Eng.VerifyToken(ctx, crypto.SigningKeyName+"/"+claims.KeyID, token); err != nil {
 		if errors.Is(err, crypto.ErrVerifyFailed) {
-			return "", ErrTokenInvalid
+			return nil, ErrTokenInvalid
 		}
-		return "", err // environment (keystore/signer down): surface as 5xx, not "invalid"
+		return nil, err // environment (keystore/signer down): surface as 5xx, not "invalid"
 	}
 	if claims.Audience != audience {
-		return "", ErrAudienceMismatch
+		return nil, ErrAudienceMismatch
 	}
 	if claims.Purpose != purpose {
-		return "", ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
 	exp, err := time.Parse(time.RFC3339, claims.Expires)
 	if err != nil {
-		return "", ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
 	if time.Now().After(exp) {
-		return "", ErrTokenExpired
+		return nil, ErrTokenExpired
 	}
 
 	// One transaction end to end: a failure anywhere rolls the row back to
@@ -212,7 +254,7 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 	// with the consumption or not at all.
 	tx, err := o.Pool.Begin(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -222,11 +264,12 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 	// consume a jti bound to different parameters.
 	var issuerCID string
 	var shareAttrs []string
+	var predsJSON []byte
 	err = tx.QueryRow(ctx,
 		`UPDATE oti SET status='USED', used_at=now(), used_by=$2
 		 WHERE jti=$1 AND cid=$3 AND purpose=$4 AND audience=$5
 		   AND status='VALID' AND expires_at > now()
-		 RETURNING cid, share_attrs`, claims.JTI, client.ID, claims.CID, purpose, audience).Scan(&issuerCID, &shareAttrs)
+		 RETURNING cid, share_attrs, share_predicates`, claims.JTI, client.ID, claims.CID, purpose, audience).Scan(&issuerCID, &shareAttrs, &predsJSON)
 	if err == pgx.ErrNoRows {
 		var status string
 		var expiresAt time.Time
@@ -235,49 +278,60 @@ func (o *OTI) Verify(ctx context.Context, client *auth.Client, token, purpose, a
 			claims.JTI, claims.CID, purpose, audience).Scan(&status, &expiresAt)
 		switch {
 		case serr == pgx.ErrNoRows:
-			return "", ErrTokenInvalid // signed but never persisted (or claims differ from the row): treat as forged
+			return nil, ErrTokenInvalid // signed but never persisted (or claims differ from the row): treat as forged
 		case serr != nil:
-			return "", serr
+			return nil, serr
 		case status == "USED":
-			return "", ErrTokenUsed
+			return nil, ErrTokenUsed
 		case status == "REVOKED":
 			// Erasure revokes outstanding tokens; indistinguishable from a
 			// forged token on purpose (no oracle for "this person was erased").
-			return "", ErrTokenInvalid
+			return nil, ErrTokenInvalid
 		default:
-			return "", ErrTokenExpired
+			return nil, ErrTokenExpired
 		}
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	// Map to the verifier's scope: same person, the verifier's own pseudonym.
 	var personID string
 	if err := tx.QueryRow(ctx,
 		`SELECT person_id FROM cids WHERE cid=$1`, issuerCID).Scan(&personID); err != nil {
-		return "", err
+		return nil, err
 	}
 	verifierCID, err := ensureCID(ctx, tx, personID, client.Scope)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	// Copy issuer-authorized attributes into the verifier-scope blob so
 	// delayed, just-in-time reads work without the verifier storing PII.
 	shared, err := o.shareIntoScope(ctx, tx, issuerCID, verifierCID, shareAttrs)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	// Predicate claims: evaluated against the ISSUER blob, results only -
+	// values never cross the scope boundary (P2.3 selective disclosure).
+	var preds []Predicate
+	if err := json.Unmarshal(predsJSON, &preds); err != nil {
+		return nil, err
+	}
+	predResults, err := o.evalPredicates(ctx, tx, issuerCID, preds)
+	if err != nil {
+		return nil, err
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
 		ClientID: client.ID, Action: "oti.verify", CID: verifierCID,
-		Detail: map[string]any{"jti": claims.JTI, "purpose": purpose, "audience": audience, "shared": shared},
+		Detail: map[string]any{"jti": claims.JTI, "purpose": purpose, "audience": audience,
+			"shared": shared, "predicates": predResults},
 	}); err != nil {
-		return "", fmt.Errorf("audit append: %w", err)
+		return nil, fmt.Errorf("audit append: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return "", err
+		return nil, err
 	}
-	return verifierCID, nil
+	return &VerifyOutcome{CID: verifierCID, Shared: shared, Predicates: predResults}, nil
 }
 
 // shareIntoScope copies the listed attributes from the issuer's blob into

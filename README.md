@@ -52,7 +52,7 @@ HTTP request as it goes.
 | Search encrypted PII by email/phone | keyed HMAC indexes | hash indexes | no | rarely |
 | GDPR: consent, access, erasure, portability, retention | built in, with signed erasure webhooks | built in | no | months of work |
 | Tamper-evident audit | hash chain + **RFC 3161 anchoring** (provable to an auditor offline) | Pro feature | audit log | rarely |
-| Attribute proof without the value (`age >= 18`) | roadmap (Phase 2) | no | no | no |
+| Attribute proof without the value (`age >= 18`) | **yes - predicate claims** | no | no | no |
 | Performance (same box, PostgreSQL 16) | **2,173 writes/s, 2,837 lookups/s** | 1,091 / 1,885 | n/a | ? |
 | License | **Apache-2.0, no limits** | MIT core + paid Pro | BSL | yours |
 
@@ -68,7 +68,9 @@ same-transaction audit record per operation*.
 - **OTI** - PASETO v4 signed, single-use, 5-minute handoff token bound to
   one purpose and one audience; atomically consumed. The only identity
   currency systems exchange. Optional issuer-approved attribute sharing
-  powers delayed flows (escalation e-mails) without the receiver storing PII.
+  powers delayed flows (escalation e-mails) without the receiver storing
+  PII, and **predicate claims** prove facts without revealing values:
+  the verifier learns `age >= 18: true`, never the birthdate.
 - **Lookup** - find a contact by email/phone via keyed HMAC search tokens;
   the database stores no searchable plaintext. `LOOKUP != AUTHENTICATION`.
 - **Attributes** - PII encrypted per scope (AES-256-GCM or

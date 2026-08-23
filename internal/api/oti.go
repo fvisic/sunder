@@ -5,19 +5,15 @@ import (
 	"time"
 
 	"github.com/fvisic/sunder/internal/auth"
+	"github.com/fvisic/sunder/internal/service"
 )
 
 func (s *Server) handleOTIIssue(w http.ResponseWriter, r *http.Request) {
-	in, ok := decode[struct {
-		CID             string   `json:"cid"`
-		Purpose         string   `json:"purpose"`
-		Audience        string   `json:"audience"`
-		ShareAttributes []string `json:"share_attributes"`
-	}](w, r)
+	in, ok := decode[service.IssueInput](w, r)
 	if !ok {
 		return
 	}
-	token, expiresAt, err := s.OTI.Issue(r.Context(), auth.FromContext(r.Context()), in.CID, in.Purpose, in.Audience, in.ShareAttributes)
+	token, expiresAt, err := s.OTI.IssueFull(r.Context(), auth.FromContext(r.Context()), in)
 	if err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)
@@ -37,11 +33,18 @@ func (s *Server) handleOTIVerify(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cid, err := s.OTI.Verify(r.Context(), auth.FromContext(r.Context()), in.Token, in.Purpose, in.Audience)
+	out, err := s.OTI.VerifyFull(r.Context(), auth.FromContext(r.Context()), in.Token, in.Purpose, in.Audience)
 	if err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"cid": cid})
+	resp := map[string]any{"cid": out.CID}
+	if len(out.Shared) > 0 {
+		resp["shared"] = out.Shared
+	}
+	if len(out.Predicates) > 0 {
+		resp["predicates"] = out.Predicates
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

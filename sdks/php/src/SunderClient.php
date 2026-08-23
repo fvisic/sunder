@@ -178,12 +178,18 @@ final class SunderClient
      *
      * @return array{token: string, expiresAt: string}
      */
-    public function issueOti(string $cid, string $purpose, string $audience, ?array $shareAttributes = null): array
+    public function issueOti(string $cid, string $purpose, string $audience, ?array $shareAttributes = null, ?array $sharePredicates = null): array
     {
         $body = ['cid' => $cid, 'purpose' => $purpose, 'audience' => $audience];
         if ($shareAttributes !== null && $shareAttributes !== []) {
             // Issuer-authorized attributes copied into the verifier's scope.
             $body['share_attributes'] = array_values($shareAttributes);
+        }
+        if ($sharePredicates !== null && $sharePredicates !== []) {
+            // Issuer-authorized predicate claims, e.g.
+            // [['attr' => 'birthdate', 'op' => 'age_gte', 'value' => 18]];
+            // the verifier receives booleans only, never the value.
+            $body['share_predicates'] = array_values($sharePredicates);
         }
         $raw = $this->request(
             'POST',
@@ -206,13 +212,23 @@ final class SunderClient
      */
     public function verifyOti(string $token, string $purpose, string $audience): string
     {
-        return $this->expectString(
-            $this->request(
-                'POST',
-                '/v1/oti/verify',
-                ['token' => $token, 'purpose' => $purpose, 'audience' => $audience]
-            ),
-            'cid'
+        return $this->expectString($this->verifyOtiFull($token, $purpose, $audience), 'cid');
+    }
+
+    /**
+     * Like verifyOti but returns the full result: ['cid' => ..., and when
+     * present 'shared' (copied attribute names) and 'predicates' (each
+     * ['attr','op','value','result','known']; known=false means the
+     * attribute was absent - NOT a failed check).
+     *
+     * @return array<string, mixed>
+     */
+    public function verifyOtiFull(string $token, string $purpose, string $audience): array
+    {
+        return $this->request(
+            'POST',
+            '/v1/oti/verify',
+            ['token' => $token, 'purpose' => $purpose, 'audience' => $audience]
         );
     }
 

@@ -146,10 +146,13 @@ def _map_error(status: int, body: bytes) -> SunderError:
 
 
 def _oti_body(cid: str, purpose: str, audience: str,
-              share_attributes: list[str] | None) -> dict:
+              share_attributes: list[str] | None,
+              share_predicates: list[dict] | None = None) -> dict:
     body = {"cid": cid, "purpose": purpose, "audience": audience}
     if share_attributes:
         body["share_attributes"] = list(share_attributes)
+    if share_predicates:
+        body["share_predicates"] = list(share_predicates)
     return body
 
 class SunderClient:
@@ -232,10 +235,17 @@ class SunderClient:
     # -- OTI ---------------------------------------------------------------------
 
     def issue_oti(self, cid: str, purpose: str, audience: str,
-                  share_attributes: list[str] | None = None) -> dict:
-        """Issue a one-time identifier; returns {"token", "expires_at"}."""
+                  share_attributes: list[str] | None = None,
+                  share_predicates: list[dict] | None = None) -> dict:
+        """Issue a one-time identifier; returns {"token", "expires_at"}.
+
+        share_predicates: issuer-authorized claims evaluated at verification
+        against the issuer's data, e.g. [{"attr": "birthdate",
+        "op": "age_gte", "value": 18}]. The verifier receives booleans only.
+        """
         return self._request("POST", "/v1/oti",
-                             body=_oti_body(cid, purpose, audience, share_attributes),
+                             body=_oti_body(cid, purpose, audience,
+                                            share_attributes, share_predicates),
                              retry=True)
 
     def verify_oti(self, token: str, purpose: str, audience: str) -> str:
@@ -244,9 +254,16 @@ class SunderClient:
         NEVER blind-retried: the token is single-use, so a retry after an
         ambiguous network failure could consume-then-fail as TokenUsed.
         """
+        return self.verify_oti_full(token, purpose, audience)["cid"]
+
+    def verify_oti_full(self, token: str, purpose: str, audience: str) -> dict:
+        """Like verify_oti but returns the full result: {"cid", and when
+        present "shared" (copied attribute names) and "predicates" (each
+        {"attr","op","value","result","known"}; known=False means the
+        attribute was absent - NOT a failed check)."""
         return self._request("POST", "/v1/oti/verify",
                              body={"token": token, "purpose": purpose,
-                                   "audience": audience})["cid"]
+                                   "audience": audience})
 
     # -- ops -----------------------------------------------------------------
 

@@ -123,6 +123,20 @@ CID, then fetches the shared attribute just-in-time (purpose- and
 consent-checked, audited) when the delayed action fires. Tokens cannot be
 "saved for later" - they expire in five minutes by design.
 
+`share_predicates` (optional) is selective disclosure: issuer-authorized
+claims evaluated against the **issuer's** data at verification, e.g.
+
+```json
+{"cid": "CID-...", "purpose": "age_check", "audience": "webshop",
+ "share_predicates": [{"attr": "birthdate", "op": "age_gte", "value": 18}]}
+```
+
+The verifier receives booleans only - the birthdate itself never crosses
+the scope boundary and nothing is copied into the verifier's blob.
+Supported ops: `age_gte` (attribute read as an ISO date `YYYY-MM-DD` or
+RFC 3339), `exists`. At most 8 predicates per token; unknown ops are
+rejected at issue time.
+
 ### POST /v1/oti/verify - verify and consume
 Action: `oti.verify`. The caller's scope must equal `audience` - you can
 only verify tokens addressed to you.
@@ -131,8 +145,14 @@ only verify tokens addressed to you.
 {"token": "v4.public...", "purpose": "create_order", "audience": "erp"}
 ```
 
-`200 {"cid": "CID-..."}` - **the verifier's own scoped CID** for the person
-(auto-issued if absent); the issuer's pseudonym never crosses the scope
+`200 {"cid": "CID-...", "shared": [...], "predicates": [...]}` - **the
+verifier's own scoped CID** for the person (auto-issued if absent), the
+attribute names copied via `share_attributes` (when any), and the evaluated
+predicate results (when the token carried any), each
+`{"attr", "op", "value", "result", "known"}`. `known: false` means the
+attribute was absent or unparseable - deliberately distinct from a failed
+check, so "we do not know the birthdate" never reads as "under 18". The
+issuer's pseudonym never crosses the scope
 boundary. Single use is enforced by an atomic `VALID -> USED` database
 transition, not just the signature. Errors: `token_invalid` (400, bad
 signature/purpose/shape), `audience_mismatch` (403), `token_used` (409),

@@ -138,6 +138,24 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(cid, "CID-erp")
         self.assertEqual(self.server.requests[0]["path"], "/v1/oti/verify")
 
+    def test_predicates_roundtrip(self):
+        self.queue((201, {"token": "v4.public.x", "expires_at": "2026-01-01T00:00:00Z"}))
+        self.client.issue_oti("CID-1", "age_check", "webshop",
+                              share_predicates=[{"attr": "birthdate",
+                                                 "op": "age_gte", "value": 18}])
+        self.assertEqual(self.server.requests[0]["body"]["share_predicates"],
+                         [{"attr": "birthdate", "op": "age_gte", "value": 18}])
+
+        self.server.requests.clear()
+        self.queue((200, {"cid": "CID-web",
+                          "predicates": [{"attr": "birthdate", "op": "age_gte",
+                                          "value": 18, "result": True,
+                                          "known": True}]}))
+        out = self.client.verify_oti_full("v4.public.x", "age_check", "webshop")
+        self.assertEqual(out["cid"], "CID-web")
+        self.assertTrue(out["predicates"][0]["result"])
+        self.assertTrue(out["predicates"][0]["known"])
+
     def test_health(self):
         self.queue((200, "ok"))
         self.assertEqual(self.client.health(), {"status": "ok"})

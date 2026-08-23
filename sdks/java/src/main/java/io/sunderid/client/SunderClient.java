@@ -174,12 +174,27 @@ public final class SunderClient {
      * attributes are copied into the verifier's scope at verification.
      */
     public OtiResult issueOti(String cid, String purpose, String audience, java.util.List<String> shareAttributes) {
+        return issueOti(cid, purpose, audience, shareAttributes, null);
+    }
+
+    /**
+     * Variant with predicate claims: each map is
+     * {"attr": "birthdate", "op": "age_gte", "value": 18} or
+     * {"attr": "tier", "op": "exists"}. Evaluated against the issuer's data
+     * at verification; the verifier receives booleans only, never the value.
+     */
+    public OtiResult issueOti(String cid, String purpose, String audience,
+                              java.util.List<String> shareAttributes,
+                              java.util.List<Map<String, Object>> sharePredicates) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("cid", cid);
         body.put("purpose", purpose);
         body.put("audience", audience);
         if (shareAttributes != null && !shareAttributes.isEmpty()) {
             body.put("share_attributes", shareAttributes);
+        }
+        if (sharePredicates != null && !sharePredicates.isEmpty()) {
+            body.put("share_predicates", sharePredicates);
         }
         Map<String, Object> raw = request("POST", "/v1/oti", body, true);
         return new OtiResult(requireString(raw, "token"), requireString(raw, "expires_at"));
@@ -192,12 +207,22 @@ public final class SunderClient {
      * On TokenUsed after a failure, the caller decides how to reconcile.
      */
     public String verifyOti(String token, String purpose, String audience) {
+        return requireString(verifyOtiFull(token, purpose, audience), "cid");
+    }
+
+    /**
+     * Like {@link #verifyOti} but returns the full result map: "cid", and
+     * when present "shared" (copied attribute names) and "predicates" (each
+     * a map with attr/op/value/result/known; known=false means the attribute
+     * was absent - NOT a failed check).
+     */
+    public Map<String, Object> verifyOtiFull(String token, String purpose, String audience) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("token", token);
         body.put("purpose", purpose);
         body.put("audience", audience);
         // Single-use token - see method doc: never blind-retried.
-        return requireString(request("POST", "/v1/oti/verify", body, false), "cid");
+        return request("POST", "/v1/oti/verify", body, false);
     }
 
     // -- ops -------------------------------------------------------------------

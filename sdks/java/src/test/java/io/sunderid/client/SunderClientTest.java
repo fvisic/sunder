@@ -178,6 +178,7 @@ public final class SunderClientTest {
         run("getAttribute success + query encoding", SunderClientTest::testGetAttribute);
         run("issueOti success", SunderClientTest::testIssueOti);
         run("verifyOti success", SunderClientTest::testVerifyOti);
+        run("predicate claims roundtrip", SunderClientTest::testPredicateClaims);
         run("health success (unauthenticated)", SunderClientTest::testHealth);
         run("health empty body defaults to ok", SunderClientTest::testHealthEmptyBody);
         run("health failure maps taxonomy", SunderClientTest::testHealthFailure);
@@ -318,6 +319,24 @@ public final class SunderClientTest {
         assertEquals("/v1/oti/verify", req.path(), "path");
         assertEquals(Map.of("token", "v4.public.xyz", "purpose", "create_order", "audience", "erp"),
                 Json.parseObject(req.body()), "body");
+    }
+
+    private static void testPredicateClaims() {
+        mock.enqueue(201, "{\"token\":\"v4.public.p\",\"expires_at\":\"2026-01-01T00:00:00Z\"}");
+        client.issueOti("CID-1", "age_check", "webshop", null,
+                java.util.List.of(new java.util.LinkedHashMap<>(Map.of(
+                        "attr", "birthdate", "op", "age_gte", "value", 18))));
+        Recorded issueReq = mock.only();
+        Object preds = Json.parseObject(issueReq.body()).get("share_predicates");
+        assertEquals(true, preds != null, "share_predicates sent");
+
+        mock.enqueue(200, "{\"cid\":\"CID-web\",\"predicates\":[{\"attr\":\"birthdate\",\"op\":\"age_gte\",\"value\":18,\"result\":true,\"known\":true}]}");
+        Map<String, Object> out = client.verifyOtiFull("v4.public.p", "age_check", "webshop");
+        assertEquals("CID-web", out.get("cid"), "cid");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> first = (Map<String, Object>) ((java.util.List<Object>) out.get("predicates")).get(0);
+        assertEquals(Boolean.TRUE, first.get("result"), "predicate result");
+        assertEquals(Boolean.TRUE, first.get("known"), "predicate known");
     }
 
     private static void testHealth() {
