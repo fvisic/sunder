@@ -53,16 +53,17 @@ HTTP request as it goes.
 | GDPR: consent, access, erasure, portability, retention | built in, with signed erasure webhooks | built in | no | months of work |
 | Tamper-evident audit | hash chain + **RFC 3161 anchoring** (provable to an auditor offline) | Pro feature | audit log | rarely |
 | Attribute proof without the value (`age >= 18`) | **yes - predicate claims** | no | no | no |
-| Performance (same box, PostgreSQL 16, measured interleaved) | **1,650 writes/s, 2,160 lookups/s** | 838 / 1,409 | n/a | ? |
+| Performance (same box, PostgreSQL 16, measured interleaved) | **2,729 writes/s, 3,439 lookups/s** | 1,295 / 2,032 | n/a | ? |
 | License | **Apache-2.0, no limits** | MIT core + paid Pro | BSL | yours |
 
 The benchmark harness and raw results are in [`benchmark/`](benchmark/) -
 reproduce them with one script. In the latest head-to-head (both systems
-measured in the same window, medians of three rounds) Sunder is **+97% on
-writes, +53% on lookups and +30% on reads**, with p99 latency 1.6-2.6x
-lower - *while writing a hash-chained audit record per operation*. The
-benchmark README carries the full numbers, the per-run spread, and what the
-measurement does and does not establish.
+measured in the same window, five interleaved rounds plus a clean 5,000-
+request pass, zero errors) Sunder is **+111% on writes, +69% on lookups and
++61% on reads**, with p99 latency 2.7-3.4x lower - *while writing a
+hash-chained audit record per operation*. The benchmark README carries the
+full numbers, the per-run spread, and what the measurement does and does
+not establish.
 
 ## What you get
 
