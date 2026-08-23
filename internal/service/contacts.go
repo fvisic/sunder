@@ -266,37 +266,7 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet
 		return "", err
 	}
 
-	// Merge into the caller-scope blob: new values win, old ones survive.
-	var oldBlob []byte
-	var oldKeyID, oldAlg string
-	err = tx.QueryRow(ctx,
-		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1`, cid).Scan(&oldBlob, &oldKeyID, &oldAlg)
-	if err != nil {
-		return "", err
-	}
-	if len(oldBlob) > 0 {
-		old, err := c.PII.Decrypt(ctx, cid, oldBlob, oldKeyID, oldAlg)
-		if err != nil {
-			return "", err
-		}
-		for k, v := range attrs {
-			old[k] = v
-		}
-		attrs = old
-	}
-	// Always re-encrypt under the newest ACTIVE pii-kek: rotation completes
-	// on touch, and old rows stay decryptable via their stored pii_key_id.
-	keyID, err := c.Ring.Newest(ctx, crypto.KeyPIIKEK)
-	if err != nil {
-		return "", err
-	}
-	blob, err := c.PII.Encrypt(ctx, cid, keyID, attrs)
-	if err != nil {
-		return "", err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4, updated_at=now() WHERE cid=$1`,
-		cid, blob, keyID, c.PII.Algorithm()); err != nil {
+	if err := c.mergeIntoBlob(ctx, tx, cid, attrs); err != nil {
 		return "", err
 	}
 	// Audit inside the same transaction: the registration and its record
@@ -461,4 +431,42 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 		return "", ErrNotFound
 	}
 	return val, nil
+}
+
+// mergeIntoBlob merges attrs into the cid's scope blob: new values win, old
+// ones survive, and the result is always re-encrypted under the newest
+// ACTIVE pii-kek and the configured algorithm - rotation and algorithm
+// migration complete on touch, old rows stay decryptable via their stored
+// pii_key_id/pii_alg.
+func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid string, attrs map[string]string) error {
+	var oldBlob []byte
+	var oldKeyID, oldAlg string
+	err := tx.QueryRow(ctx,
+		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1`,
+		cid).Scan(&oldBlob, &oldKeyID, &oldAlg)
+	if err != nil {
+		return err
+	}
+	if len(oldBlob) > 0 {
+		old, err := c.PII.Decrypt(ctx, cid, oldBlob, oldKeyID, oldAlg)
+		if err != nil {
+			return err
+		}
+		for k, v := range attrs {
+			old[k] = v
+		}
+		attrs = old
+	}
+	keyID, err := c.Ring.Newest(ctx, crypto.KeyPIIKEK)
+	if err != nil {
+		return err
+	}
+	blob, err := c.PII.Encrypt(ctx, cid, keyID, attrs)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4, updated_at=now() WHERE cid=$1`,
+		cid, blob, keyID, c.PII.Algorithm())
+	return err
 }

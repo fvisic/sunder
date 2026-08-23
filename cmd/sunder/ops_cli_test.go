@@ -345,3 +345,33 @@ func TestClientRotateSecretCLIAndTTL(t *testing.T) {
 		t.Fatalf("rotations must be audited, found %d records", n)
 	}
 }
+
+func TestIssuerCLI(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	pub := strings.Repeat("ab", 32)
+	if err := issuerCmd(ctx, st, []string{"add", "-id", "gov.wallet", "-pubkey", pub, "-claims", "age_gte_18"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := issuerCmd(ctx, st, []string{"list"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := issuerCmd(ctx, st, []string{"add", "-id", "gov.wallet", "-pubkey", pub}); err == nil {
+		t.Fatal("duplicate issuer must error")
+	}
+	if err := issuerCmd(ctx, st, []string{"add", "-id", "x", "-pubkey", "zz"}); err == nil {
+		t.Fatal("bad pubkey must error")
+	}
+	if err := issuerCmd(ctx, st, []string{"remove", "-id", "gov.wallet"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := issuerCmd(ctx, st, []string{"remove", "-id", "gov.wallet"}); err == nil {
+		t.Fatal("removing an absent issuer must error")
+	}
+	if err := issuerCmd(ctx, st, []string{"wat"}); err == nil {
+		t.Fatal("unknown subcommand must error")
+	}
+	if err := issuerCmd(ctx, st, nil); err == nil {
+		t.Fatal("no subcommand must error")
+	}
+}

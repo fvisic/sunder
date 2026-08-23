@@ -137,6 +137,23 @@ Supported ops: `age_gte` (attribute read as an ISO date `YYYY-MM-DD` or
 RFC 3339), `exists`. At most 8 predicates per token; unknown ops are
 rejected at issue time.
 
+### POST /v1/claims/external - accept an issuer-signed claim envelope
+Action: `claims.external`; `cid` must belong to the caller's scope.
+
+```json
+{"cid": "CID-...", "envelope": "v4.public..."}
+```
+
+The envelope is a PASETO v4.public token signed by a REGISTERED issuer
+(`sunder issuer add`, see docs/DESIGN-EUDI-GATEWAY.md) whose payload is
+`{"iss": "gov.wallet", "claims": {"age_gte_18": "true"}, "iat": ..., "exp": ...}`.
+Accepted only when the issuer is trusted, the signature verifies, `exp` is
+in the future and every claim is in the issuer's allowlist. Claims are
+stored as normal attributes with provenance in the name
+(`age_gte_18@gov.wallet`), audited.
+
+`200 {"stored": ["age_gte_18@gov.wallet"]}`
+
 ### POST /v1/oti/verify - verify and consume
 Action: `oti.verify`. The caller's scope must equal `audience` - you can
 only verify tokens addressed to you.

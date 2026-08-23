@@ -265,6 +265,50 @@ paths:
         '500':
           $ref: '#/components/responses/Internal'
 
+  /v1/claims/external:
+    post:
+      tags: [contacts]
+      operationId: submitExternalClaims
+      summary: Accept an issuer-signed claim envelope (federation)
+      description: |
+        Action `claims.external`. Verifies a PASETO v4.public envelope from
+        a REGISTERED external issuer (trust registry, `sunder issuer add`)
+        and merges its claims into the caller-scope blob with provenance
+        (`<claim>@<issuer>`). Rejected unless the issuer is trusted, the
+        signature verifies against the registered key, `exp` is in the
+        future and every claim name is in the issuer's allowlist.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cid, envelope]
+              properties:
+                cid: {$ref: '#/components/schemas/Cid'}
+                envelope:
+                  type: string
+                  description: PASETO v4.public token signed by the registered issuer; payload {"iss", "claims", "iat", "exp"}.
+      responses:
+        '200':
+          description: Claims stored with provenance.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stored]
+                properties:
+                  stored:
+                    type: array
+                    items: {type: string}
+                    description: Attribute names as stored (claim@issuer).
+        '400':
+          description: Malformed or expired envelope, invalid signature, or claim-name limits exceeded.
+        '403':
+          description: Missing claims.external action, untrusted issuer, or claim outside the issuer's allowlist.
+        '404':
+          description: CID absent from the caller's scope.
+
   /v1/oti/verify:
     post:
       tags: [oti]

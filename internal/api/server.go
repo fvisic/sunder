@@ -131,6 +131,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("POST /v1/lookup", s.handleLookup)
 		v1.HandleFunc("POST /v1/oti", s.handleOTIIssue)
 		v1.HandleFunc("POST /v1/oti/verify", s.handleOTIVerify)
+		v1.HandleFunc("POST /v1/claims/external", s.handleExternalClaims)
 		v1.HandleFunc("POST /v1/consent", s.handleConsentSet)
 		v1.HandleFunc("GET /v1/consent/{cid}", s.handleConsentList)
 		v1.HandleFunc("GET /v1/dsr/access", s.handleDSRAccess)

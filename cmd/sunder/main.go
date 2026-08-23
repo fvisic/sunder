@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
@@ -46,10 +47,10 @@ func main() {
 
 func run(cmd string, args []string) error {
 	switch cmd {
-	case "serve", "migrate", "client", "keys", "anchor", "verify-audit", "webhook", "retention", "dsr", "signer":
+	case "serve", "migrate", "client", "keys", "anchor", "verify-audit", "webhook", "retention", "dsr", "signer", "issuer":
 	default:
 		// Fail on typos before requiring config or a live database.
-		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr, signer)", cmd)
+		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr, signer, issuer)", cmd)
 	}
 
 	ctx, stop := signalContext()
@@ -99,6 +100,8 @@ func run(cmd string, args []string) error {
 		return retentionCmd(ctx, st, args)
 	case "dsr":
 		return dsrCmd(ctx, cfg, st, args)
+	case "issuer":
+		return issuerCmd(ctx, st, args)
 	default:
 		return clientCmd(ctx, st, args)
 	}
@@ -495,7 +498,7 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 		auth.ActContactsRegister: true, auth.ActScopesIssue: true, auth.ActLookup: true,
 		auth.ActAttributesRead: true, auth.ActOTIIssue: true, auth.ActOTIVerify: true,
 		auth.ActConsentManage: true, auth.ActDSRAccess: true, auth.ActDSRErase: true,
-		auth.ActDSRExport: true,
+		auth.ActDSRExport: true, auth.ActClaimsExternal: true,
 	}
 	acts := splitCSV(*actions)
 	for _, a := range acts {
@@ -612,4 +615,83 @@ func clientRotateCmd(ctx context.Context, st *store.Store, args []string) error 
 		fmt.Printf("expires: %s\n", expiresAt.UTC().Format(time.RFC3339))
 	}
 	return nil
+}
+
+// issuerCmd manages the P2.4 external-issuer trust registry.
+func issuerCmd(ctx context.Context, st *store.Store, args []string) error {
+	if err := st.Migrate(ctx); err != nil {
+		return err
+	}
+	if len(args) < 1 {
+		return fmt.Errorf("usage: sunder issuer add -id <id> -pubkey <hex32> [-claims a,b] | issuer list | issuer remove -id <id>")
+	}
+	switch args[0] {
+	case "add":
+		fs := flag.NewFlagSet("issuer add", flag.ContinueOnError)
+		id := fs.String("id", "", "issuer id (required)")
+		pub := fs.String("pubkey", "", "hex-encoded 32-byte Ed25519 public key (required)")
+		claims := fs.String("claims", "", "comma-separated claim names this issuer may assert; empty = any")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		key, err := hex.DecodeString(*pub)
+		if err != nil || len(key) != 32 || *id == "" {
+			return fmt.Errorf("-id and a 64-hex-char -pubkey are required")
+		}
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO trusted_issuers (issuer_id, public_key, allowed_claims, added_by) VALUES ($1,$2,$3,'operator')`,
+			*id, key, splitCSV(*claims)); err != nil {
+			return err
+		}
+		if err := audit.Append(ctx, st.Pool, audit.Entry{
+			ClientID: "operator", Action: "issuer.add",
+			Detail: map[string]any{"issuer": *id, "claims": splitCSV(*claims)},
+		}); err != nil {
+			return err
+		}
+		fmt.Printf("issuer %s registered\n", *id)
+		return nil
+	case "list":
+		rows, err := st.Pool.Query(ctx,
+			`SELECT issuer_id, encode(public_key,'hex'), allowed_claims, created_at FROM trusted_issuers ORDER BY issuer_id`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, pub string
+			var claims []string
+			var created time.Time
+			if err := rows.Scan(&id, &pub, &claims, &created); err != nil {
+				return err
+			}
+			fmt.Printf("%-24s %s claims=%v added=%s\n", id, pub[:16]+"...", claims, created.Format("2006-01-02"))
+		}
+		return rows.Err()
+	case "remove":
+		fs := flag.NewFlagSet("issuer remove", flag.ContinueOnError)
+		id := fs.String("id", "", "issuer id (required)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *id == "" {
+			return fmt.Errorf("-id is required")
+		}
+		tag, err := st.Pool.Exec(ctx, `DELETE FROM trusted_issuers WHERE issuer_id=$1`, *id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("issuer %q not found", *id)
+		}
+		if err := audit.Append(ctx, st.Pool, audit.Entry{
+			ClientID: "operator", Action: "issuer.remove", Detail: map[string]any{"issuer": *id},
+		}); err != nil {
+			return err
+		}
+		fmt.Printf("issuer %s removed\n", *id)
+		return nil
+	default:
+		return fmt.Errorf("unknown issuer subcommand %q", args[0])
+	}
 }
