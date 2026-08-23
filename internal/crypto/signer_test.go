@@ -371,3 +371,71 @@ func TestSignerRejectsWrongProtocolVersion(t *testing.T) {
 		t.Fatalf("expected a version rejection, got %+v", resp)
 	}
 }
+
+// A signer that accepts the request and dies before replying: the pooled
+// connection is retried once on a fresh dial, so a restart mid-request does
+// not surface as a 5xx to the caller.
+func TestRemoteEngineRetriesLostResponse(t *testing.T) {
+	dir, err := os.MkdirTemp("", "sgn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := NewLocalEngine(&autoKS{inner: &FileKeystore{Dir: t.TempDir()}})
+	var mu sync.Mutex
+	// Serve the first request normally (that pools a connection), then die
+	// mid-request on the second: only a POOLED connection is retried.
+	served := 0
+	dropNth := 2
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			// Loop per connection, like the real signer, so a pooled
+			// connection stays usable between requests.
+			go func(c net.Conn) {
+				defer c.Close()
+				for {
+					var req signerReq
+					if err := readFrame(c, &req); err != nil {
+						return
+					}
+					mu.Lock()
+					served++
+					dropThis := served == dropNth
+					mu.Unlock()
+					if dropThis {
+						return // read the request, then die before replying
+					}
+					out, err := eng.MAC(context.Background(), req.Key, req.Data)
+					resp := signerResp{OK: err == nil, Out: out}
+					if err != nil {
+						resp.Error = err.Error()
+					}
+					if err := writeFrame(c, resp); err != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+	t.Cleanup(func() { _ = l.Close() })
+
+	r := NewRemoteEngine(sock)
+	// Warm the pool so the next call uses a POOLED connection (only those
+	// are retried).
+	if _, err := r.MAC(context.Background(), "hmac-email/v1", []byte("warm")); err != nil {
+		t.Fatalf("warm-up must succeed: %v", err)
+	}
+	if _, err := r.MAC(context.Background(), "hmac-email/v1", []byte("after")); err != nil {
+		t.Fatalf("a pooled connection must be retried: %v", err)
+	}
+}

@@ -103,25 +103,21 @@ func (p *Portal) Start(ctx context.Context, email string) error {
 			return err
 		}
 	}
-	if err := audit.Append(ctx, p.GDPR.Pool, audit.Entry{
-		ClientID: "portal", Action: "portal.start",
-		// No "delivered" claim here: delivery is the worker's outcome to
-		// record (review N15). Nothing about the address is logged - the
-		// audit chain must not become the enumeration oracle either.
-		Detail: map[string]any{"queued": found},
-	}); err != nil {
-		return err
-	}
+	// NO audit row in this request path, deliberately, for two reasons:
+	//
+	//   - every audit append takes the global advisory lock that serialises
+	//     all audit writes, and this endpoint is UNAUTHENTICATED: writing
+	//     here lets anyone serialise the product's whole write path
+	//     (review P1);
+	//   - a row whose presence or content depends on whether the address
+	//     exists is an enumeration oracle for anyone who can read the
+	//     chain and time their own probe (review P2).
+	//
+	// Accountability is not lost: the outbox worker records
+	// portal.mail.delivered / .failed / .no_mailer for every queued mail,
+	// and portal.login for every redeemed token. What is not recorded is
+	// the failed guess - which is exactly the part that must not be.
 	if !found {
-		return nil
-	}
-	// Per-address throttle: one requester must not be able to mail-bomb a
-	// chosen victim, and each send would otherwise mint another live token.
-	allowed, err := p.allowEmailSend(ctx, normalized)
-	if err != nil {
-		return err
-	}
-	if !allowed {
 		return nil
 	}
 	token, err := crypto.NewClientSecret()
@@ -134,6 +130,17 @@ func (p *Portal) Start(ctx context.Context, email string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The per-address throttle is counted INSIDE the transaction that mints
+	// the token: counted outside, a rolled-back transaction still burned a
+	// send, and three of those locked a citizen out for 15 minutes with an
+	// empty inbox (review P5).
+	allowed, err := p.allowEmailSend(ctx, tx, normalized)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return nil
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO portal_tokens (token_hash, person_id, kind, expires_at) VALUES ($1,$2,'login',$3)`,
 		hashToken(token), personID, expires); err != nil {
@@ -147,7 +154,7 @@ func (p *Portal) Start(ctx context.Context, email string) error {
 
 // allowEmailSend permits at most portalSendsPerWindow login mails per
 // address per window (N9: there was no per-address limit at all).
-func (p *Portal) allowEmailSend(ctx context.Context, normalized string) (bool, error) {
+func (p *Portal) allowEmailSend(ctx context.Context, tx pgx.Tx, normalized string) (bool, error) {
 	// A KEYED token, like every other identifier index in this system: a
 	// bare sha256 of an address is dictionary-attackable, which would turn
 	// this throttle table into a list of registered addresses (probe C).
@@ -161,7 +168,7 @@ func (p *Portal) allowEmailSend(ctx context.Context, normalized string) (bool, e
 	}
 	key := []byte(tok)
 	var sends int
-	err = p.GDPR.Pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO portal_email_throttle (email_token, window_start, sends)
 		 VALUES ($1, now(), 1)
 		 ON CONFLICT (email_token) DO UPDATE SET
@@ -213,9 +220,19 @@ func (p *Portal) enqueueMail(ctx context.Context, tx pgx.Tx, kind, email, token 
 // (or once the token has expired) is the row abandoned. Runs on the same
 // ticker as the erasure webhook worker.
 func (p *Portal) DeliverPendingMail(ctx context.Context) (int, error) {
-	rows, err := p.GDPR.Pool.Query(ctx,
+	// CLAIM the rows: the worker runs in every replica (the chart defaults
+	// to two), so a plain SELECT ... WHERE status='PENDING' had every
+	// replica mail every link (review P3). SKIP LOCKED lets replicas work
+	// disjoint batches; the transaction holds the claim until the outcome
+	// is recorded.
+	claim, err := p.GDPR.Pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = claim.Rollback(ctx) }()
+	rows, err := claim.Query(ctx,
 		`SELECT id, kind, payload, key_id, alg, expires_at, attempts FROM portal_outbox
-		 WHERE status='PENDING' ORDER BY id LIMIT 100`)
+		 WHERE status='PENDING' ORDER BY id LIMIT 100 FOR UPDATE SKIP LOCKED`)
 	if err != nil {
 		return 0, err
 	}
@@ -239,6 +256,21 @@ func (p *Portal) DeliverPendingMail(ctx context.Context) (int, error) {
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	// Mark the batch CLAIMED inside the same transaction, so releasing the
+	// row locks does not hand the same rows to another replica.
+	if len(items) > 0 {
+		ids := make([]int64, 0, len(items))
+		for _, it := range items {
+			ids = append(ids, it.id)
+		}
+		if _, err := claim.Exec(ctx,
+			`UPDATE portal_outbox SET status='SENDING' WHERE id = ANY($1)`, ids); err != nil {
+			return 0, err
+		}
+	}
+	if err := claim.Commit(ctx); err != nil {
 		return 0, err
 	}
 
@@ -270,7 +302,8 @@ func (p *Portal) DeliverPendingMail(ctx context.Context) (int, error) {
 				continue
 			}
 			if _, err := p.GDPR.Pool.Exec(ctx,
-				`UPDATE portal_outbox SET attempts=$2 WHERE id=$1`, it.id, attempts); err != nil {
+				`UPDATE portal_outbox SET attempts=$2, status='PENDING' WHERE id=$1`,
+				it.id, attempts); err != nil {
 				continue
 			}
 		}
@@ -628,7 +661,14 @@ func PrunePortal(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 		`DELETE FROM portal_tokens WHERE expires_at < now() OR used_at IS NOT NULL`,
 		`DELETE FROM portal_tokens pt USING persons p
 		   WHERE p.id = pt.person_id AND p.erased_at IS NOT NULL`,
-		`DELETE FROM portal_outbox WHERE status <> 'PENDING' AND created_at < now() - interval '7 days'`,
+		`DELETE FROM portal_outbox WHERE status NOT IN ('PENDING','SENDING') AND created_at < now() - interval '7 days'`,
+		// A PENDING row whose token has expired can never be useful: an
+		// unreachable mailer would otherwise grow this table without bound
+		// (review P4).
+		`DELETE FROM portal_outbox WHERE status='PENDING' AND expires_at < now()`,
+		// A claim left behind by a crashed worker returns to the queue.
+		`UPDATE portal_outbox SET status='PENDING'
+		   WHERE status='SENDING' AND created_at < now() - interval '10 minutes'`,
 		`DELETE FROM portal_email_throttle WHERE window_start < now() - interval '1 day'`,
 	} {
 		tag, err := pool.Exec(ctx, q)

@@ -438,9 +438,32 @@ func TestPortalClientIPResolution(t *testing.T) {
 		t.Fatalf("an unconfigured header must be ignored: %q", got)
 	}
 
+	// The RIGHT-most entry is the one our proxy appended; the left-most is
+	// caller-supplied, so trusting it hands every requester a fresh bucket
+	// (review N9).
 	trusting := &Server{Cfg: config.Config{PortalClientIPHeader: "X-Forwarded-For"}}
-	if got := trusting.portalClientIP(req); got != "203.0.113.9" {
-		t.Fatalf("left-most XFF entry expected: %q", got)
+	if got := trusting.portalClientIP(req); got != "10.0.0.1" {
+		t.Fatalf("right-most XFF entry expected: %q", got)
+	}
+	// With one extra trusted hop, skip one more from the right.
+	twoHops := &Server{Cfg: config.Config{
+		PortalClientIPHeader: "X-Forwarded-For", PortalTrustedProxyHops: 1}}
+	if got := twoHops.portalClientIP(req); got != "203.0.113.9" {
+		t.Fatalf("one trusted hop must skip the last entry: %q", got)
+	}
+	// More hops than entries clamps rather than panicking.
+	manyHops := &Server{Cfg: config.Config{
+		PortalClientIPHeader: "X-Forwarded-For", PortalTrustedProxyHops: 99}}
+	if got := manyHops.portalClientIP(req); got != "203.0.113.9" {
+		t.Fatalf("hop count must clamp: %q", got)
+	}
+	// A spoofed single-entry header from a direct caller yields that entry
+	// (the proxy is expected to overwrite it - documented in CONFIG.md).
+	spoof := httptest.NewRequest("POST", "/portal/api/start", nil)
+	spoof.RemoteAddr = "198.51.100.5:1"
+	spoof.Header.Set("X-Forwarded-For", "1.2.3.4")
+	if got := trusting.portalClientIP(spoof); got != "1.2.3.4" {
+		t.Fatalf("single entry: %q", got)
 	}
 	// Header configured but absent: fall back to RemoteAddr.
 	bare := httptest.NewRequest("POST", "/portal/api/start", nil)

@@ -24,6 +24,9 @@ spec:
           args: ["serve"]
           ports:
             - {containerPort: 8080, name: http}
+            {{- if and .Values.portal.enabled .Values.portal.listenPort }}
+            - {containerPort: {{ .Values.portal.listenPort }}, name: portal}
+            {{- end }}
           env: {{- include "sunder.env" . | nindent 12 }}
           {{- if .Values.tls.mtlsSecretName }}
           # mTLS: kubelet HTTPS probes present no client certificate, and a
@@ -94,3 +97,6 @@ spec:
   selector: {{- include "sunder.labels" . | nindent 4 }}
   ports:
     - {port: 8080, targetPort: http, name: http}
+    {{- if and .Values.portal.enabled .Values.portal.listenPort }}
+    - {port: {{ .Values.portal.listenPort }}, targetPort: portal, name: portal}
+    {{- end }}

@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/service"
@@ -475,5 +477,127 @@ func TestPortalOutboxAbandonsUnopenablePayload(t *testing.T) {
 	}
 	if n, err := p.DeliverPendingMail(ctx); err != nil || n != 0 {
 		t.Fatalf("malformed payload: %d %v", n, err)
+	}
+}
+
+// P3: two workers running concurrently (as replicas do) must not both
+// deliver the same queued mail.
+func TestPortalOutboxNoDoubleSendAcrossWorkers(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	e.register(t)
+	p := &service.Portal{GDPR: e.gdpr, Contacts: e.svc}
+
+	var mu sync.Mutex
+	var sends int
+	mailer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sends++
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond) // widen the window
+		w.WriteHeader(200)
+	}))
+	defer mailer.Close()
+	if _, err := e.admin.Pool.Exec(ctx,
+		`INSERT INTO webhooks (scope, url, secret) VALUES ('_portal', $1, 's')`, mailer.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(ctx, "fault@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two "replicas" sweep at the same time.
+	var wg sync.WaitGroup
+	delivered := make([]int, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			n, err := p.DeliverPendingMail(ctx)
+			if err != nil {
+				t.Errorf("worker %d: %v", i, err)
+			}
+			delivered[i] = n
+		}(i)
+	}
+	wg.Wait()
+	mu.Lock()
+	got := sends
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("the mail must be sent exactly once across replicas, sent %d times", got)
+	}
+	if delivered[0]+delivered[1] != 1 {
+		t.Fatalf("exactly one worker may claim the row: %v", delivered)
+	}
+}
+
+// P4: the reaper returns a crashed worker's claim to the queue, and prunes
+// PENDING rows whose token can no longer be useful.
+func TestPortalReaperAndPendingPruning(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	e.register(t)
+	p := &service.Portal{GDPR: e.gdpr, Contacts: e.svc}
+	if err := p.Start(ctx, "fault@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A claim left behind by a crashed worker.
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE portal_outbox SET status='SENDING', created_at = now() - interval '30 minutes'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PrunePortal(ctx, e.admin.Pool); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT status FROM portal_outbox ORDER BY id DESC LIMIT 1`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "PENDING" {
+		t.Fatalf("a stalled claim must return to the queue, got %s", status)
+	}
+
+	// A PENDING row whose token has expired is pruned: an unreachable
+	// mailer must not grow the table without bound.
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE portal_outbox SET expires_at = now() - interval '1 hour'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PrunePortal(ctx, e.admin.Pool); err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM portal_outbox`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatalf("an expired PENDING row must be pruned, %d left", left)
+	}
+}
+
+// P5: a rolled-back transaction must not burn a send from the per-address cap.
+func TestPortalThrottleNotBurnedByRollback(t *testing.T) {
+	ctx := context.Background()
+	// portal_outbox denied: the transaction rolls back AFTER the throttle
+	// would have been counted.
+	e := newFaultEnv(t, "portal_outbox")
+	e.register(t)
+	p := &service.Portal{GDPR: e.gdpr, Contacts: e.svc}
+	for i := 0; i < 5; i++ {
+		if err := p.Start(ctx, "fault@example.com"); err == nil {
+			t.Fatal("Start must fail while the queue is unwritable")
+		}
+	}
+	// The throttle table must show nothing: every attempt rolled back.
+	var rows int
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM portal_email_throttle`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("a rolled-back Start must not burn a send, found %d throttle rows", rows)
 	}
 }

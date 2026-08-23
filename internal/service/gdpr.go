@@ -356,6 +356,27 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 	if _, err := tx.Exec(ctx, `DELETE FROM person_tokens WHERE person_id=$1`, personID); err != nil {
 		return 0, 0, err
 	}
+	// Portal state dies with the person: a queued login or erase-confirm
+	// mail must not still be delivered, and a live session must not
+	// outlive the data (review P4).
+	for _, q := range []string{
+		`DELETE FROM portal_sessions WHERE person_id=$1`,
+		`DELETE FROM portal_tokens WHERE person_id=$1`,
+		`DELETE FROM portal_outbox WHERE id IN (
+			SELECT o.id FROM portal_outbox o WHERE o.status IN ('PENDING','SENDING')
+			  AND EXISTS (SELECT 1 FROM portal_tokens t WHERE t.person_id=$1))`,
+	} {
+		if _, err := tx.Exec(ctx, q, personID); err != nil {
+			return 0, 0, err
+		}
+	}
+	// Consumed-envelope records for this person's pseudonyms: the jti is
+	// issuer-chosen and may reference the subject (review P10).
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM external_envelopes WHERE cid IN (SELECT cid FROM cids WHERE person_id=$1)`,
+		personID); err != nil {
+		return 0, 0, err
+	}
 	// Outstanding one-time tokens die with the person: a pre-erasure OTI
 	// must not stay verifiable (it would mint a fresh live CID for the
 	// forgotten person in the verifier's scope).
@@ -415,10 +436,18 @@ func (g *GDPR) maxAttempts() int {
 // written to the audit chain - delivery confirmations are accountability
 // records, not operational noise.
 func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
-	rows, err := g.Pool.Query(ctx,
+	// Claim the batch: without SKIP LOCKED every replica delivered every
+	// event (review P3).
+	claim, err := g.Pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = claim.Rollback(ctx) }()
+	rows, err := claim.Query(ctx,
 		`SELECT e.id, e.erasure_id, e.scope, e.cid, w.url, w.secret
 		 FROM erasure_events e LEFT JOIN webhooks w ON w.scope = e.scope
-		 WHERE e.status='PENDING' ORDER BY e.attempts, e.id LIMIT 100`)
+		 WHERE e.status='PENDING' ORDER BY e.attempts, e.id LIMIT 100
+		 FOR UPDATE OF e SKIP LOCKED`)
 	if err != nil {
 		return 0, err
 	}
@@ -438,6 +467,19 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(evs) > 0 {
+		ids := make([]int64, 0, len(evs))
+		for _, e := range evs {
+			ids = append(ids, e.id)
+		}
+		if _, err := claim.Exec(ctx,
+			`UPDATE erasure_events SET status='SENDING' WHERE id = ANY($1)`, ids); err != nil {
+			return 0, err
+		}
+	}
+	if err := claim.Commit(ctx); err != nil {
 		return 0, err
 	}
 	terminal := func(e ev, status, action string) {
@@ -489,7 +531,8 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 		}
 		var attempts int
 		if err := g.Pool.QueryRow(ctx,
-			`UPDATE erasure_events SET attempts=attempts+1 WHERE id=$1 RETURNING attempts`, e.id).Scan(&attempts); err != nil {
+			`UPDATE erasure_events SET attempts=attempts+1, status='PENDING'
+			 WHERE id=$1 RETURNING attempts`, e.id).Scan(&attempts); err != nil {
 			continue
 		}
 		if attempts >= g.maxAttempts() {
@@ -520,13 +563,20 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 // prunes long-expired OTI rows. Audit rows are NEVER pruned: the hash chain
 // plus external anchors are the tamper evidence.
 // PruneEnvelopes deletes consumed external envelopes whose replay window
-// has closed. Safe because envelopes carry a bounded lifetime: past
+// has closed (this is envelope hygiene; RunRetention below handles contact
+// TTLs and is a different sweep). Safe because envelopes carry a bounded lifetime: past
 // expires_at no envelope with that jti can still be accepted, so the row
 // no longer has anti-replay value - and issuer-chosen jtis may reference a
 // subject, so keeping them past an Article 17 erasure is not acceptable
 // (review N16).
 func PruneEnvelopes(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
-	tag, err := pool.Exec(ctx, `DELETE FROM external_envelopes WHERE expires_at < now()`)
+	// The safety margin covers clock skew between the application (which
+	// decides acceptance) and the database (which decides pruning): without
+	// it, a database clock running ahead deletes rows for envelopes the
+	// application would still accept, reopening a replay window
+	// (review P10).
+	tag, err := pool.Exec(ctx,
+		`DELETE FROM external_envelopes WHERE expires_at < now() - interval '1 hour'`)
 	if err != nil {
 		return 0, err
 	}

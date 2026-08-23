@@ -38,6 +38,18 @@ spec:
       ports:
         - {port: 8080, protocol: TCP}
     {{- end }}
+    {{- if and .Values.portal.enabled .Values.portal.listenPort }}
+    # The portal is citizen-facing: it is reached from the ingress, not
+    # from labelled client workloads (review P8).
+    - {{- if .Values.networkPolicy.ingressNamespace }}
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+      {{- end }}
+      ports:
+        - {port: {{ .Values.portal.listenPort }}, protocol: TCP}
+    {{- end }}
   egress:
     # DNS
     - ports:

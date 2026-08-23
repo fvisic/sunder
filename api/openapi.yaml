@@ -414,7 +414,8 @@ paths:
                 cid: {$ref: '#/components/schemas/Cid'}
                 envelope:
                   type: string
-                  description: PASETO v4.public token signed by the registered issuer; payload {"iss", "claims", "iat", "exp"}.
+                  description: |
+                    PASETO v4.public token signed by the registered issuer. Payload: {"iss", "jti", "cid", "claims", "iat", "exp"}. The signed "cid" must equal the target (subject binding), "jti" is consumed once (anti-replay), "exp" may be at most 24 hours ahead, and "iat" must not be in the future. Claim names must match ^[a-zA-Z0-9_.-]{1,64}$; values are capped at 4 KB.
       responses:
         '200':
           description: Claims stored with provenance.
@@ -433,7 +434,9 @@ paths:
         '403':
           description: Missing claims.external action, untrusted issuer, or claim outside the issuer's allowlist.
         '404':
-          description: CID absent from the caller's scope.
+          description: CID absent from the caller's scope (or the person has been erased).
+        '429':
+          description: Per-client rate limit - every envelope, accepted or rejected, appends to the audit chain.
 
   /v1/oti/verify:
     post:

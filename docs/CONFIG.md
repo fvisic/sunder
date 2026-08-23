@@ -70,7 +70,8 @@ silently open a new unauthenticated public surface.
 | `SUNDER_PORTAL_LISTEN` | - | Separate bind address for the portal (e.g. `:8081`). **Required when the API runs with mTLS**: browsers cannot present a client certificate, so a portal on the API listener would refuse every citizen. |
 | `SUNDER_PORTAL_BASE_URL` | - | Public base URL used to build the magic link in the mail payload (`https://privacy.acme.example` -> `.../portal/#token=...`). Without it the payload carries only the raw code. Must be https (loopback http allowed for development). |
 | `SUNDER_PORTAL_COOKIE_INSECURE` | `false` | Drops `Secure` from the session cookie. Local development only - the default keeps it set even when TLS terminates at the ingress. |
-| `SUNDER_PORTAL_CLIENT_IP_HEADER` | - | Header trusted for per-requester rate limiting behind a proxy (e.g. `X-Forwarded-For`). Opt-in: unset means `RemoteAddr`, which behind an ingress is the proxy for everyone. |
+| `SUNDER_PORTAL_CLIENT_IP_HEADER` | - | Header trusted for per-requester rate limiting behind a proxy (e.g. `X-Forwarded-For`). Opt-in: unset means `RemoteAddr`, which behind an ingress is the proxy for everyone. The **right-most** entry is used - the one the adjacent proxy appended - because the left-most is whatever the caller sent. With nginx-ingress's default `$proxy_add_x_forwarded_for` (which appends) this is correct as-is; if your proxy *overwrites* the header instead, any entry works. |
+| `SUNDER_PORTAL_TRUSTED_PROXY_HOPS` | `0` | Extra proxies between the client and this service; that many entries are skipped from the right. Getting this wrong hands each requester their own rate-limit bucket, so verify it against a real request before relying on the limits. |
 
 Also required: the org's mailer endpoint registered under the reserved
 scope `_portal` (`sunder webhook set -scope _portal -url ...`). Sunder

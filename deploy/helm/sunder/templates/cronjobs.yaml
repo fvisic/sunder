@@ -34,17 +34,27 @@ spec:
           containers:
             - name: anchor
               image: "{{ .Values.image.repository }}:{{ .Values.image.opsTag }}"
-              args: ["anchor", "-out", "/anchors", "-ca", "/etc/sunder/tsa-ca.pem"]
+              args: ["anchor", "-out", "/anchors", "-ca", {{ .Values.anchor.caPath | quote }}]
               env:
                 {{- include "sunder.env" . | nindent 16 }}
                 - name: SUNDER_TSA_URL
                   value: {{ .Values.anchor.tsaUrl | quote }}
               volumeMounts:
                 - {name: anchors, mountPath: /anchors}
+                {{- if .Values.anchor.caSecretName }}
+                - {name: tsa-ca, mountPath: /etc/sunder/tsa-ca, readOnly: true}
+                {{- end }}
           volumes:
             - name: anchors
               persistentVolumeClaim:
                 claimName: {{ .Release.Name }}-sunder-anchors
+            {{- if .Values.anchor.caSecretName }}
+            # A custom TSA needs its own CA bundle: without this the chart
+            # could only ever verify FreeTSA tokens, while anchor.tsaUrl was
+            # presented as configurable (review N19).
+            - name: tsa-ca
+              secret: {secretName: {{ .Values.anchor.caSecretName }}}
+            {{- end }}
 {{- end }}
 {{- if .Values.retention.enabled }}
 ---

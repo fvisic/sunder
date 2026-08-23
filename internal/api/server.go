@@ -273,20 +273,32 @@ func (s *Server) Run(ctx context.Context) error {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					if n, err := s.GDPR.DeliverPending(ctx); err != nil {
-						s.Log.Error("erasure delivery", "err", err.Error())
-					} else if n > 0 {
-						s.Log.Info("erasure events delivered", "count", n)
-					}
-					// Portal mail rides the same worker: Start must not
-					// block on a network round-trip (review N2).
-					if s.Portal != nil {
-						if n, err := s.Portal.DeliverPendingMail(ctx); err != nil {
-							s.Log.Error("portal mail delivery", "err", err.Error())
+					// The two queues drain CONCURRENTLY: sequentially, a
+					// hanging mailer starved erasure webhook delivery and
+					// vice versa (review P7). Each sweep claims its own
+					// rows, so replicas and ticks cannot double-send.
+					var wg sync.WaitGroup
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						if n, err := s.GDPR.DeliverPending(ctx); err != nil {
+							s.Log.Error("erasure delivery", "err", err.Error())
 						} else if n > 0 {
-							s.Log.Info("portal mail delivered", "count", n)
+							s.Log.Info("erasure events delivered", "count", n)
 						}
+					}()
+					if s.Portal != nil {
+						wg.Add(1)
+						go func() {
+							defer wg.Done()
+							if n, err := s.Portal.DeliverPendingMail(ctx); err != nil {
+								s.Log.Error("portal mail delivery", "err", err.Error())
+							} else if n > 0 {
+								s.Log.Info("portal mail delivered", "count", n)
+							}
+						}()
 					}
+					wg.Wait()
 				}
 			}
 		}()
@@ -306,10 +318,16 @@ func (s *Server) Run(ctx context.Context) error {
 	// citizens reach the portal from a browser (review N12).
 	var portalSrv *http.Server
 	if s.Portal != nil && s.Cfg.PortalListen != "" {
+		// The same timeout set as the API server: this is the
+		// UNAUTHENTICATED public listener, so a slow-loris there is
+		// cheaper for the attacker than anywhere else (review P6).
 		portalSrv = &http.Server{
 			Addr:              s.Cfg.PortalListen,
 			Handler:           s.instrument(s.portalMux()),
 			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		}
 		if s.Cfg.TLSCert != "" {
 			portalSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13}

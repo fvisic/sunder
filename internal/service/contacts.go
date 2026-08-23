@@ -411,10 +411,16 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 	// Scope ownership FIRST: the consent hook must never run on a raw
 	// caller-supplied CID, or the 403/404 split becomes an oracle revealing
 	// that a foreign CID exists and what its consent state is.
+	// The tombstone predicate is part of THIS read: relying on the blob
+	// being NULL after an erasure was an accident, not a guard, and it let
+	// an attributes.read audit row be written for an erased person as if a
+	// real disclosure had happened (review P0-a).
 	var blob []byte
 	var keyID, alg string
 	err := c.Pool.QueryRow(ctx,
-		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1 AND scope=$2`,
+		`SELECT c.pii_encrypted, COALESCE(c.pii_key_id,'v1'), COALESCE(c.pii_alg,'aes256gcm')
+		 FROM cids c JOIN persons p ON p.id = c.person_id
+		 WHERE c.cid=$1 AND c.scope=$2 AND p.erased_at IS NULL`,
 		cid, client.Scope).Scan(&blob, &keyID, &alg)
 	if err == pgx.ErrNoRows {
 		return "", ErrNotFound
@@ -460,10 +466,23 @@ func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid string, att
 	var oldKeyID, oldAlg string
 	// FOR UPDATE: two concurrent merges onto the same row (dedup is the
 	// whole point of this path) must serialize, or the first writer's
-	// attributes are silently lost (review finding F2).
+	// attributes are silently lost (review F2).
+	//
+	// The tombstone predicate is in the SAME locking read (review P0-a): a
+	// check done earlier on the pool could be overtaken by an erasure that
+	// commits before this transaction writes, landing a fresh live blob on
+	// a forgotten person. FOR UPDATE OF c locks the cids row only - persons
+	// is joined for the predicate, not for update.
 	err := tx.QueryRow(ctx,
-		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1 FOR UPDATE`,
+		`SELECT c.pii_encrypted, COALESCE(c.pii_key_id,'v1'), COALESCE(c.pii_alg,'aes256gcm')
+		 FROM cids c JOIN persons p ON p.id = c.person_id
+		 WHERE c.cid=$1 AND p.erased_at IS NULL
+		 FOR UPDATE OF c`,
 		cid).Scan(&oldBlob, &oldKeyID, &oldAlg)
+	if err == pgx.ErrNoRows {
+		// Erased (or vanished) between the caller's check and this write.
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
@@ -498,3 +517,10 @@ func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid string, att
 
 // maxBlobBytes caps a scope blob far below the 4 MiB signer frame limit.
 const maxBlobBytes = 256 * 1024
+
+// MergeIntoBlobForTest exposes mergeIntoBlob to the external test package so
+// the erasure race in review P0-a can be exercised at the write itself,
+// not only through a caller that pre-checks.
+func (c *Contacts) MergeIntoBlobForTest(ctx context.Context, tx pgx.Tx, cid string, attrs map[string]string) error {
+	return c.mergeIntoBlob(ctx, tx, cid, attrs)
+}

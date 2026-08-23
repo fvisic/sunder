@@ -30,6 +30,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// opensslBin is the timestamping helper this package shells out to. It is a
+// variable so tests can point it at a stub or at a nonexistent binary
+// WITHOUT touching the process-global PATH: doing that made the suite
+// order-dependent and intermittently flaky (review, CI section).
+var opensslBin = "openssl"
+
+// SetOpenSSLForTest points the package at a specific timestamping binary.
+// Test-only: the CLI-level tests need a stub without process-global PATH
+// surgery, which is what made the suite order-dependent.
+func SetOpenSSLForTest(path string) (restore func()) {
+	prev := opensslBin
+	opensslBin = path
+	return func() { opensslBin = prev }
+}
+
 var hexRoot = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // BuildQuery produces an RFC 3161 request over the chain-head digest.
@@ -37,7 +52,7 @@ func BuildQuery(rootHex string) ([]byte, error) {
 	if !hexRoot.MatchString(rootHex) {
 		return nil, fmt.Errorf("anchor: root must be a lowercase sha256 hex digest")
 	}
-	out, err := exec.Command("openssl", "ts", "-query", "-digest", rootHex, "-sha256", "-cert", "-no_nonce").Output()
+	out, err := exec.Command(opensslBin, "ts", "-query", "-digest", rootHex, "-sha256", "-cert", "-no_nonce").Output()
 	if err != nil {
 		return nil, fmt.Errorf("anchor: openssl ts -query: %w", err)
 	}
@@ -75,7 +90,7 @@ func TokenTime(tsr []byte) (string, error) {
 		return "", err
 	}
 	_ = f.Close()
-	out, err := exec.Command("openssl", "ts", "-reply", "-in", f.Name(), "-text").Output()
+	out, err := exec.Command(opensslBin, "ts", "-reply", "-in", f.Name(), "-text").Output()
 	if err != nil {
 		return "", fmt.Errorf("anchor: openssl ts -reply: %w", err)
 	}
@@ -97,7 +112,7 @@ func VerifyToken(tsr []byte, rootHex, caFile string) (bool, error) {
 	if !hexRoot.MatchString(rootHex) {
 		return false, fmt.Errorf("anchor: stored root is not a sha256 hex digest")
 	}
-	if _, err := exec.LookPath("openssl"); err != nil {
+	if _, err := exec.LookPath(opensslBin); err != nil {
 		return false, fmt.Errorf("anchor: openssl not available: %w", err)
 	}
 	if _, err := os.Stat(caFile); err != nil {
@@ -112,7 +127,7 @@ func VerifyToken(tsr []byte, rootHex, caFile string) (bool, error) {
 		return false, err
 	}
 	_ = f.Close()
-	out, err := exec.Command("openssl", "ts", "-verify", "-digest", rootHex, "-in", f.Name(), "-CAfile", caFile).CombinedOutput()
+	out, err := exec.Command(opensslBin, "ts", "-verify", "-digest", rootHex, "-in", f.Name(), "-CAfile", caFile).CombinedOutput()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

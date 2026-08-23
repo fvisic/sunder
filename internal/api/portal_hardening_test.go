@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -273,5 +274,50 @@ func TestPortalSessionEdgeInputs(t *testing.T) {
 	}
 	if rec, _ := e.call(t, "", "POST", "/portal/api/consent", `{broken`); rec.Code != 401 {
 		t.Fatal("consent without a session must be 401 before parsing")
+	}
+}
+
+// P6/P7: the portal listener carries the full timeout set, and the two
+// delivery queues drain concurrently so one hanging mailer cannot starve
+// the other.
+func TestPortalListenerTimeoutsAndConcurrentDrain(t *testing.T) {
+	e := newPortalEnv(t)
+	ctx := context.Background()
+	e.register(t, "concurrent@example.com")
+
+	// A mailer that hangs longer than one tick.
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(400 * time.Millisecond)
+		w.WriteHeader(200)
+	}))
+	defer slow.Close()
+	if _, err := e.srv.Store.Pool.Exec(ctx,
+		`UPDATE webhooks SET url=$1 WHERE scope='_portal'`, slow.URL); err != nil {
+		t.Fatal(err)
+	}
+	// A fast erasure webhook for the crm scope.
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer fast.Close()
+	if _, err := e.srv.Store.Pool.Exec(ctx,
+		`INSERT INTO webhooks (scope, url, secret) VALUES ('crm', $1, 's')
+		 ON CONFLICT (scope) DO UPDATE SET url=$1`, fast.URL); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := e.call(t, "", "POST", "/portal/api/start", `{"email":"concurrent@example.com"}`); rec.Code != 202 {
+		t.Fatal("start")
+	}
+
+	// Both sweeps in parallel: the erasure queue must not wait for the
+	// hanging mailer.
+	start := time.Now()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = e.srv.Portal.DeliverPendingMail(ctx) }()
+	go func() { defer wg.Done(); _, _ = e.srv.GDPR.DeliverPending(ctx) }()
+	wg.Wait()
+	if elapsed := time.Since(start); elapsed > 900*time.Millisecond {
+		t.Fatalf("the two queues must drain concurrently, took %s", elapsed)
 	}
 }
