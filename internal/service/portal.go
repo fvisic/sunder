@@ -243,19 +243,21 @@ func (p *Portal) RequestErase(ctx context.Context, personID string) (string, err
 
 // ConfirmErase consumes the confirmation token and runs the full erasure.
 func (p *Portal) ConfirmErase(ctx context.Context, personID, confirmToken string) (int64, int, error) {
+	// The person match is part of the UPDATE: a wrong-session attempt must
+	// NOT consume the legitimate owner's confirmation token.
 	var tokenPerson string
 	err := p.GDPR.Pool.QueryRow(ctx,
 		`UPDATE portal_tokens SET used_at=now()
-		 WHERE token_hash=$1 AND kind='erase' AND used_at IS NULL AND expires_at > now()
-		 RETURNING person_id`, hashToken(confirmToken)).Scan(&tokenPerson)
+		 WHERE token_hash=$1 AND kind='erase' AND person_id=$2
+		   AND used_at IS NULL AND expires_at > now()
+		 RETURNING person_id`, hashToken(confirmToken), personID).Scan(&tokenPerson)
 	if err == pgx.ErrNoRows {
+		// Unknown, expired, already used, or issued for someone else -
+		// indistinguishable on purpose.
 		return 0, 0, ErrNotFound
 	}
 	if err != nil {
 		return 0, 0, err
-	}
-	if tokenPerson != personID {
-		return 0, 0, ErrForbidden // confirmation token for a different person
 	}
 	var cid string
 	if err := p.GDPR.Pool.QueryRow(ctx,

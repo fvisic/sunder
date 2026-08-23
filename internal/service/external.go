@@ -11,12 +11,14 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
@@ -147,7 +149,14 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO external_envelopes (jti, issuer_id) VALUES ($1,$2)`,
 		env.JTI, env.Issuer); err != nil {
-		return nil, fmt.Errorf("%w: envelope already used", ErrValidation)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return nil, fmt.Errorf("%w: envelope already used", ErrValidation)
+		}
+		if errors.As(err, &pgErr) && pgErr.Code == "23514" {
+			return nil, fmt.Errorf("%w: jti must be 8-128 characters", ErrValidation)
+		}
+		return nil, err
 	}
 	if err := c.mergeIntoBlob(ctx, tx, cid, attrs); err != nil {
 		return nil, err
