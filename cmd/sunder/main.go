@@ -47,10 +47,10 @@ func main() {
 
 func run(cmd string, args []string) error {
 	switch cmd {
-	case "serve", "migrate", "client", "keys", "anchor", "verify-audit", "webhook", "retention", "dsr", "signer", "issuer":
+	case "serve", "migrate", "client", "keys", "anchor", "verify-audit", "webhook", "retention", "dsr", "signer", "issuer", "bootstrap":
 	default:
 		// Fail on typos before requiring config or a live database.
-		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr, signer, issuer)", cmd)
+		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr, signer, issuer, bootstrap)", cmd)
 	}
 
 	ctx, stop := signalContext()
@@ -102,6 +102,8 @@ func run(cmd string, args []string) error {
 		return dsrCmd(ctx, cfg, st, args)
 	case "issuer":
 		return issuerCmd(ctx, st, args)
+	case "bootstrap":
+		return bootstrapCmd(ctx, cfg, st, args)
 	default:
 		return clientCmd(ctx, st, args)
 	}
@@ -585,12 +587,16 @@ func parseTTL(ttl string) (*time.Time, error) {
 func clientRotateCmd(ctx context.Context, st *store.Store, args []string) error {
 	fs := flag.NewFlagSet("client rotate-secret", flag.ContinueOnError)
 	id := fs.String("id", "", "client id (required)")
-	ttl := fs.String("ttl", "", "new credential lifetime (e.g. 90d); empty = non-expiring")
+	ttl := fs.String("ttl", "", "new credential lifetime (e.g. 90d); empty = keep the current expiry policy")
+	noExpiry := fs.Bool("no-expiry", false, "explicitly clear any credential expiry")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *id == "" {
 		return fmt.Errorf("-id is required")
+	}
+	if *ttl != "" && *noExpiry {
+		return fmt.Errorf("-ttl and -no-expiry are mutually exclusive")
 	}
 	expiresAt, err := parseTTL(*ttl)
 	if err != nil {
@@ -599,20 +605,22 @@ func clientRotateCmd(ctx context.Context, st *store.Store, args []string) error 
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
-	cred, err := auth.RotateSecret(ctx, st.Pool, *id, expiresAt)
+	cred, err := auth.RotateSecret(ctx, st.Pool, *id, expiresAt, *ttl != "" || *noExpiry)
 	if err != nil {
 		return err
 	}
-	if err := audit.Append(ctx, st.Pool, audit.Entry{
-		ClientID: "operator", Action: "client.rotate_secret",
-		Detail: map[string]any{"client_id": *id, "expires": *ttl != ""},
-	}); err != nil {
-		return err
-	}
+	// Print FIRST: the old secret is already dead, so a failure past this
+	// point must never leave the operator without the new credential.
 	fmt.Println("new credential (shown once, store it now):")
 	fmt.Println(cred)
 	if expiresAt != nil {
 		fmt.Printf("expires: %s\n", expiresAt.UTC().Format(time.RFC3339))
+	}
+	if err := audit.Append(ctx, st.Pool, audit.Entry{
+		ClientID: "operator", Action: "client.rotate_secret",
+		Detail: map[string]any{"client_id": *id, "expires": *ttl != "", "cleared": *noExpiry},
+	}); err != nil {
+		return fmt.Errorf("credential rotated and printed above, but the audit append failed: %w", err)
 	}
 	return nil
 }
@@ -630,7 +638,7 @@ func issuerCmd(ctx context.Context, st *store.Store, args []string) error {
 		fs := flag.NewFlagSet("issuer add", flag.ContinueOnError)
 		id := fs.String("id", "", "issuer id (required)")
 		pub := fs.String("pubkey", "", "hex-encoded 32-byte Ed25519 public key (required)")
-		claims := fs.String("claims", "", "comma-separated claim names this issuer may assert; empty = any")
+		claims := fs.String("claims", "", "comma-separated claim names this issuer may assert; '*' = any; empty = NONE (deny by default)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -694,4 +702,82 @@ func issuerCmd(ctx context.Context, st *store.Store, args []string) error {
 	default:
 		return fmt.Errorf("unknown issuer subcommand %q", args[0])
 	}
+}
+
+// bootstrapCmd performs first-run setup in one command: migrations, key
+// material, and the first admin client whose credential is printed (or, in
+// unattended mode, written to a file) exactly once. Idempotent: rerunning
+// against an initialized instance is a no-op success, so compose/Helm
+// hooks and provisioning scripts can call it unconditionally.
+func bootstrapCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
+	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+	unattended := fs.Bool("unattended", false, "read SUNDER_BOOTSTRAP_* env and write the credential to a file instead of stdout")
+	id := fs.String("id", getenvDefault("SUNDER_BOOTSTRAP_CLIENT_ID", "admin"), "admin client id")
+	scope := fs.String("scope", getenvDefault("SUNDER_BOOTSTRAP_SCOPE", "admin"), "admin client scope")
+	purposes := fs.String("purposes", os.Getenv("SUNDER_BOOTSTRAP_PURPOSES"), "comma-separated purposes for the admin client")
+	credFile := fs.String("credential-file", os.Getenv("SUNDER_BOOTSTRAP_CREDENTIAL_FILE"), "unattended mode: path the credential is written to (0600)")
+	ttl := fs.String("ttl", os.Getenv("SUNDER_BOOTSTRAP_TTL"), "credential lifetime (e.g. 90d); empty = non-expiring")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := st.Migrate(ctx); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	eng := api.OpenEngine(cfg)
+	ring := &service.KeyRing{Pool: st.Pool}
+	if err := ring.EnsureAll(ctx, eng); err != nil {
+		return fmt.Errorf("key bootstrap: %w", err)
+	}
+	// Idempotency: an existing admin client means this instance is already
+	// bootstrapped - never rotate or reprint on rerun.
+	var n int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM clients WHERE client_id=$1`, *id).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		fmt.Printf("bootstrap: client %q already exists - nothing to do\n", *id)
+		return nil
+	}
+	expiresAt, err := parseTTL(*ttl)
+	if err != nil {
+		return err
+	}
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: *id, Name: "Bootstrap admin", Scope: *scope,
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActScopesIssue, auth.ActLookup,
+			auth.ActAttributesRead, auth.ActOTIIssue, auth.ActOTIVerify, auth.ActConsentManage,
+			auth.ActDSRAccess, auth.ActDSRErase, auth.ActDSRExport, auth.ActClaimsExternal},
+		AllowedPurposes:     splitCSV(*purposes),
+		RateLimit:           600,
+		CredentialExpiresAt: expiresAt,
+	})
+	if err != nil {
+		return err
+	}
+	if err := audit.Append(ctx, st.Pool, audit.Entry{
+		ClientID: "operator", Action: "bootstrap",
+		Detail: map[string]any{"client_id": *id, "scope": *scope, "unattended": *unattended},
+	}); err != nil {
+		return err
+	}
+	if *unattended {
+		if *credFile == "" {
+			return fmt.Errorf("bootstrap -unattended requires -credential-file or SUNDER_BOOTSTRAP_CREDENTIAL_FILE")
+		}
+		if err := os.WriteFile(*credFile, []byte(cred+"\n"), 0o600); err != nil {
+			return err
+		}
+		fmt.Printf("bootstrap: credential for %q written to %s (readable once - move it to your secret store)\n", *id, *credFile)
+		return nil
+	}
+	fmt.Println("bootstrap complete. Admin credential (shown once, store it now):")
+	fmt.Println(cred)
+	return nil
+}
+
+func getenvDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

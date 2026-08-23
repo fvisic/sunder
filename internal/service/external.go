@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -25,13 +26,22 @@ import (
 // externalEnvelope is the signed payload a trusted issuer produces:
 // a PASETO v4.public token whose JSON body carries the claims.
 type externalEnvelope struct {
-	Issuer  string            `json:"iss"`
+	Issuer string `json:"iss"`
+	// JTI is the envelope's unique id: consumed exactly once (anti-replay).
+	JTI string `json:"jti"`
+	// CID binds the envelope to ONE pseudonym: the issuer/gateway asserts
+	// claims for a specific person, and the envelope cannot be re-attached
+	// to anyone else.
+	CID     string            `json:"cid"`
 	Claims  map[string]string `json:"claims"`
 	IssuedA string            `json:"iat"`
 	Expires string            `json:"exp"`
 }
 
-const maxExternalClaims = 16
+const (
+	maxExternalClaims    = 16
+	maxExternalClaimSize = 4096
+)
 
 // ExternalClaims verifies an issuer-signed envelope and merges its claims
 // into the caller-scope blob for cid, namespaced with the issuer id.
@@ -65,13 +75,31 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 		`SELECT public_key, allowed_claims FROM trusted_issuers WHERE issuer_id=$1`,
 		env.Issuer).Scan(&pubKey, &allowed)
 	if err == pgx.ErrNoRows {
+		_ = audit.Append(ctx, c.Pool, audit.Entry{
+			ClientID: client.ID, Action: "claims.external.rejected",
+			Detail: map[string]any{"issuer": env.Issuer, "reason": "untrusted_issuer"},
+		})
 		return nil, fmt.Errorf("%w: issuer %q is not trusted", ErrForbidden, env.Issuer)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if _, err := crypto.PasetoVerify(ed25519.PublicKey(pubKey), envelope); err != nil {
+		// Audit forgery attempts: a signature that fails against a REGISTERED
+		// issuer's key is a monitoring signal, not noise.
+		_ = audit.Append(ctx, c.Pool, audit.Entry{
+			ClientID: client.ID, Action: "claims.external.rejected",
+			Detail: map[string]any{"issuer": env.Issuer, "reason": "bad_signature"},
+		})
 		return nil, fmt.Errorf("%w: envelope signature invalid", ErrValidation)
+	}
+	// Subject binding: the SIGNED cid must match the target - an envelope
+	// issued for one person cannot be attached to another.
+	if env.CID != cid {
+		return nil, fmt.Errorf("%w: envelope is bound to a different subject", ErrForbidden)
+	}
+	if env.JTI == "" {
+		return nil, fmt.Errorf("%w: envelope missing jti", ErrValidation)
 	}
 	exp, err := time.Parse(time.RFC3339, env.Expires)
 	if err != nil || time.Now().After(exp) {
@@ -80,11 +108,22 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 	if len(env.Claims) == 0 || len(env.Claims) > maxExternalClaims {
 		return nil, fmt.Errorf("%w: 1-%d claims per envelope", ErrValidation, maxExternalClaims)
 	}
-	for name := range env.Claims {
+	wildcard := slices.Contains(allowed, "*")
+	for name, value := range env.Claims {
 		if name == "" || len(name) > 64 {
 			return nil, fmt.Errorf("%w: claim names must be 1-64 chars", ErrValidation)
 		}
-		if len(allowed) > 0 && !slices.Contains(allowed, name) {
+		// '@' is the provenance separator - a claim name carrying one could
+		// impersonate another issuer after suffixing.
+		if strings.ContainsRune(name, '@') {
+			return nil, fmt.Errorf("%w: claim names must not contain '@'", ErrValidation)
+		}
+		if len(value) > maxExternalClaimSize {
+			return nil, fmt.Errorf("%w: claim values are capped at %d bytes", ErrValidation, maxExternalClaimSize)
+		}
+		// Deny-by-default: an issuer registered without -claims may assert
+		// NOTHING; "*" grants everything explicitly.
+		if !wildcard && !slices.Contains(allowed, name) {
 			return nil, fmt.Errorf("%w: issuer %q may not assert %q", ErrForbidden, env.Issuer, name)
 		}
 	}
@@ -104,6 +143,12 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Anti-replay: the jti is consumed in the SAME transaction as the merge.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO external_envelopes (jti, issuer_id) VALUES ($1,$2)`,
+		env.JTI, env.Issuer); err != nil {
+		return nil, fmt.Errorf("%w: envelope already used", ErrValidation)
+	}
 	if err := c.mergeIntoBlob(ctx, tx, cid, attrs); err != nil {
 		return nil, err
 	}

@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/fvisic/sunder/internal/crypto"
@@ -64,9 +66,17 @@ func FromContext(ctx context.Context) *Client {
 	return c
 }
 
+// FailureLimiter throttles authentication FAILURES per source IP - brute
+// force and credential-confirmation probing must not run at line rate.
+type FailureLimiter interface {
+	Allow(key string, limit int) bool
+}
+
 // Authenticator loads and verifies clients.
 type Authenticator struct {
 	Pool *pgxpool.Pool
+	// Limiter, when set, throttles failed attempts per source IP.
+	Limiter FailureLimiter
 }
 
 // ErrCredentialExpired distinguishes an expired (but otherwise valid)
@@ -103,7 +113,9 @@ func (a *Authenticator) Authenticate(ctx context.Context, authorization string) 
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, nil
+		// Environment failure, not a credential verdict: the middleware
+		// answers 503 so an outage is never read as "bad credentials".
+		return nil, false, fmt.Errorf("auth backend: %w", err)
 	}
 	if subtle.ConstantTimeCompare(crypto.HashSecret(secret), keyHash) != 1 {
 		return nil, false, nil
@@ -119,8 +131,28 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, ok, err := a.Authenticate(r.Context(), r.Header.Get("Authorization"))
 		if !ok {
-			w.Header().Set("WWW-Authenticate", "Bearer")
 			w.Header().Set("Content-Type", "application/json")
+			if err != nil && !errors.Is(err, ErrCredentialExpired) {
+				// Backend outage: 503, never a credential verdict.
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":"service_unavailable"}`))
+				return
+			}
+			// Throttle FAILURES per source IP: 60/min covers fat-fingered
+			// configs; brute force and expired-credential probing do not
+			// get to run at line rate.
+			if a.Limiter != nil {
+				ip, _, splitErr := net.SplitHostPort(r.RemoteAddr)
+				if splitErr != nil {
+					ip = r.RemoteAddr
+				}
+				if !a.Limiter.Allow("authfail:"+ip, 60) {
+					w.WriteHeader(http.StatusTooManyRequests)
+					_, _ = w.Write([]byte(`{"error":"rate_limited"}`))
+					return
+				}
+			}
+			w.Header().Set("WWW-Authenticate", "Bearer")
 			w.WriteHeader(http.StatusUnauthorized)
 			if errors.Is(err, ErrCredentialExpired) {
 				_, _ = w.Write([]byte(`{"error":"credential_expired"}`))
@@ -158,17 +190,25 @@ func Create(ctx context.Context, pool *pgxpool.Pool, c Client) (credential strin
 	return c.ID + "." + secret, nil
 }
 
-// RotateSecret replaces a client's secret (and optionally its expiry) and
-// returns the new credential exactly once. The old secret stops working
-// immediately - schedule rotations, don't race them.
-func RotateSecret(ctx context.Context, pool *pgxpool.Pool, clientID string, expiresAt *time.Time) (string, error) {
+// RotateSecret replaces a client's secret and returns the new credential
+// exactly once. The old secret stops working immediately - schedule
+// rotations, don't race them. setExpiry=false preserves the stored expiry
+// policy (the safe default); setExpiry=true writes expiresAt (nil clears).
+func RotateSecret(ctx context.Context, pool *pgxpool.Pool, clientID string, expiresAt *time.Time, setExpiry bool) (string, error) {
 	secret, err := crypto.NewClientSecret()
 	if err != nil {
 		return "", err
 	}
-	tag, err := pool.Exec(ctx,
-		`UPDATE clients SET key_hash=$2, credential_expires_at=$3 WHERE client_id=$1`,
-		clientID, crypto.HashSecret(secret), expiresAt)
+	var tag pgconn.CommandTag
+	if setExpiry {
+		tag, err = pool.Exec(ctx,
+			`UPDATE clients SET key_hash=$2, credential_expires_at=$3 WHERE client_id=$1`,
+			clientID, crypto.HashSecret(secret), expiresAt)
+	} else {
+		tag, err = pool.Exec(ctx,
+			`UPDATE clients SET key_hash=$2 WHERE client_id=$1`,
+			clientID, crypto.HashSecret(secret))
+	}
 	if err != nil {
 		return "", err
 	}

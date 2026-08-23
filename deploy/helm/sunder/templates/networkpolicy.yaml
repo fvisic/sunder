@@ -1,4 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- if and (not .Values.networkPolicy.clientLabel) (not .Values.networkPolicy.allowedNamespaces) }}
+{{- fail "networkPolicy.enabled with neither clientLabel nor allowedNamespaces would render an allow-all ingress rule - set at least one" }}
+{{- end }}
 # P2.2 network policies: Sunder accepts traffic only from labelled client
 # workloads and talks out only to what it genuinely needs (DB, TSA, Vault,
 # webhook receivers, DNS). Everything else is dropped by the CNI.

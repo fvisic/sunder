@@ -201,3 +201,44 @@ func TestVerifyFailedSurvivesTheWire(t *testing.T) {
 		t.Fatalf("missing key must be an environment error, got %v", err)
 	}
 }
+
+// Review finding: pooled connections going stale (signer restart, idle cap)
+// must be retried once on a fresh dial instead of surfacing 5xx.
+func TestRemoteEngineSurvivesSignerRestart(t *testing.T) {
+	dir, err := os.MkdirTemp("", "sgn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+	ksDir := t.TempDir()
+	eng := NewLocalEngine(&autoKS{inner: &FileKeystore{Dir: ksDir}})
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	go func() { _ = ServeSigner(ctx1, sock, eng) }()
+	waitFor := func() {
+		for i := 0; i < 100; i++ {
+			if c, err := net.DialTimeout("unix", sock, 50*time.Millisecond); err == nil {
+				_ = c.Close()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("signer socket never came up")
+	}
+	waitFor()
+	remote := NewRemoteEngine(sock)
+	if _, err := remote.MAC(context.Background(), "hmac-email/v1", []byte("warm the pool")); err != nil {
+		t.Fatal(err)
+	}
+	// Restart the signer: the pooled connection is now dead.
+	cancel1()
+	time.Sleep(50 * time.Millisecond)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	t.Cleanup(cancel2)
+	go func() { _ = ServeSigner(ctx2, sock, eng) }()
+	waitFor()
+	if _, err := remote.MAC(context.Background(), "hmac-email/v1", []byte("after restart")); err != nil {
+		t.Fatalf("a stale pooled conn must be retried on a fresh dial: %v", err)
+	}
+}

@@ -13,7 +13,8 @@ eIDAS 2.0 / EUDI Wallet principles" - never "certified".
 wallet/attribute provider          gateway (yours)                Sunder
         |  OpenID4VP / OIDC / any  |                                |
         |<------------------------>|  PASETO v4.public envelope     |
-        |                          |  {iss, claims{...}, iat, exp}  |
+        |                          |  {iss, jti, cid, claims{...},  |
+        |                          |   iat, exp}                    |
         |                          |------------------------------->|
         |                          |     POST /v1/claims/external   |
         |                          |                                |
@@ -26,7 +27,14 @@ wallet/attribute provider          gateway (yours)                Sunder
   Managed by `sunder issuer add/list/remove`, audited.
 - An envelope is accepted only when: the issuer is registered, the
   signature verifies against the REGISTERED key, `exp` is in the future,
-  and every claim name is in the issuer's allowlist (empty = any).
+  the SIGNED `cid` matches the target pseudonym (subject binding - an
+  attestation for Alice cannot be attached to Bob), the `jti` has never
+  been consumed (anti-replay, enforced in the same transaction as the
+  write), and every claim name is in the issuer's allowlist (`*` = any;
+  an EMPTY allowlist permits nothing - deny by default).
+- Claim names must not contain `@` (provenance separator), values are
+  capped at 4 KB, and client-supplied attribute names with `@` are
+  rejected at registration - provenance cannot be forged from either side.
 - Claims land in the caller-scope blob as `<claim>@<issuer>` - provenance
   is part of the attribute name, so a wallet-asserted `age_gte_18` can
   never be confused with a self-declared one.

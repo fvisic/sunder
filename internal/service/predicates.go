@@ -116,7 +116,11 @@ func parseDate(s string) (time.Time, bool) {
 }
 
 // fullYears counts completed years between birth and now (birthday not yet
-// reached this year counts one less).
+// reached this year counts one less). Notes for integrators: dates are
+// evaluated at UTC (a date-only birthdate attains the age at 00:00 UTC on
+// the birthday), and Feb-29 birthdays normalize to Mar 1 in non-leap years
+// (AddDate semantics) - leaplings attain the age one day "late", which some
+// jurisdictions define differently. Document the policy where it matters.
 func fullYears(birth, now time.Time) int {
 	years := now.Year() - birth.Year()
 	anniversary := birth.AddDate(years, 0, 0)
