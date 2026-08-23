@@ -196,11 +196,15 @@ func (l *RedisLimiter) failed(key string) bool {
 		l.OnFailure()
 	}
 	// Fail-open degrades abuse control rather than availability, which is
-	// defensible for authenticated callers - but not on the unauthenticated
-	// portal surface, where it would turn a rate-limited endpoint into a
-	// line-rate one (review N10).
-	if strings.HasPrefix(key, "portal:") {
-		return false
+	// defensible for a plain authenticated lookup. It is NOT defensible
+	// where the limit is what protects a shared resource: the
+	// unauthenticated portal surface (review N10) and the external-claims
+	// endpoint, whose every call takes the global audit lock, so losing the
+	// limit lets one client serialise the instance (review P9).
+	for _, mustFailClosed := range []string{"portal:", "claims:"} {
+		if strings.HasPrefix(key, mustFailClosed) {
+			return false
+		}
 	}
 	return !l.FailClosed
 }

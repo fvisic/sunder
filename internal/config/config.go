@@ -48,6 +48,12 @@ type Config struct {
 	// behind a reverse proxy (e.g. "X-Forwarded-For"). Opt-in only: a
 	// blindly trusted header is a limiter bypass.
 	PortalClientIPHeader string // SUNDER_PORTAL_CLIENT_IP_HEADER
+	// PortalTrustedProxyHops is how many proxies sit between the client and
+	// this service. The right-most header entry minus this many hops is
+	// taken as the client address; the left-most entry is always
+	// caller-supplied and must never be trusted. Default 0 = the immediate
+	// proxy appended the address.
+	PortalTrustedProxyHops int // SUNDER_PORTAL_TRUSTED_PROXY_HOPS
 
 	// Tunables. Defaults match the documented v1 behaviour; see docs/CONFIG.md
 	// before changing them - several are security trade-offs, not preferences.
@@ -156,6 +162,10 @@ func FromEnvNoDB() (Config, error) {
 	c.PIIAlg = getenv("SUNDER_PII_ALG", crypto.AlgAES256GCM)
 	if !crypto.KnownAlg(c.PIIAlg) {
 		return c, fmt.Errorf("SUNDER_PII_ALG must be %q or %q", crypto.AlgAES256GCM, crypto.AlgXChaCha20)
+	}
+	hops := getenv("SUNDER_PORTAL_TRUSTED_PROXY_HOPS", "0")
+	if c.PortalTrustedProxyHops, err = strconv.Atoi(hops); err != nil || c.PortalTrustedProxyHops < 0 {
+		return c, fmt.Errorf("SUNDER_PORTAL_TRUSTED_PROXY_HOPS: %q must be a non-negative integer", hops)
 	}
 	raw := getenv("SUNDER_WEBHOOK_MAX_ATTEMPTS", "10")
 	if c.WebhookMaxAttempts, err = strconv.Atoi(raw); err != nil || c.WebhookMaxAttempts < 1 {

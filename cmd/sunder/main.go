@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	neturl "net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -131,11 +132,11 @@ func webhookCmd(ctx context.Context, st *store.Store, args []string) error {
 			return fmt.Errorf("-scope and -url are required")
 		}
 		// HTTPS only (loopback exempt for local development): erasure events
-		// carry pseudonyms and must not travel plaintext.
-		if !strings.HasPrefix(*url, "https://") &&
-			!strings.HasPrefix(*url, "http://localhost") &&
-			!strings.HasPrefix(*url, "http://127.0.0.1") {
-			return fmt.Errorf("webhook URL must be https:// (http:// allowed for localhost only)")
+		// carry pseudonyms and must not travel plaintext. Parsed, not
+		// prefix-matched: "http://localhost.attacker.example/" satisfies a
+		// prefix check on "http://localhost" (review, low).
+		if err := validWebhookURL(*url); err != nil {
+			return err
 		}
 		secret, err := crypto.NewClientSecret()
 		if err != nil {
@@ -652,8 +653,14 @@ func issuerCmd(ctx context.Context, st *store.Store, args []string) error {
 			return err
 		}
 		key, err := hex.DecodeString(*pub)
-		if err != nil || len(key) != 32 || *id == "" {
+		if err != nil || *id == "" {
 			return fmt.Errorf("-id and a 64-hex-char -pubkey are required")
+		}
+		// Registration is where unusable key material must be stopped: a
+		// small-order point accepts forged signatures for every payload
+		// (review P0-b).
+		if err := crypto.ValidEd25519PublicKey(key); err != nil {
+			return fmt.Errorf("refusing to register issuer %q: %w", *id, err)
 		}
 		if _, err := st.Pool.Exec(ctx,
 			`INSERT INTO trusted_issuers (issuer_id, public_key, allowed_claims, added_by) VALUES ($1,$2,$3,'operator')`,
@@ -670,7 +677,8 @@ func issuerCmd(ctx context.Context, st *store.Store, args []string) error {
 		return nil
 	case "list":
 		rows, err := st.Pool.Query(ctx,
-			`SELECT issuer_id, encode(public_key,'hex'), allowed_claims, created_at FROM trusted_issuers ORDER BY issuer_id`)
+			`SELECT issuer_id, encode(public_key,'hex'), allowed_claims, created_at, revoked_at
+			 FROM trusted_issuers ORDER BY issuer_id`)
 		if err != nil {
 			return err
 		}
@@ -679,10 +687,16 @@ func issuerCmd(ctx context.Context, st *store.Store, args []string) error {
 			var id, pub string
 			var claims []string
 			var created time.Time
-			if err := rows.Scan(&id, &pub, &claims, &created); err != nil {
+			var revoked *time.Time
+			if err := rows.Scan(&id, &pub, &claims, &created, &revoked); err != nil {
 				return err
 			}
-			fmt.Printf("%-24s %s claims=%v added=%s\n", id, pub[:16]+"...", claims, created.Format("2006-01-02"))
+			state := "active"
+			if revoked != nil {
+				state = "retired " + revoked.Format("2006-01-02")
+			}
+			fmt.Printf("%-24s %s claims=%v added=%s %s\n",
+				id, pub[:16]+"...", claims, created.Format("2006-01-02"), state)
 		}
 		return rows.Err()
 	case "remove":
@@ -694,19 +708,23 @@ func issuerCmd(ctx context.Context, st *store.Store, args []string) error {
 		if *id == "" {
 			return fmt.Errorf("-id is required")
 		}
-		tag, err := st.Pool.Exec(ctx, `DELETE FROM trusted_issuers WHERE issuer_id=$1`, *id)
+		// RETIRE rather than delete: the row is history, and re-adding the
+		// same id under a new key would silently re-attribute every stored
+		// `<claim>@<id>` attribute to the new key holder (review, low).
+		tag, err := st.Pool.Exec(ctx,
+			`UPDATE trusted_issuers SET revoked_at=now() WHERE issuer_id=$1 AND revoked_at IS NULL`, *id)
 		if err != nil {
 			return err
 		}
 		if tag.RowsAffected() == 0 {
-			return fmt.Errorf("issuer %q not found", *id)
+			return fmt.Errorf("issuer %q not found or already retired", *id)
 		}
 		if err := audit.Append(ctx, st.Pool, audit.Entry{
 			ClientID: "operator", Action: "issuer.remove", Detail: map[string]any{"issuer": *id},
 		}); err != nil {
 			return err
 		}
-		fmt.Printf("issuer %s removed\n", *id)
+		fmt.Printf("issuer %s retired (its id stays reserved so stored claims keep their provenance)\n", *id)
 		return nil
 	default:
 		return fmt.Errorf("unknown issuer subcommand %q", args[0])
@@ -840,4 +858,28 @@ func getenvDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// validWebhookURL accepts https:// anywhere, and http:// only for a genuine
+// loopback HOST (not merely a hostname that starts with one).
+func validWebhookURL(raw string) error {
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("webhook URL is not a URL: %w", err)
+	}
+	switch u.Scheme {
+	case "https":
+		if u.Host == "" {
+			return fmt.Errorf("webhook URL has no host")
+		}
+		return nil
+	case "http":
+		host := u.Hostname()
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			return nil
+		}
+		return fmt.Errorf("plain http webhook URLs are allowed for loopback only, got host %q", host)
+	default:
+		return fmt.Errorf("webhook URL must be https:// (http:// allowed for loopback only)")
+	}
 }

@@ -175,7 +175,7 @@ func TestVerifyAnchorsMalformedRootRow(t *testing.T) {
 }
 
 func TestVerifyTokenWithoutOpenSSL(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()) // no openssl anywhere
+	withoutOpenSSL(t) // no PATH surgery: the binary path is injectable
 	if _, err := VerifyToken([]byte("x"), fixtureDigest, vendoredCA); err == nil {
 		t.Fatal("missing openssl must be an environment error")
 	}
@@ -260,7 +260,7 @@ func TestVerifyAnchorsOrphanWithCA(t *testing.T) {
 }
 
 func TestBuildQueryWithoutOpenSSL(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
+	withoutOpenSSL(t)
 	if _, err := BuildQuery(fixtureDigest); err == nil {
 		t.Fatal("BuildQuery without openssl must error")
 	}
@@ -274,10 +274,26 @@ func TestBuildQueryWithoutOpenSSL(t *testing.T) {
 func stubOpenSSL(t *testing.T, script string) {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openssl"), []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+	stub := filepath.Join(dir, "openssl")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", dir)
+	useOpenSSL(t, stub)
+}
+
+// useOpenSSL points the package at a specific binary for one test and
+// restores the previous value afterwards - no process-global state.
+func useOpenSSL(t *testing.T, path string) {
+	t.Helper()
+	prev := opensslBin
+	opensslBin = path
+	t.Cleanup(func() { opensslBin = prev })
+}
+
+// withoutOpenSSL simulates a host with no timestamping helper.
+func withoutOpenSSL(t *testing.T) {
+	t.Helper()
+	useOpenSSL(t, filepath.Join(t.TempDir(), "definitely-not-openssl"))
 }
 
 func TestAnchorSuccessWithCA(t *testing.T) {

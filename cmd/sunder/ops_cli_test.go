@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/config"
+	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/testutil"
 )
 
@@ -291,7 +293,7 @@ esac
 exit 0`), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Cleanup(audit.SetOpenSSLForTest(dir + "/openssl"))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("TOKEN"))
@@ -594,5 +596,54 @@ func TestNewCommandsFailClosedOnDeadPool(t *testing.T) {
 	}
 	if err := retentionCmd(ctx, st, []string{"run"}); err == nil {
 		t.Fatal("retention run on a dead pool")
+	}
+}
+
+// An operator must not be able to register a forgeable key.
+func TestIssuerAddRejectsSmallOrderKeys(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	for _, bad := range []string{
+		"0100000000000000000000000000000000000000000000000000000000000000", // identity: forges everything
+		"0000000000000000000000000000000000000000000000000000000000000000",
+		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	} {
+		if err := issuerCmd(ctx, st, []string{"add", "-id", "bad", "-pubkey", bad}); err == nil {
+			t.Fatalf("issuer add accepted a small-order key: %s", bad)
+		}
+	}
+	// A genuine key is accepted.
+	_, pub, err := crypto.Ed25519FromSeed(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := issuerCmd(ctx, st, []string{"add", "-id", "good", "-pubkey", hex.EncodeToString(pub)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Webhook URL validation must parse, not prefix-match.
+func TestWebhookURLValidation(t *testing.T) {
+	for _, ok := range []string{
+		"https://hooks.internal/erase",
+		"http://localhost:9999/x",
+		"http://127.0.0.1/x",
+		"http://[::1]:8080/x",
+	} {
+		if err := validWebhookURL(ok); err != nil {
+			t.Errorf("%s must be accepted: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"http://localhost.attacker.example/", // the prefix-check bypass
+		"http://127.0.0.1.attacker.example/", // same trick on the IP form
+		"http://prod.example.com/x",
+		"ftp://example.com/x",
+		"not-a-url-at-all",
+		"https://",
+	} {
+		if err := validWebhookURL(bad); err == nil {
+			t.Errorf("%s must be rejected", bad)
+		}
 	}
 }

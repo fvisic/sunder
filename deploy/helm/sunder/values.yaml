@@ -59,10 +59,24 @@ networkPolicy:
   redisCIDR: ""
   # Namespace allowed to scrape /metrics (e.g. "monitoring"); empty = none.
   monitoringNamespace: ""
+  # Namespace the ingress controller runs in, allowed to reach the portal
+  # port; empty = any source may reach the portal port.
+  ingressNamespace: ""
   # Narrow DB egress to the database subnet, e.g. 10.12.0.0/24.
   dbCIDR: ""
   # Narrow HTTPS/Vault egress (TSA, Vault, webhook receivers); empty = any.
   egressCIDRs: []
+
+# Self-service privacy portal (docs/CONFIG.md). OFF by default. With mTLS on
+# the API, set listenPort so citizens reach the portal on its own listener -
+# browsers cannot present a client certificate (review N12/P8).
+portal:
+  enabled: false
+  listenPort: 8081          # 0 = mount on the API listener instead
+  baseUrl: ""               # e.g. https://privacy.acme.example (builds the magic link)
+  clientIpHeader: ""        # e.g. X-Forwarded-For; the RIGHT-most entry is used
+  trustedProxyHops: 0       # extra hops to skip from the right
+  cookieInsecure: false     # development only
 
 # Deployment tunables (docs/CONFIG.md). Empty = server default. These are
 # security trade-offs, not preferences - read the docs before changing.
@@ -80,7 +94,12 @@ anchor:
   # CA bundle used to verify the TSA's tokens. The vendored default matches
   # the FreeTSA URL above; point BOTH at your own TSA together, or anchoring
   # hard-fails and silently stops producing evidence (review N19).
+  #
+  # For a custom TSA: put the bundle in a Secret, name it in caSecretName
+  # (mounted at /etc/sunder/tsa-ca) and set caPath to the file inside it,
+  # e.g. caSecretName: my-tsa-ca + caPath: /etc/sunder/tsa-ca/ca.pem
   caPath: /etc/sunder/tsa-ca.pem
+  caSecretName: ""
   # PVC where exported .tsr tokens land; sync it to write-once storage OFF
   # the database host - anchors kept only in the database are circular.
   pvc:

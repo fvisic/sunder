@@ -138,3 +138,56 @@ There is also no volume or secret to supply a different bundle, so pointing `anc
 | 4 | P3, P4, P10 | Double-sent mail, unbounded PENDING rows, envelope rows outliving erasure; fix the claim pattern once for both workers |
 | 5 | N19 | Wire `caPath` and add a volume for a custom CA, or drop the value and state the chart is FreeTSA-only |
 | 6 | P2, P5-P8, P11, webhook URL validation, issuer revocation | Correctness and hardening |
+
+
+---
+
+# Pass 4 - resolution log (author)
+
+Written by the implementer, not the reviewer. Every line below is either
+"fixed, here is where" or "not fixed, here is why" - a finding with neither
+is the failure mode this file exists to prevent.
+
+## Fixed
+
+| Finding | Fix | Where |
+|---|---|---|
+| **P0-a** | The tombstone predicate moved INTO the locking read (`FOR UPDATE OF c` with a `persons` join), and `GetAttribute` joins `persons` so a refused read no longer appends an `attributes.read` row. A pre-check on the pool could be overtaken by a commit; now the write itself refuses. | `internal/service/contacts.go` (`mergeIntoBlob`, `GetAttribute`); race test `TestErasureRacingAnExternalClaim` |
+| **P0-b** | All seven small-order Ed25519 encodings are rejected, including the identity point `01 00…00` that the earlier all-zero guard missed - at `issuer add` (the real defence) and at verify. | `internal/crypto/ed25519_keys.go`; tests `TestIdentityPointForgesAndIsRejected`, `TestIssuerAddRejectsSmallOrderKeys` |
+| **P1 + P2** | Solved together by removing the audit write from the request path entirely: it was both the global-lock DoS (P1) and the outcome-bearing row (P2). Accountability moved to the outbox worker (`portal.mail.*`) and `portal.login`, which record real events rather than guesses. | `internal/service/portal.go` (`Start`) |
+| **P3** | Both workers claim their batch with `FOR UPDATE SKIP LOCKED` plus a `SENDING` state, so replicas work disjoint rows. A crashed claim returns to `PENDING` via the reaper. | `portal.go`, `gdpr.go`, migrations 0017/0018; test `TestPortalOutboxNoDoubleSendAcrossWorkers` |
+| **P4** | `PrunePortal` now prunes expired `PENDING` rows and reaps stalled `SENDING` claims; `erasePerson` deletes the person's sessions, tokens and queued mail. | `portal.go`, `gdpr.go`; tests `TestPortalReaperAndPendingPruning`, `TestErasureClearsPortalAndEnvelopeState` |
+| **P5** | The per-address throttle is counted inside the transaction that mints the token, so a rollback no longer burns a send. | `portal.go` (`allowEmailSend` now takes the tx); test `TestPortalThrottleNotBurnedByRollback` |
+| **P6** | The public portal listener carries the same Read/Write/Idle timeouts as the API server. | `internal/api/server.go` |
+| **P7** | The two queues drain concurrently, so a hanging mailer cannot starve erasure delivery. | `server.go`; test `TestPortalListenerTimeoutsAndConcurrentDrain` |
+| **P8** | A `portal:` values block reaches every `SUNDER_PORTAL_*` variable, exposes the port on the pod and the service, and opens it in the NetworkPolicy. | `deploy/helm/sunder/*` |
+| **P9** | The `claims:` bucket fails CLOSED like `portal:` - there the limit IS the availability control (it guards the global audit lock). | `internal/ratelimit/redis.go` |
+| **P10** | Envelope rows carry their `cid` and are deleted on erasure; pruning uses a one-hour safety margin so app/DB clock skew cannot delete a row the app would still reject. | migration 0018, `gdpr.go` |
+| **P11** | `iat` is validated (malformed or future = refused); claim names must match `^[a-zA-Z0-9_.-]{1,64}$`; the 24h lifetime and the 429 are in `docs/API.md` and the OpenAPI spec; `maxEnvelopeLifetime` is the single definition and every insert writes it explicitly. | `external.go`, `docs/API.md`, `api/openapi.yaml` |
+| **N9** | The RIGHT-most header entry is used, with `SUNDER_PORTAL_TRUSTED_PROXY_HOPS` for extra hops, and `docs/CONFIG.md` states the nginx-ingress behaviour. | `internal/api/portal.go`, `internal/config/config.go` |
+| **N19** | The previous edit had silently not applied (the template line differed from the string I replaced) - the F6 pattern again. Now wired and verified by rendering, plus `anchor.caSecretName` and a volume so a custom CA can actually be supplied. | `deploy/helm/sunder/templates/cronjobs.yaml` |
+| Webhook URL validation | Parsed, not prefix-matched: `http://localhost.attacker.example/` is refused. | `cmd/sunder/main.go` (`validWebhookURL`); test `TestWebhookURLValidation` |
+| Issuer rotation | `issuer remove` RETIRES (`revoked_at`) instead of deleting, and the id stays reserved - so a re-add cannot silently re-attribute stored `<claim>@<issuer>` attributes to a new key holder. | migration 0019, `main.go`, `external.go`; test `TestIssuerRetirementAndEnvelopeValidation` |
+| **Anchor test flake** | Root cause was structural: three tests rewrote the process-global `PATH` to simulate "no openssl". The binary path is now an injectable package variable, so no test touches global state. Five consecutive package runs and three full `-race` suite runs clean. | `internal/audit/anchor.go` (`opensslBin`, `SetOpenSSLForTest`) |
+| **Coverage vs gate** | 90.0% against the 90.0% gate, with tests for the new code rather than a lowered gate. | see the test names above |
+
+## Not fixed, deliberately
+
+- **Blob-size and claim caps are per-write, not per-row-lifetime.** A caller
+  can still grow a blob toward the 256 KiB cap over many writes. Capping
+  cumulative growth needs a counter per row and a policy for what to do
+  when it is hit (refuse? evict?), and refusing writes to an existing
+  contact is a worse failure than a large row. Left as-is with the cap.
+- **`main()` remains uncovered (0%).** It parses `os.Args` and calls
+  `run()`, which is fully covered. Testing it needs a subprocess harness
+  whose only assertion would be "the exit code is what `run` returned".
+- **The timing test is weak-form.** It fails on perfect separation between
+  the fastest hit and the slowest miss, not on a statistically detectable
+  gap. A statistical assertion would need a sample size that makes the
+  suite slow and would itself be flaky under CI load. The 40 ms floor is
+  what actually closes the gap; the test guards against the floor being
+  removed.
+- **`internal/testutil` counts toward the coverage figure** because the CI
+  command is `-coverpkg=./internal/...,./cmd/...`. Excluding test helpers
+  would raise the number by roughly 0.3 points, which is exactly why it
+  would look like moving the goalposts mid-review. Left as-is.

@@ -39,6 +39,30 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: SUNDER_SIGNER_SOCKET
   value: /signer/signer.sock
 {{- end }}
+{{- if .Values.portal.enabled }}
+- name: SUNDER_PORTAL_ENABLED
+  value: "true"
+{{- if .Values.portal.listenPort }}
+- name: SUNDER_PORTAL_LISTEN
+  value: ":{{ .Values.portal.listenPort }}"
+{{- end }}
+{{- with .Values.portal.baseUrl }}
+- name: SUNDER_PORTAL_BASE_URL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.portal.clientIpHeader }}
+- name: SUNDER_PORTAL_CLIENT_IP_HEADER
+  value: {{ . | quote }}
+{{- end }}
+{{- if .Values.portal.trustedProxyHops }}
+- name: SUNDER_PORTAL_TRUSTED_PROXY_HOPS
+  value: {{ .Values.portal.trustedProxyHops | quote }}
+{{- end }}
+{{- if .Values.portal.cookieInsecure }}
+- name: SUNDER_PORTAL_COOKIE_INSECURE
+  value: "true"
+{{- end }}
+{{- end }}
 {{- if .Values.tunables.otiTtl }}
 - name: SUNDER_OTI_TTL
   value: {{ .Values.tunables.otiTtl | quote }}

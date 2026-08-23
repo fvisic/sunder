@@ -26,10 +26,22 @@ const portalSessionCookie = "sunder_portal"
 func (s *Server) portalClientIP(r *http.Request) string {
 	if h := s.Cfg.PortalClientIPHeader; h != "" {
 		if v := r.Header.Get(h); v != "" {
-			if i := strings.IndexByte(v, ','); i > 0 {
-				v = v[:i] // left-most entry is the original client
+			// The RIGHT-most entry is the address the adjacent proxy
+			// appended; the left-most is whatever the caller sent, so
+			// reading it hands every requester a fresh rate-limit bucket
+			// (review N9). With more than one trusted hop, skip that many
+			// entries from the right.
+			parts := strings.Split(v, ",")
+			idx := len(parts) - 1 - s.Cfg.PortalTrustedProxyHops
+			if idx < 0 {
+				idx = 0
 			}
-			return strings.TrimSpace(v)
+			if idx > len(parts)-1 {
+				idx = len(parts) - 1
+			}
+			if ip := strings.TrimSpace(parts[idx]); ip != "" {
+				return ip
+			}
 		}
 	}
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)

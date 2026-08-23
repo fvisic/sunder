@@ -154,10 +154,16 @@ Action: `claims.external`; `cid` must belong to the caller's scope.
 The envelope is a PASETO v4.public token signed by a REGISTERED issuer
 (`sunder issuer add`, see docs/DESIGN-EUDI-GATEWAY.md) whose payload is
 `{"iss": "gov.wallet", "jti": "<unique>", "cid": "CID-...", "claims": {"age_gte_18": "true"}, "iat": ..., "exp": ...}`.
-Accepted only when the issuer is trusted, the signature verifies, `exp` is
-in the future, the SIGNED `cid` matches the target (subject binding), the
-`jti` was never used before (anti-replay) and every claim is in the
-issuer's allowlist (`*` = any, empty = none). Claims are
+Accepted only when: the issuer is trusted **and not retired**; its
+registered key is not a small-order point; the signature verifies against
+that key; `exp` is in the future and **at most 24 hours ahead**; `iat`, if
+present, is not in the future; the SIGNED `cid` matches the target (subject
+binding); the `jti` was never used before (anti-replay); and every claim is
+in the issuer's allowlist (`*` = any, empty = none). Claim names must match
+`^[a-zA-Z0-9_.-]{1,64}$` - anything else would store an attribute the
+attribute endpoint cannot address - and claim values are capped at 4 KB.
+This endpoint is rate-limited per client (429 `rate_limited`), because every
+call appends to the audit chain. Claims are
 stored as normal attributes with provenance in the name
 (`age_gte_18@gov.wallet`), audited.
 
