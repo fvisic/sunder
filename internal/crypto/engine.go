@@ -7,10 +7,17 @@ import (
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
+
+// ErrVerifyFailed marks a GENUINE verification failure (bad signature,
+// malformed token) as opposed to an environment failure (keystore or signer
+// unreachable). Callers translate the former into 4xx and the latter into
+// 5xx - an infrastructure outage must never read as "invalid token".
+var ErrVerifyFailed = errors.New("token verification failed")
 
 // Engine is the ONLY cryptographic surface the rest of the codebase may
 // use. Raw key bytes appear in no signature: an Engine implementation may
@@ -119,9 +126,13 @@ func (e *LocalEngine) Sign(ctx context.Context, key string, payload []byte) (str
 func (e *LocalEngine) VerifyToken(ctx context.Context, key, token string) ([]byte, error) {
 	_, pk, err := e.signingKeys(ctx, key)
 	if err != nil {
-		return nil, err
+		return nil, err // environment: key unavailable
 	}
-	return PasetoVerify(pk, token)
+	payload, err := PasetoVerify(pk, token)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrVerifyFailed, err)
+	}
+	return payload, nil
 }
 
 func (e *LocalEngine) Ensure(ctx context.Context, key string) error {

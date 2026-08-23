@@ -9,7 +9,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
     secretKeyRef:
       name: {{ .Values.database.existingSecret }}
       key: SUNDER_DB_URL
-{{- if eq .Values.keystore.type "vault" }}
+{{- if and (eq .Values.keystore.type "vault") (not .Values.signer.enabled) }}
 - name: SUNDER_KEYSTORE
   value: vault
 - name: SUNDER_VAULT_ADDR

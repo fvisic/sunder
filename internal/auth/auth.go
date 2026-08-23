@@ -5,11 +5,13 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,6 +45,9 @@ type Client struct {
 	AllowedActions  []string
 	AllowedPurposes []string
 	RateLimit       int
+	// CredentialExpiresAt makes the bearer credential short-lived; nil
+	// keeps it non-expiring (the pre-P2.2 behaviour).
+	CredentialExpiresAt *time.Time
 }
 
 func (c *Client) Can(action string) bool { return slices.Contains(c.AllowedActions, action) }
@@ -63,47 +68,63 @@ type Authenticator struct {
 	Pool *pgxpool.Pool
 }
 
+// ErrCredentialExpired distinguishes an expired (but otherwise valid)
+// credential from a wrong one: the caller should rotate, not retry.
+var ErrCredentialExpired = errors.New("credential expired")
+
 // Authenticate resolves "Bearer <client_id>.<secret>". The stored hash is
 // compared in constant time; the decoy compare below narrows (but cannot
 // fully close - the DB roundtrip differs) the timing gap between unknown
 // ids and bad secrets. Client ids are not secrets; the secret is.
-func (a *Authenticator) Authenticate(ctx context.Context, authorization string) (*Client, bool) {
+//
+// The error return is nil for plain rejection and ErrCredentialExpired when
+// a correct secret has passed its expiry - the expiry check runs AFTER the
+// constant-time compare so expiry never becomes a secret-validity oracle.
+func (a *Authenticator) Authenticate(ctx context.Context, authorization string) (*Client, bool, error) {
 	raw, ok := strings.CutPrefix(authorization, "Bearer ")
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	id, secret, ok := strings.Cut(raw, ".")
 	if !ok || id == "" || secret == "" {
-		return nil, false
+		return nil, false, nil
 	}
 	var c Client
 	var keyHash []byte
+	var expiresAt *time.Time
 	err := a.Pool.QueryRow(ctx,
-		`SELECT client_id, name, scope, allowed_actions, allowed_purposes, rate_limit, key_hash
+		`SELECT client_id, name, scope, allowed_actions, allowed_purposes, rate_limit, key_hash, credential_expires_at
 		 FROM clients WHERE client_id=$1`, id).
-		Scan(&c.ID, &c.Name, &c.Scope, &c.AllowedActions, &c.AllowedPurposes, &c.RateLimit, &keyHash)
+		Scan(&c.ID, &c.Name, &c.Scope, &c.AllowedActions, &c.AllowedPurposes, &c.RateLimit, &keyHash, &expiresAt)
 	if err == pgx.ErrNoRows {
 		// Equalize timing with the found-client path.
 		subtle.ConstantTimeCompare(crypto.HashSecret(secret), crypto.HashSecret("decoy"))
-		return nil, false
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false
+		return nil, false, nil
 	}
 	if subtle.ConstantTimeCompare(crypto.HashSecret(secret), keyHash) != 1 {
-		return nil, false
+		return nil, false, nil
 	}
-	return &c, true
+	if expiresAt != nil && time.Now().After(*expiresAt) {
+		return nil, false, ErrCredentialExpired
+	}
+	return &c, true, nil
 }
 
 // Middleware rejects unauthenticated requests and puts the client in context.
 func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, ok := a.Authenticate(r.Context(), r.Header.Get("Authorization"))
+		c, ok, err := a.Authenticate(r.Context(), r.Header.Get("Authorization"))
 		if !ok {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
+			if errors.Is(err, ErrCredentialExpired) {
+				_, _ = w.Write([]byte(`{"error":"credential_expired"}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
@@ -127,11 +148,31 @@ func Create(ctx context.Context, pool *pgxpool.Pool, c Client) (credential strin
 		return "", err
 	}
 	_, err = pool.Exec(ctx,
-		`INSERT INTO clients (client_id, name, key_hash, scope, allowed_actions, allowed_purposes, rate_limit)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		c.ID, c.Name, crypto.HashSecret(secret), c.Scope, c.AllowedActions, c.AllowedPurposes, c.RateLimit)
+		`INSERT INTO clients (client_id, name, key_hash, scope, allowed_actions, allowed_purposes, rate_limit, credential_expires_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		c.ID, c.Name, crypto.HashSecret(secret), c.Scope, c.AllowedActions, c.AllowedPurposes, c.RateLimit, c.CredentialExpiresAt)
 	if err != nil {
 		return "", err
 	}
 	return c.ID + "." + secret, nil
+}
+
+// RotateSecret replaces a client's secret (and optionally its expiry) and
+// returns the new credential exactly once. The old secret stops working
+// immediately - schedule rotations, don't race them.
+func RotateSecret(ctx context.Context, pool *pgxpool.Pool, clientID string, expiresAt *time.Time) (string, error) {
+	secret, err := crypto.NewClientSecret()
+	if err != nil {
+		return "", err
+	}
+	tag, err := pool.Exec(ctx,
+		`UPDATE clients SET key_hash=$2, credential_expires_at=$3 WHERE client_id=$1`,
+		clientID, crypto.HashSecret(secret), expiresAt)
+	if err != nil {
+		return "", err
+	}
+	if tag.RowsAffected() == 0 {
+		return "", fmt.Errorf("client %q not found", clientID)
+	}
+	return clientID + "." + secret, nil
 }

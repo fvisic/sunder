@@ -7,9 +7,11 @@ package crypto
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -150,5 +152,52 @@ func TestServeSignerRefusesDoubleBind(t *testing.T) {
 	defer cancel()
 	if err := ServeSigner(ctx, sock, eng); err == nil {
 		t.Fatal("second signer on a live socket must refuse to start")
+	}
+}
+
+func TestRemoteEngineConcurrent(t *testing.T) {
+	remote, _ := startSigner(t)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	errs := make([]error, 32)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				sum, err := remote.MAC(ctx, "hmac-email/v1", []byte{byte(i), byte(j)})
+				if err != nil || len(sum) != 32 {
+					errs[i] = err
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: %v", i, err)
+		}
+	}
+}
+
+func TestVerifyFailedSurvivesTheWire(t *testing.T) {
+	remote, _ := startSigner(t)
+	ctx := context.Background()
+	tok, err := remote.Sign(ctx, "oti-sign/v1", []byte(`{"x":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Tampered token: the error must carry ErrVerifyFailed across the IPC
+	// boundary so callers can distinguish 4xx from 5xx.
+	_, err = remote.VerifyToken(ctx, "oti-sign/v1", tok[:len(tok)-2]+"AA")
+	if !errors.Is(err, ErrVerifyFailed) {
+		t.Fatalf("tampered token must be ErrVerifyFailed, got %v", err)
+	}
+	// Unavailable key (invalid name -> strict keystore error): environmental,
+	// NOT verify-failed. (The autoKS test helper mints any VALID name.)
+	_, err = remote.VerifyToken(ctx, "oti-sign", tok)
+	if err == nil || errors.Is(err, ErrVerifyFailed) {
+		t.Fatalf("missing key must be an environment error, got %v", err)
 	}
 }

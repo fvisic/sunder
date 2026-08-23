@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -464,8 +465,11 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 // clientCmd implements `sunder client create ...`. The credential is printed
 // exactly once; only its hash is stored.
 func clientCmd(ctx context.Context, st *store.Store, args []string) error {
+	if len(args) >= 1 && args[0] == "rotate-secret" {
+		return clientRotateCmd(ctx, st, args[1:])
+	}
 	if len(args) < 1 || args[0] != "create" {
-		return fmt.Errorf("usage: sunder client create -id <id> -name <name> -scope <scope> [-actions a,b] [-purposes p,q] [-rate n]")
+		return fmt.Errorf("usage: sunder client create -id <id> -name <name> -scope <scope> [-actions a,b] [-purposes p,q] [-rate n] [-ttl 90d] | client rotate-secret -id <id> [-ttl 90d]")
 	}
 	fs := flag.NewFlagSet("client create", flag.ContinueOnError)
 	id := fs.String("id", "", "client id (required)")
@@ -474,11 +478,16 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 	actions := fs.String("actions", "", "comma-separated allowed actions")
 	purposes := fs.String("purposes", "", "comma-separated allowed purposes")
 	rate := fs.Int("rate", 60, "lookup rate limit per minute")
+	ttl := fs.String("ttl", "", "credential lifetime (e.g. 90d, 720h); empty = non-expiring")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	if *id == "" || *name == "" || *scope == "" {
 		return fmt.Errorf("-id, -name and -scope are required")
+	}
+	expiresAt, err := parseTTL(*ttl)
+	if err != nil {
+		return err
 	}
 	// Reject typo'd actions up front: a dead grant would surface much later
 	// as a confusing 403 in some integration.
@@ -499,9 +508,10 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 	}
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: *id, Name: *name, Scope: *scope,
-		AllowedActions:  acts,
-		AllowedPurposes: splitCSV(*purposes),
-		RateLimit:       *rate,
+		AllowedActions:      acts,
+		AllowedPurposes:     splitCSV(*purposes),
+		RateLimit:           *rate,
+		CredentialExpiresAt: expiresAt,
 	})
 	if err != nil {
 		return err
@@ -540,4 +550,66 @@ func signerCmd(ctx context.Context, cfg config.Config, args []string) error {
 	eng := crypto.NewLocalEngine(api.OpenKeystore(cfg))
 	fmt.Printf("sunder signer: serving %s (keystore: %s)\n", *socket, cfg.Keystore)
 	return crypto.ServeSigner(ctx, *socket, eng)
+}
+
+// parseTTL turns "90d" / "720h" / "" into an absolute expiry (nil = never).
+// Days are accepted because credential lifetimes are quoted in days far
+// more often than in Go duration units.
+func parseTTL(ttl string) (*time.Time, error) {
+	if ttl == "" {
+		return nil, nil
+	}
+	var d time.Duration
+	if n, ok := strings.CutSuffix(ttl, "d"); ok {
+		days, err := strconv.Atoi(n)
+		if err != nil || days < 1 {
+			return nil, fmt.Errorf("-ttl: %q is not a day count (e.g. 90d)", ttl)
+		}
+		d = time.Duration(days) * 24 * time.Hour
+	} else {
+		var err error
+		if d, err = time.ParseDuration(ttl); err != nil || d < time.Minute {
+			return nil, fmt.Errorf("-ttl: %q must be a duration >= 1m or a day count like 90d", ttl)
+		}
+	}
+	t := time.Now().Add(d)
+	return &t, nil
+}
+
+// clientRotateCmd implements `sunder client rotate-secret`: a new secret
+// (and optionally a new expiry) printed exactly once; the old secret stops
+// working immediately.
+func clientRotateCmd(ctx context.Context, st *store.Store, args []string) error {
+	fs := flag.NewFlagSet("client rotate-secret", flag.ContinueOnError)
+	id := fs.String("id", "", "client id (required)")
+	ttl := fs.String("ttl", "", "new credential lifetime (e.g. 90d); empty = non-expiring")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *id == "" {
+		return fmt.Errorf("-id is required")
+	}
+	expiresAt, err := parseTTL(*ttl)
+	if err != nil {
+		return err
+	}
+	if err := st.Migrate(ctx); err != nil {
+		return err
+	}
+	cred, err := auth.RotateSecret(ctx, st.Pool, *id, expiresAt)
+	if err != nil {
+		return err
+	}
+	if err := audit.Append(ctx, st.Pool, audit.Entry{
+		ClientID: "operator", Action: "client.rotate_secret",
+		Detail: map[string]any{"client_id": *id, "expires": *ttl != ""},
+	}); err != nil {
+		return err
+	}
+	fmt.Println("new credential (shown once, store it now):")
+	fmt.Println(cred)
+	if expiresAt != nil {
+		fmt.Printf("expires: %s\n", expiresAt.UTC().Format(time.RFC3339))
+	}
+	return nil
 }

@@ -310,3 +310,38 @@ exit 0`), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
+
+func TestClientRotateSecretCLIAndTTL(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	if err := clientCmd(ctx, st, []string{"create", "-id", "rot", "-name", "R", "-scope", "s", "-ttl", "90d"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "rot", "-ttl", "720h"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "rot"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientCmd(ctx, st, []string{"rotate-secret"}); err == nil {
+		t.Fatal("missing -id must error")
+	}
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "ghost"}); err == nil {
+		t.Fatal("unknown client must error")
+	}
+	if err := clientCmd(ctx, st, []string{"create", "-id", "bad", "-name", "B", "-scope", "s", "-ttl", "yesterday"}); err == nil {
+		t.Fatal("bad ttl must error")
+	}
+	if err := clientCmd(ctx, st, []string{"create", "-id", "bad2", "-name", "B", "-scope", "s", "-ttl", "0d"}); err == nil {
+		t.Fatal("zero-day ttl must error")
+	}
+	// Rotation is audited.
+	var n int
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit WHERE action='client.rotate_secret'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("rotations must be audited, found %d records", n)
+	}
+}

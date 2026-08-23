@@ -251,6 +251,9 @@ func (s *Server) Run(ctx context.Context) error {
 			errCh <- srv.ListenAndServe()
 		}
 	}()
+	if s.Cfg.TLSCert != "" && s.Cfg.MTLSCA == "" {
+		s.Log.Warn("TLS is enabled WITHOUT mutual TLS - any network peer can reach the API with just a bearer credential; set SUNDER_MTLS_CA in production (docs/RUNBOOK-MTLS-ROTATION.md)")
+	}
 	s.Log.Info("listening", "addr", s.Cfg.Listen, "tls", s.Cfg.TLSCert != "", "mtls", s.Cfg.MTLSCA != "")
 
 	select {
