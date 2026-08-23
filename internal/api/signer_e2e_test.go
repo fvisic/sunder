@@ -112,8 +112,17 @@ func TestFullStackOverSignerSocket(t *testing.T) {
 	// Kill the signer: everything must fail closed, nothing falls back to
 	// local key material.
 	cancel()
-	time.Sleep(50 * time.Millisecond)
-	if code, _ = do("POST", "/v1/lookup", cred, `{"email":"remote@example.com"}`); code == 200 {
+	// Poll: a pooled connection may still serve one request after the
+	// listener closes (review finding, item 5).
+	failed := false
+	for i := 0; i < 100; i++ {
+		if code, _ = do("POST", "/v1/lookup", cred, `{"email":"remote@example.com"}`); code != 200 {
+			failed = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !failed {
 		t.Fatal("lookup must fail closed when the signer is gone")
 	}
 }

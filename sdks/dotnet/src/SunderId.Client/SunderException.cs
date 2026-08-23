@@ -51,6 +51,20 @@ public sealed class SunderForbiddenException : SunderException
         : base(code, status, detail) { }
 }
 
+/// <summary>401 credential_expired - correct secret, past its expiry: rotate it.</summary>
+public sealed class SunderCredentialExpiredException : SunderException
+{
+    public SunderCredentialExpiredException(string code, int status, string? detail)
+        : base(code, status, detail) { }
+}
+
+/// <summary>403 consent_denied - the data subject withdrew consent for this purpose.</summary>
+public sealed class SunderConsentDeniedException : SunderException
+{
+    public SunderConsentDeniedException(string code, int status, string? detail)
+        : base(code, status, detail) { }
+}
+
 /// <summary>403 purpose_not_allowed - purpose outside the client's allowed purposes.</summary>
 public sealed class SunderPurposeNotAllowedException : SunderException
 {

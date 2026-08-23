@@ -156,12 +156,22 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 			if err != nil {
 				return err
 			}
-			if _, err := c.Pool.Exec(ctx,
-				`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4 WHERE cid=$1`,
-				b.cid, fresh, newestKEK, c.PII.Algorithm()); err != nil {
+			// Guarded write: if a register/share re-encrypted the row after
+			// our read, skip it - clobbering would resurrect stale
+			// attributes (review finding F2). The row was re-keyed on touch
+			// anyway.
+			tag, err := c.Pool.Exec(ctx,
+				`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4
+				 WHERE cid=$1 AND COALESCE(pii_key_id,'v1')=$5 AND COALESCE(pii_alg,'aes256gcm')=$6`,
+				b.cid, fresh, newestKEK, c.PII.Algorithm(), b.keyID, b.alg)
+			if err != nil {
 				return err
 			}
-			stats.BlobsReenc++
+			if tag.RowsAffected() == 1 {
+				stats.BlobsReenc++
+			} else {
+				stats.Skipped++
+			}
 		}
 	}
 

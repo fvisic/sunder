@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	apispec "github.com/fvisic/sunder/api"
@@ -25,18 +26,19 @@ import (
 
 // Server holds shared dependencies for all handlers.
 type Server struct {
-	Cfg      config.Config
-	Portal   *service.Portal
-	Store    *store.Store
-	Metrics  *metrics.Registry
-	Log      *slog.Logger
-	Contacts *service.Contacts
-	OTI      *service.OTI
-	GDPR     *service.GDPR
-	Auth     *auth.Authenticator
-	Limiter  ratelimit.Allower
-	Detector ratelimit.MissCounter
-	mux      *http.ServeMux
+	Cfg        config.Config
+	Portal     *service.Portal
+	Store      *store.Store
+	Metrics    *metrics.Registry
+	Log        *slog.Logger
+	Contacts   *service.Contacts
+	OTI        *service.OTI
+	GDPR       *service.GDPR
+	Auth       *auth.Authenticator
+	Limiter    ratelimit.Allower
+	Detector   ratelimit.MissCounter
+	enumWarned sync.Map // client id -> last enumeration warning (F3 latch)
+	mux        *http.ServeMux
 }
 
 // OpenKeystore builds the configured keystore driver, wrapped
@@ -120,6 +122,9 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 			// Multi-replica deployments share windows via Redis; the same
 			// instance serves both the limiter and the enumeration detector.
 			rl := ratelimit.NewRedisLimiter(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisFailClosed)
+			rl.OnFailure = func() {
+				s.Metrics.Inc(`sunder_ratelimit_backend_failures_total`)
+			}
 			s.Limiter, s.Detector = rl, rl
 		} else {
 			s.Limiter = ratelimit.NewLimiter()
@@ -140,7 +145,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("POST /v1/dsr/erase", s.handleDSRErase)
 		v1.HandleFunc("GET /v1/dsr/export", s.handleDSRExport)
 		s.Auth.Limiter = s.Limiter
-		s.mux.Handle("/v1/", s.Auth.Middleware(v1))
+		s.mux.Handle("/v1/", s.Auth.Middleware(capturePattern(v1)))
 		s.registerPortal()
 	}
 	return s, nil
@@ -149,15 +154,38 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 // Handler returns the outermost HTTP handler (middleware applied).
 func (s *Server) Handler() http.Handler { return s.instrument(s.mux) }
 
+// patternKey carries a *string through the request context so the route
+// pattern stamped by the INNER v1 mux (on the shallow request copy the
+// auth middleware makes) reaches the outer instrument wrapper - reading
+// r.Pattern out here would always see "/v1/" (review finding F1).
+type patternKey struct{}
+
+// capturePattern runs inside the middleware chain, right around the inner
+// mux: the mux stamps r.Pattern on THIS request copy, and the pointer in
+// the context hands it back out to instrument.
+func capturePattern(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+		if ptr, ok := r.Context().Value(patternKey{}).(*string); ok {
+			*ptr = r.Pattern
+		}
+	})
+}
+
 // instrument logs each request and records metrics. Never logs bodies,
 // query strings or headers - they can carry PII (emails, phone numbers).
 func (s *Server) instrument(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		var inner string
+		r = r.WithContext(context.WithValue(r.Context(), patternKey{}, &inner))
 		next.ServeHTTP(rec, r)
 		dur := time.Since(start)
-		pattern := r.Pattern
+		pattern := inner
+		if pattern == "" {
+			pattern = r.Pattern
+		}
 		if pattern == "" {
 			pattern = "unmatched"
 		}

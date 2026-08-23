@@ -57,7 +57,7 @@ paths:
         stores the normalized identifiers under them. Identifiers are
         normalized (Unicode NFKC; email lowercased; phone to E.164), HMAC
         search tokens are computed, and all values land in the caller-scope
-        AES-256-GCM blob.
+        AEAD blob (AES-256-GCM by default, per `SUNDER_PII_ALG`).
 
         Dedup: an existing person is matched by email token first, then
         phone, and reused - re-registering returns the same scoped CID and
@@ -822,7 +822,9 @@ components:
           description: Machine-readable error code.
           enum:
             - unauthorized
+            - credential_expired
             - forbidden
+            - consent_denied
             - purpose_not_allowed
             - audience_mismatch
             - not_found
@@ -832,6 +834,7 @@ components:
             - token_used
             - token_expired
             - rate_limited
+            - service_unavailable
             - internal
         detail:
           type: string

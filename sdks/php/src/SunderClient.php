@@ -25,6 +25,8 @@ final class SunderClient
     private const CODE_MAP = [
         'unauthorized' => UnauthorizedException::class,
         'forbidden' => ForbiddenException::class,
+        'credential_expired' => CredentialExpiredException::class,
+        'consent_denied' => ConsentDeniedException::class,
         'purpose_not_allowed' => PurposeNotAllowedException::class,
         'audience_mismatch' => AudienceMismatchException::class,
         'not_found' => NotFoundException::class,

@@ -122,6 +122,26 @@ func TestRunMTLSRefusesClientsWithoutCert(t *testing.T) {
 		TLSClientConfig: &tls.Config{RootCAs: pool},
 	}, Timeout: 5 * time.Second}
 	reached := false
+	// The port must actually be listening, or "every request failed" would
+	// pass vacuously (review finding, test item 6).
+	var bound bool
+	for i := 0; i < 50; i++ {
+		if c, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+			_ = c.Close()
+			bound = true
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("server exited instead of listening: %v", err)
+		default:
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !bound {
+		t.Fatal("mTLS server never bound its port")
+	}
+
 	var lastErr error
 	for i := 0; i < 50; i++ {
 		_, err := client.Get(fmt.Sprintf("https://%s/healthz", addr))
@@ -139,5 +159,7 @@ func TestRunMTLSRefusesClientsWithoutCert(t *testing.T) {
 		t.Fatal("expected handshake errors")
 	}
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Fatalf("graceful shutdown after mTLS refusals: %v", err)
+	}
 }

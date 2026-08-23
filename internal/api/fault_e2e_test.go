@@ -121,7 +121,9 @@ func TestDeadPoolFailsClosedEverywhere(t *testing.T) {
 	if _, _, err := oti.Issue(ctx, crm, cid, "newsletter", "erp", nil); err == nil {
 		t.Fatal("oti issue on dead pool")
 	}
-	if _, err := oti.Verify(ctx, crm, "v4.public.junk", "x", "crm"); err == nil {
+	// A GRANTED purpose so the call reaches the DB instead of failing the
+	// CanUse check first (review finding, test item 1).
+	if _, err := oti.Verify(ctx, crm, "v4.public.junk", "newsletter", "crm"); err == nil {
 		t.Fatal("oti verify on dead pool")
 	}
 	if err := gdpr.SetConsent(ctx, crm, cid, "x", true); err == nil {

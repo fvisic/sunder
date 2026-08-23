@@ -63,6 +63,16 @@ class UnauthorizedError(SunderError):
     pass
 
 
+class CredentialExpiredError(SunderError):
+    """401 credential_expired - the secret is correct but past its expiry;
+    rotate it (`sunder client rotate-secret`), do not retry."""
+
+
+class ConsentDeniedError(SunderError):
+    """403 consent_denied - the data subject withdrew consent for this
+    purpose. Distinct from PurposeNotAllowedError (a missing client grant)."""
+
+
 class ForbiddenError(SunderError):
     pass
 
@@ -102,7 +112,9 @@ class ServiceUnavailableError(SunderError):
 # Exact (status, error-code) pairs first; falls through to status-only rules.
 _CODE_MAP: dict[str, type[SunderError]] = {
     "unauthorized": UnauthorizedError,
+    "credential_expired": CredentialExpiredError,
     "forbidden": ForbiddenError,
+    "consent_denied": ConsentDeniedError,
     "purpose_not_allowed": PurposeNotAllowedError,
     "audience_mismatch": AudienceMismatchError,
     "not_found": NotFoundError,

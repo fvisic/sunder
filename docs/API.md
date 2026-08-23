@@ -1,11 +1,17 @@
 # API
 
 All `/v1/*` endpoints require authentication. Errors are JSON:
-`{"error": "<code>"}` with optional `detail`. Codes: `unauthorized` (401),
-`forbidden` / `purpose_not_allowed` / `audience_mismatch` (403),
+`{"error": "<code>"}` with optional `detail`. Codes:
+`unauthorized` / `credential_expired` (401),
+`forbidden` / `consent_denied` / `purpose_not_allowed` / `audience_mismatch` (403),
 `not_found` (404), `validation` / `bad_json` / `token_invalid` (400),
 `token_used` (409), `token_expired` (410), `rate_limited` (429),
-`internal` (500).
+`service_unavailable` (503), `internal` (500).
+
+`credential_expired` means the secret is correct but past its expiry -
+rotate (`sunder client rotate-secret`), do not retry. `consent_denied`
+means the data subject withdrew consent for that purpose - distinct from
+`purpose_not_allowed`, which is a missing grant on the client.
 
 ## Authentication
 
@@ -36,7 +42,7 @@ HMAC-tokenized, searchable and dedup-relevant. Normalized identifiers are
 stored as attributes `email`, `email_2`, …, `phone`, `phone_2`, …; those
 names plus `name` are reserved (rejected inside `attributes`). Identifiers
 are normalized (Unicode NFKC; email lowercased; phone to E.164), and all
-values land in the **caller-scope** AES-256-GCM blob. Multiple addresses or
+values land in the **caller-scope** AEAD blob (AES-256-GCM by default; see `SUNDER_PII_ALG`). Multiple addresses or
 any other multi-valued data go into `attributes` under caller-chosen names
 (`address_home`, `address_billing`, …).
 
@@ -245,7 +251,12 @@ touched by a registration. `sunder keys list` shows the ring.
 Actions `contacts.register`, `scopes.issue`, `attributes.read`, `lookup`
 (hits and misses), `oti.issue` and `oti.verify` append to the hash-chained
 audit log (client, action, CID, purpose/jti - never attribute values or raw
-identifiers), inside the same transaction as the operation they record.
+identifiers). Mutating operations (register, scopes.issue, oti.issue,
+oti.verify, consent, DSR) write their audit record inside the SAME
+transaction as the operation - both commit or neither does. Read
+operations (`attributes.read`, `lookup`) append in their own transaction
+BEFORE the value is released, so an audit failure fails the read closed
+rather than disclosing unaudited data.
 See docs/ARCHITECTURE.md and docs/THREAT-MODEL.md.
 
 ## Operational notes

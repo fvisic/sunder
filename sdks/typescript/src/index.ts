@@ -26,19 +26,38 @@ export type SunderErrorCode =
   // Also raised (status 0) on network-level failures - identical taxonomy
   // and trigger conditions across all Sunder SDKs.
   | "ServiceUnavailable"
+  // A 2xx whose body is not the expected JSON shape - same code the other
+  // four SDKs use ("bad_response").
+  | "BadResponse"
+  // The data subject withdrew consent for this purpose - distinct from
+  // PurposeNotAllowed (a missing client grant).
+  | "ConsentDenied"
   | "Unknown";
 
-/** Manual composition of abort signals for runtimes without AbortSignal.any. */
-function combineSignals(signals: AbortSignal[]): AbortSignal {
+/**
+ * Manual composition of abort signals for runtimes without
+ * AbortSignal.any. Returns a cleanup function: listeners on a
+ * caller-supplied long-lived signal MUST be removed on completion, or they
+ * accumulate per request (review finding F17).
+ */
+function combineSignals(signals: AbortSignal[]): { signal: AbortSignal; cleanup: () => void } {
   const controller = new AbortController();
+  const added: Array<[AbortSignal, () => void]> = [];
   for (const s of signals) {
     if (s.aborted) {
       controller.abort(s.reason);
       break;
     }
-    s.addEventListener("abort", () => controller.abort(s.reason), { once: true });
+    const onAbort = () => controller.abort(s.reason);
+    s.addEventListener("abort", onAbort, { once: true });
+    added.push([s, onAbort]);
   }
-  return controller.signal;
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      for (const [s, fn] of added) s.removeEventListener("abort", fn);
+    },
+  };
 }
 
 /** Error thrown by every SunderClient method on a non-success outcome. */
@@ -69,7 +88,28 @@ export class SunderError extends Error {
 }
 
 /** Maps an HTTP status plus the server's JSON `error` field to the taxonomy. */
+// Code-first, then status - the same order the python/php/java/dotnet SDKs
+// use, so a server code maps identically everywhere (review finding F15).
+const CODE_MAP: Record<string, SunderErrorCode> = {
+  unauthorized: "Unauthorized",
+  credential_expired: "Unauthorized",
+  forbidden: "Forbidden",
+  consent_denied: "ConsentDenied",
+  purpose_not_allowed: "PurposeNotAllowed",
+  audience_mismatch: "AudienceMismatch",
+  not_found: "NotFound",
+  validation: "Validation",
+  bad_json: "Validation",
+  token_invalid: "TokenInvalid",
+  token_used: "TokenUsed",
+  token_expired: "TokenExpired",
+  rate_limited: "RateLimited",
+  service_unavailable: "ServiceUnavailable",
+  bad_response: "BadResponse",
+};
+
 function mapError(status: number, serverError: string | undefined): SunderErrorCode {
+  if (serverError && CODE_MAP[serverError]) return CODE_MAP[serverError];
   if (status >= 500) return "ServiceUnavailable";
   switch (status) {
     case 400:
@@ -419,7 +459,18 @@ export class SunderClient {
         continue; // retryable if attempts remain
       }
       if (res.ok) {
-        return (await res.json()) as T;
+        // A non-JSON success body must surface as SunderError, never as a
+        // raw SyntaxError (review finding F14).
+        try {
+          return (await res.json()) as T;
+        } catch (err) {
+          throw new SunderError(
+            "BadResponse",
+            `${call.method} ${call.path} returned a non-JSON success body: ${String(err)}`,
+            res.status,
+            "bad_response",
+          );
+        }
       }
       const parsed = await parseErrorBody(res);
       const code = mapError(res.status, parsed.error);
@@ -449,12 +500,17 @@ export class SunderClient {
     if (options?.signal) signals.push(options.signal);
     // AbortSignal.any() only exists since Node 20.3; compose manually below
     // it so the documented Node 18+ support actually holds.
-    const combined =
-      signals.length === 1
-        ? signals[0]
-        : typeof AbortSignal.any === "function"
-          ? AbortSignal.any(signals)
-          : combineSignals(signals);
+    let combined: AbortSignal;
+    let cleanup = () => {};
+    if (signals.length === 1) {
+      combined = signals[0]!;
+    } else if (typeof AbortSignal.any === "function") {
+      combined = AbortSignal.any(signals);
+    } else {
+      const composed = combineSignals(signals);
+      combined = composed.signal;
+      cleanup = composed.cleanup;
+    }
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.credential}`,
       Accept: "application/json",
@@ -468,7 +524,12 @@ export class SunderClient {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    return fetch(`${this.url}${path}`, init);
+    try {
+      return await fetch(`${this.url}${path}`, init);
+    } finally {
+      // Drop listeners on the caller's long-lived signal (finding F17).
+      cleanup();
+    }
   }
 }
 

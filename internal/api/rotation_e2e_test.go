@@ -74,15 +74,17 @@ func TestOTISigningKeyRotationDualWindow(t *testing.T) {
 		t.Fatalf("v2-signed token must verify: %d", rec.Code)
 	}
 
-	// Retire v1: tokens signed under it stop verifying (leak cure).
-	rec, v1Tok := e.do(t, e.credCRM, "POST", "/v1/oti", map[string]string{
-		"cid": crmCID, "purpose": "create_order", "audience": "erp"})
-	if rec.Code != 201 {
-		t.Fatal(rec.Code)
-	}
-	_ = v1Tok // issued under v2 actually; craft the retirement check via ring state instead
+	// Retire v1 and present a token ACTUALLY signed under v1: it must stop
+	// verifying (leak cure), not merely disappear from the ring listing
+	// (review finding, test item 4).
+	v1Signed := craftToken(t, e, "v1", crmCID, "create_order", "erp")
 	if err := e.srv.Contacts.Ring.Retire(ctx, "oti-sign", "v1"); err != nil {
 		t.Fatal(err)
+	}
+	rec, _ = e.do(t, credERP, "POST", "/v1/oti/verify", map[string]string{
+		"token": v1Signed, "purpose": "create_order", "audience": "erp"})
+	if rec.Code == 200 {
+		t.Fatal("a token signed under a RETIRED key must not verify")
 	}
 	vs, err := e.srv.Contacts.Ring.Versions(ctx, "oti-sign")
 	if err != nil {
@@ -286,5 +288,50 @@ func TestKeysCLIListAndUnknown(t *testing.T) {
 	e := newE2E(t)
 	if !strings.HasPrefix(e.credCRM, "crm.") {
 		t.Fatal("sanity")
+	}
+}
+
+// craftToken signs a well-formed OTI payload with the REAL key material of
+// the given version - used to prove that retiring a version stops tokens
+// actually signed under it (not just the ring listing).
+func craftToken(t *testing.T, e *e2eEnv, version, cid, purpose, audience string) string {
+	t.Helper()
+	seed, err := OpenKeystore(e.srv.Cfg).Key(context.Background(), "oti-sign/"+version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sk, _, err := crypto.Ed25519FromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"jti":"22222222-2222-4222-8222-222222222222","cid":"` + cid +
+		`","purpose":"` + purpose + `","aud":"` + audience +
+		`","iat":"2026-08-22T00:00:00Z","exp":"2099-01-01T00:00:00Z","kid":"` + version + `"}`)
+	return crypto.PasetoSign(sk, payload)
+}
+
+// Review finding (test item 7): the SIGNED-claims audience check and the
+// "signed but never persisted" branch, reached with validly signed tokens.
+func TestSignedClaimsDefenseInDepth(t *testing.T) {
+	e, credERP := otiEnv(t)
+	crmCID := registerFilip(t, e)
+
+	// A validly signed token whose SIGNED aud is "erp" but whose claims
+	// were never persisted: the CAS finds no row -> treated as forged.
+	tok := craftToken(t, e, "v1", crmCID, "create_order", "erp")
+	rec, out := e.do(t, credERP, "POST", "/v1/oti/verify", map[string]string{
+		"token": tok, "purpose": "create_order", "audience": "erp"})
+	if rec.Code != 400 || out["error"] != "token_invalid" {
+		t.Fatalf("signed but never persisted must be token_invalid: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A validly signed token whose SIGNED aud does NOT match the request:
+	// the claims check rejects it even though the request-level audience
+	// equals the caller's scope.
+	tok = craftToken(t, e, "v1", crmCID, "create_order", "someone-else")
+	rec, out = e.do(t, credERP, "POST", "/v1/oti/verify", map[string]string{
+		"token": tok, "purpose": "create_order", "audience": "erp"})
+	if rec.Code != 403 || out["error"] != "audience_mismatch" {
+		t.Fatalf("signed-claims audience mismatch: %d %s", rec.Code, rec.Body.String())
 	}
 }

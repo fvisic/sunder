@@ -447,8 +447,11 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid string, attrs map[string]string) error {
 	var oldBlob []byte
 	var oldKeyID, oldAlg string
+	// FOR UPDATE: two concurrent merges onto the same row (dedup is the
+	// whole point of this path) must serialize, or the first writer's
+	// attributes are silently lost (review finding F2).
 	err := tx.QueryRow(ctx,
-		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1`,
+		`SELECT pii_encrypted, COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1 FOR UPDATE`,
 		cid).Scan(&oldBlob, &oldKeyID, &oldAlg)
 	if err != nil {
 		return err

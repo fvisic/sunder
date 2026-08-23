@@ -43,7 +43,9 @@ anchoring), `internal/ratelimit`.
 - **No OIB anywhere** - the schema has no column for a national identifier,
   by design.
 - **Stdlib first** - a new dependency requires justification in the PR;
-  the only runtime dependency is pgx.
+  runtime dependencies are deliberately few: pgx (database), golang.org/x/text
+  (Unicode NFKC normalization on every registration and lookup) and
+  golang.org/x/crypto (XChaCha20-Poly1305, one of the two PII algorithms).
 - **Postgres only (v1)** - decision D6; local development uses
   `deploy/docker-compose.yml`.
 

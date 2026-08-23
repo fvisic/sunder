@@ -20,10 +20,11 @@ import (
 type KeyRing struct {
 	Pool *pgxpool.Pool
 
-	mu        sync.Mutex
-	live      map[string][]string // kind -> ACTIVE+RETIRING versions, newest first
-	active    map[string]string   // kind -> newest ACTIVE version
-	fetchedAt time.Time
+	mu         sync.Mutex
+	lastForced time.Time
+	live       map[string][]string // kind -> ACTIVE+RETIRING versions, newest first
+	active     map[string]string   // kind -> newest ACTIVE version
+	fetchedAt  time.Time
 }
 
 const keyRingTTL = 30 * time.Second
@@ -79,6 +80,18 @@ func (k *KeyRing) refreshLocked(ctx context.Context) error {
 
 // Invalidate forces the next call to re-read the keys table (used after
 // rotation/retirement, and on unknown-kid verification misses).
+// InvalidateThrottled forces at most one cache reload per cooldown window -
+// the unknown-kid refresh path must not become a cache-busting vector.
+func (k *KeyRing) InvalidateThrottled() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if time.Since(k.lastForced) < 5*time.Second {
+		return
+	}
+	k.lastForced = time.Now()
+	k.live = nil
+}
+
 func (k *KeyRing) Invalidate() {
 	k.mu.Lock()
 	k.live = nil

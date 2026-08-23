@@ -24,6 +24,16 @@ class ForbiddenException extends SunderException
 {
 }
 
+/** 401 `credential_expired` - correct secret, past its expiry: rotate it. */
+class CredentialExpiredException extends SunderException
+{
+}
+
+/** 403 `consent_denied` - the data subject withdrew consent for this purpose. */
+class ConsentDeniedException extends SunderException
+{
+}
+
 /** 403 `purpose_not_allowed` - purpose not in the client's allowed purposes. */
 class PurposeNotAllowedException extends SunderException
 {
