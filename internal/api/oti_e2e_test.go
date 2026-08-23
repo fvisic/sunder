@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fvisic/sunder/internal/auth"
 )
@@ -181,5 +184,56 @@ func TestKeyRingUnknownKind(t *testing.T) {
 	}
 	if _, err := e.srv.Contacts.Ring.Versions(context.Background(), "nope"); err == nil {
 		t.Fatal("unknown kind must have no versions")
+	}
+}
+
+func TestPredicateClaimsOverHTTP(t *testing.T) {
+	e, credERP := otiEnv(t)
+	adult := time.Now().UTC().AddDate(-25, 0, 0).Format("2006-01-02")
+	rec, out := e.do(t, e.credCRM, "POST", "/v1/contacts", map[string]any{
+		"email": "age@example.com", "attributes": map[string]string{"birthdate": adult},
+	})
+	if rec.Code != 201 {
+		t.Fatalf("register: %d", rec.Code)
+	}
+	cid := out["cid"]
+	rec, out = e.do(t, e.credCRM, "POST", "/v1/oti", map[string]any{
+		"cid": cid, "purpose": "create_order", "audience": "erp",
+		"share_predicates": []map[string]any{{"attr": "birthdate", "op": "age_gte", "value": 18}},
+	})
+	if rec.Code != 201 {
+		t.Fatalf("issue with predicates: %d %v", rec.Code, out)
+	}
+	req := httptest.NewRequest("POST", "/v1/oti/verify", strings.NewReader(
+		`{"token":"`+out["token"]+`","purpose":"create_order","audience":"erp"}`))
+	req.Header.Set("Authorization", "Bearer "+credERP)
+	recorder := httptest.NewRecorder()
+	e.srv.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != 200 {
+		t.Fatalf("verify: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var resp struct {
+		CID        string `json:"cid"`
+		Predicates []struct {
+			Attr   string `json:"attr"`
+			Op     string `json:"op"`
+			Value  int    `json:"value"`
+			Result bool   `json:"result"`
+			Known  bool   `json:"known"`
+		} `json:"predicates"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Predicates) != 1 || !resp.Predicates[0].Result || !resp.Predicates[0].Known {
+		t.Fatalf("predicate JSON contract: %s", recorder.Body.String())
+	}
+	// Unknown op dies at issue time with a validation error.
+	rec, _ = e.do(t, e.credCRM, "POST", "/v1/oti", map[string]any{
+		"cid": cid, "purpose": "create_order", "audience": "erp",
+		"share_predicates": []map[string]any{{"attr": "birthdate", "op": "age_lte", "value": 18}},
+	})
+	if rec.Code != 400 {
+		t.Fatalf("unknown op must 400 at issue: %d", rec.Code)
 	}
 }

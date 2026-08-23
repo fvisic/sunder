@@ -290,11 +290,11 @@ paths:
               $ref: '#/components/schemas/OtiVerifyRequest'
       responses:
         '200':
-          description: Token verified and consumed. Returns the verifier's own scoped CID for the person.
+          description: Token verified and consumed. Returns the verifier's own scoped CID for the person, plus any shared attributes and evaluated predicate claims.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CidResponse'
+                $ref: '#/components/schemas/OtiVerifyResponse'
         '400':
           description: Bad JSON body, validation failure, or an invalid token (bad signature, wrong purpose, malformed shape) - `error` is `bad_json`, `validation` or `token_invalid`.
           content:
@@ -599,6 +599,33 @@ components:
         cid:
           $ref: '#/components/schemas/Cid'
 
+    PredicateResult:
+      type: object
+      required: [attr, op, result, known]
+      properties:
+        attr: {type: string}
+        op: {type: string, enum: [age_gte, exists]}
+        value: {type: integer}
+        result: {type: boolean}
+        known:
+          type: boolean
+          description: false = the attribute was absent or unparseable - deliberately distinct from a failed check ("we do not know the birthdate" must never read as "under 18").
+
+    OtiVerifyResponse:
+      type: object
+      required: [cid]
+      properties:
+        cid:
+          $ref: '#/components/schemas/Cid'
+        shared:
+          type: array
+          items: {type: string}
+          description: Attribute names copied into the verifier's scope (share_attributes); absent when nothing was shared.
+        predicates:
+          type: array
+          items: {$ref: '#/components/schemas/PredicateResult'}
+          description: Evaluated predicate claims (share_predicates); absent when the token carried none.
+
     ScopeData:
       type: object
       description: One scope's view of a person (DSR responses).
@@ -694,13 +721,24 @@ components:
           description: Must be in the caller's allowed purposes; bound into the token.
           examples: [create_order]
         audience:
+          type: string
+          description: The scope that will verify the token; only that scope can consume it.
+          examples: [erp]
         share_attributes:
           type: array
           items: {type: string}
           description: Issuer-scope attributes copied into the verifier's scope blob at verification. Absent/empty = the handoff shares nothing.
-          type: string
-          description: The scope that will verify the token; only that scope can consume it.
-          examples: [erp]
+        share_predicates:
+          type: array
+          maxItems: 8
+          description: Issuer-authorized predicate claims evaluated against the ISSUER's data at verification; the verifier receives booleans only, never the value (selective disclosure).
+          items:
+            type: object
+            required: [attr, op]
+            properties:
+              attr: {type: string, maxLength: 64, description: Attribute name in the issuer's scope.}
+              op: {type: string, enum: [age_gte, exists]}
+              value: {type: integer, minimum: 0, maximum: 150, description: age_gte only.}
 
     OtiIssueResponse:
       type: object

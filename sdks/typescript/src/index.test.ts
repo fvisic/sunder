@@ -145,6 +145,38 @@ test("getAttribute passes purpose as a query parameter", async (t) => {
   });
 });
 
+test("predicate claims: sent at issue, surfaced by verifyOti", async (t) => {
+  const { client } = await mock(t, {
+    "POST /v1/oti": (req) => {
+      const body = req.body as { share_predicates?: unknown };
+      assert.deepEqual(body.share_predicates, [
+        { attr: "birthdate", op: "age_gte", value: 18 },
+      ]);
+      return {
+        status: 201,
+        body: { token: "v4.public.p", expires_at: "2026-01-01T00:00:00Z" },
+      };
+    },
+    "POST /v1/oti/verify": () => ({
+      status: 200,
+      body: {
+        cid: "CID-web",
+        predicates: [
+          { attr: "birthdate", op: "age_gte", value: 18, result: true, known: true },
+        ],
+      },
+    }),
+  });
+  await client.issueOti("CID-abc", "age_check", "webshop", {
+    sharePredicates: [{ attr: "birthdate", op: "age_gte", value: 18 }],
+  });
+  const out = await client.verifyOti("v4.public.p", "age_check", "webshop");
+  assert.equal(out.cid, "CID-web");
+  const first = out.predicates?.[0];
+  assert.equal(first?.result, true);
+  assert.equal(first?.known, true);
+});
+
 test("issueOti and verifyOti round-trip (expires_at mapped to expiresAt)", async (t) => {
   const { client } = await mock(t, {
     "POST /v1/oti": (req) => {
