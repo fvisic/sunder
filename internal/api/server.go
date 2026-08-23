@@ -26,6 +26,7 @@ import (
 // Server holds shared dependencies for all handlers.
 type Server struct {
 	Cfg      config.Config
+	Portal   *service.Portal
 	Store    *store.Store
 	Metrics  *metrics.Registry
 	Log      *slog.Logger
@@ -112,6 +113,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		s.OTI = &service.OTI{Pool: st.Pool, Eng: eng, Ring: ring, Contacts: s.Contacts, TTL: cfg.OTITTL}
 		s.GDPR = &service.GDPR{Pool: st.Pool, Contacts: s.Contacts,
 			HTTPTimeout: cfg.WebhookTimeout, MaxAttempts: cfg.WebhookMaxAttempts}
+		s.Portal = &service.Portal{GDPR: s.GDPR, Contacts: s.Contacts}
 		s.Auth = &auth.Authenticator{Pool: st.Pool}
 
 		if cfg.RedisAddr != "" {
@@ -138,6 +140,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("POST /v1/dsr/erase", s.handleDSRErase)
 		v1.HandleFunc("GET /v1/dsr/export", s.handleDSRExport)
 		s.mux.Handle("/v1/", s.Auth.Middleware(v1))
+		s.registerPortal()
 	}
 	return s, nil
 }

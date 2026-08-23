@@ -258,3 +258,32 @@ See docs/ARCHITECTURE.md and docs/THREAT-MODEL.md.
   bundle) and cross-checks exported files against the database; it refuses
   to report success when anchors exist but cannot be cryptographically
   verified.
+
+
+## Self-service privacy portal (P2.5)
+
+Citizen-facing, cookie-authenticated surface at `/portal/` (self-contained
+SPA, CSP-locked) with its own per-IP rate limits. NOT behind client
+credentials - authentication is a magic link:
+
+1. `POST /portal/api/start {"email": ...}` - always answers `202` with the
+   same body (no enumeration oracle). When the address resolves to a
+   person, a one-time login token (15 min, single-use, stored hashed) is
+   POSTed as a signed `portal_login` event to the webhook registered under
+   the reserved scope `_portal` - the ORG's mailer turns it into an e-mail;
+   Sunder itself sends none. Configure with:
+   `sunder webhook set -scope _portal -url https://mailer.internal/hook`.
+2. `POST /portal/api/session {"token": ...}` - redeems the link, sets an
+   HttpOnly, SameSite=Strict session cookie (30 min).
+3. `GET /portal/api/me` - everything every scope stores about the person +
+   the audit trail (the v1.5 right-of-access path, self-served).
+4. `POST /portal/api/consent {"cid", "purpose", "granted"}` - flip a
+   consent on one of the person's OWN CIDs; takes effect immediately on
+   reads and handoffs.
+5. `POST /portal/api/erase` then `POST /portal/api/erase/confirm
+   {"confirm_token"}` - two-step erasure (a hijacked session cannot erase
+   in one call); runs the full org-wide erasure with webhooks, audited as
+   `portal:<cid>`.
+
+Every portal action is audited; tokens and sessions exist in the database
+only as SHA-256 hashes; sessions die with the person's erasure.
