@@ -10,3 +10,6 @@ __pycache__/
 *.pyc
 .venv/
 coverage.out
+
+# Java build output (Maven); regenerable, never committed.
+sdks/java/target/

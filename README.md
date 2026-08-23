@@ -12,11 +12,11 @@ Sunder is a self-hosted identity decoupling layer that breaks the join:
 
 ```mermaid
 flowchart LR
-    subgraph before [Without Sunder]
-        A1[CRM<br/>ana@example.com] --- B1[Billing<br/>ana@example.com] --- C1[Analytics<br/>ana@example.com]
+    subgraph before["Without Sunder: one shared join key"]
+        A1["CRM<br/>ana@example.com"] --- B1["Billing<br/>ana@example.com"] --- C1["Analytics<br/>ana@example.com"]
     end
-    subgraph after [With Sunder]
-        A2[CRM<br/>CID-K7Q2...] -.unjoinable.- B2[Billing<br/>CID-9XWF...] -.unjoinable.- C2[Analytics<br/>CID-P3RM...]
+    subgraph after["With Sunder: unjoinable per-scope pseudonyms"]
+        A2["CRM<br/>CID-K7Q2..."] -.- B2["Billing<br/>CID-9XWF..."] -.- C2["Analytics<br/>CID-P3RM..."]
     end
     before ==> after
 ```
