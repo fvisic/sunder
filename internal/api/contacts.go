@@ -106,3 +106,23 @@ func (s *Server) logErr(r *http.Request, err error) {
 	}
 	s.Log.Error("handler error", "pattern", r.Pattern, "err", err.Error())
 }
+
+// handleExternalClaims accepts an issuer-signed claim envelope (P2.4
+// federation) and merges its claims into the caller-scope blob with
+// provenance. Action: claims.external.
+func (s *Server) handleExternalClaims(w http.ResponseWriter, r *http.Request) {
+	in, ok := decode[struct {
+		CID      string `json:"cid"`
+		Envelope string `json:"envelope"`
+	}](w, r)
+	if !ok {
+		return
+	}
+	stored, err := s.Contacts.ExternalClaims(r.Context(), auth.FromContext(r.Context()), in.CID, in.Envelope)
+	if err != nil {
+		s.logErr(r, err)
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"stored": stored})
+}

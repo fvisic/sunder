@@ -29,6 +29,7 @@ const (
 	ActOTIIssue         = "oti.issue"
 	ActOTIVerify        = "oti.verify"
 	ActConsentManage    = "consent.manage"
+	ActClaimsExternal   = "claims.external"
 	// DSR actions (docs/DESIGN.md, GDPR layer). dsr.access and dsr.erase are org-wide,
 	// linkage-capable privileges for the privacy-officer client only;
 	// dsr.export is scope-local portability.
