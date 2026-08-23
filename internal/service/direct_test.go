@@ -359,3 +359,37 @@ func TestNewestWithoutActiveVersion(t *testing.T) {
 		t.Fatal("kind without an ACTIVE version must error")
 	}
 }
+
+// erasePerson branches: a person whose scopes hold no blob still erases
+// cleanly, and the erasure is recorded once per scope.
+func TestErasePersonWithoutBlobs(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	var personID string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`INSERT INTO persons (id) VALUES (gen_random_uuid()) RETURNING id`).Scan(&personID); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range []string{"crm", "billing"} {
+		if _, err := e.admin.Pool.Exec(ctx,
+			`INSERT INTO cids (cid, person_id, scope) VALUES ($1,$2,$3)`,
+			"CID-EMPTY"+scope+"000000000000000", personID, scope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, scopes, err := e.gdpr.Erase(ctx, e.crm, "CID-EMPTYcrm000000000000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == 0 || scopes != 2 {
+		t.Fatalf("erasure must cover every scope: id=%d scopes=%d", id, scopes)
+	}
+	var events int
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM erasure_events WHERE erasure_id=$1`, id).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 2 {
+		t.Fatalf("one event per scope expected, got %d", events)
+	}
+}

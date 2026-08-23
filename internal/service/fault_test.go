@@ -7,9 +7,12 @@ package service_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -252,5 +255,171 @@ func TestKeyringFaults(t *testing.T) {
 	}
 	if err := ring.EnsureAll(ctx, eng2); err == nil {
 		t.Fatal("ensure-all must fail when the keys table is unreadable")
+	}
+}
+
+// Remaining GDPR/OTI error branches, reached by denying one table at a time.
+func TestMoreDatabaseFaults(t *testing.T) {
+	ctx := context.Background()
+
+	// webhooks denied: delivery cannot look up its target.
+	e := newFaultEnv(t, "webhooks")
+	cid := e.register(t)
+	// Erasure must NOT fail because a webhook is unreachable: the data is
+	// gone either way and the queued event is retried by the worker.
+	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err != nil {
+		t.Fatalf("erasure must not depend on webhook availability: %v", err)
+	}
+	if _, err := e.gdpr.DeliverPending(ctx); err == nil {
+		t.Fatal("the delivery worker must surface a webhook-read failure")
+	}
+
+	// erasure_events denied: the worker cannot record outcomes.
+	e2 := newFaultEnv(t, "erasure_events")
+	if _, err := e2.gdpr.DeliverPending(ctx); err == nil {
+		t.Fatal("the worker must surface an event-read failure")
+	}
+
+	// external_envelopes denied: replay protection cannot be recorded, so
+	// the claim must not be stored.
+	e3 := newFaultEnv(t, "external_envelopes")
+	cid3 := e3.register(t)
+	e3.crm.AllowedActions = append(e3.crm.AllowedActions, auth.ActClaimsExternal)
+	seed := make([]byte, 32)
+	seed[0] = 99
+	sk := ed25519.NewKeyFromSeed(seed)
+	if _, err := e3.admin.Pool.Exec(ctx,
+		`INSERT INTO trusted_issuers (issuer_id, public_key, allowed_claims, added_by) VALUES ('gw',$1,'{*}','t')`,
+		[]byte(sk.Public().(ed25519.PublicKey))); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"iss": "gw", "jti": "envelope-fault-1", "cid": cid3,
+		"claims": map[string]string{"kyc": "1"},
+		"exp":    time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	})
+	if _, err := e3.svc.ExternalClaims(ctx, e3.crm, cid3, crypto.PasetoSign(sk, payload)); err == nil {
+		t.Fatal("claims must not be stored when replay protection cannot be recorded")
+	}
+
+	// retention_policies denied handled elsewhere; here: cids denied blocks
+	// the retention wipe.
+	e4 := newFaultEnv(t, "cids")
+	if _, _, err := service.RunRetention(ctx, e4.gdpr.Pool); err == nil {
+		t.Fatal("retention must surface a cids-write failure")
+	}
+
+	// oti denied: pruning expired tokens fails.
+	e5 := newFaultEnv(t, "oti")
+	if _, _, err := service.RunRetention(ctx, e5.gdpr.Pool); err == nil {
+		t.Fatal("retention must surface an oti-prune failure")
+	}
+}
+
+// OTI and contacts error branches under one-table denials: every path that
+// touches the database must fail closed, and none may panic.
+func TestOTIAndContactsFaultBranches(t *testing.T) {
+	ctx := context.Background()
+
+	// keys denied: no path can resolve a key version.
+	e := newFaultEnv(t, "keys")
+	if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{Email: "k@example.com"}); err == nil {
+		t.Fatal("register must fail without a resolvable key version")
+	}
+	if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{Email: "k@example.com"}); err == nil {
+		t.Fatal("lookup must fail without a resolvable key version")
+	}
+	if _, err := e.svc.Rekey(ctx, true, 5); err == nil {
+		t.Fatal("rekey must fail without a resolvable key version")
+	}
+
+	// person_tokens denied: lookup by identifier cannot resolve.
+	e2 := newFaultEnv(t, "person_tokens")
+	if _, err := e2.svc.Lookup(ctx, e2.crm, service.LookupInput{Email: "x@example.com"}); err == nil {
+		t.Fatal("lookup must surface a token-read failure")
+	}
+	if _, err := e2.svc.Lookup(ctx, e2.crm, service.LookupInput{Phone: "+385911234567"}); err == nil {
+		t.Fatal("phone lookup must surface a token-read failure")
+	}
+	if _, err := e2.svc.Lookup(ctx, e2.crm, service.LookupInput{
+		Name: "Fault Case", Email: "fault@example.com"}); err == nil {
+		t.Fatal("name+factor lookup must surface a token-read failure")
+	}
+
+	// Validation branches that never touch the database.
+	e3 := newFaultEnv(t)
+	if _, err := e3.svc.Lookup(ctx, e3.crm, service.LookupInput{}); err == nil {
+		t.Fatal("a lookup with no criteria must be rejected")
+	}
+	if _, err := e3.svc.Lookup(ctx, e3.crm, service.LookupInput{Name: "Only A Name"}); err == nil {
+		t.Fatal("a name alone is never an identifier")
+	}
+	if _, err := e3.svc.Lookup(ctx, e3.crm, service.LookupInput{Email: "not-an-email"}); err == nil {
+		t.Fatal("a malformed email must be rejected before any query")
+	}
+	noLookup := *e3.crm
+	noLookup.AllowedActions = nil
+	if _, err := e3.svc.Lookup(ctx, &noLookup, service.LookupInput{Email: "x@example.com"}); err != service.ErrForbidden {
+		t.Fatal("lookup without the action must be forbidden")
+	}
+	if _, err := e3.svc.GetAttribute(ctx, &noLookup, "CID-X", "email", "support"); err != service.ErrForbidden {
+		t.Fatal("attribute read without the action must be forbidden")
+	}
+	cid := e3.register(t)
+	if _, err := e3.svc.GetAttribute(ctx, e3.crm, cid, "email", ""); err == nil {
+		t.Fatal("an empty purpose must be rejected")
+	}
+	if _, err := e3.svc.GetAttribute(ctx, e3.crm, cid, "email", "marketing"); err != service.ErrPurposeNotAllowed {
+		t.Fatal("an ungranted purpose must be refused")
+	}
+	if _, err := e3.svc.GetAttribute(ctx, e3.crm, cid, "nonexistent", "support"); err != service.ErrNotFound {
+		t.Fatal("an absent attribute must be not-found")
+	}
+}
+
+// GDPR consent/access branches the happy-path tests skip.
+func TestGDPRRemainingBranches(t *testing.T) {
+	ctx := context.Background()
+	e := newFaultEnv(t)
+	cid := e.register(t)
+
+	// Consent listing on a foreign CID and on an unknown one.
+	foreign := *e.crm
+	foreign.Scope = "other"
+	if _, err := e.gdpr.ListConsents(ctx, &foreign, cid); err != service.ErrNotFound {
+		t.Fatalf("foreign consent listing: %v", err)
+	}
+	if _, err := e.gdpr.ListConsents(ctx, e.crm, "CID-NOPE"); err != service.ErrNotFound {
+		t.Fatalf("unknown consent listing: %v", err)
+	}
+	// An empty purpose is rejected on the service path too.
+	if err := e.gdpr.SetConsent(ctx, e.crm, cid, "", true); err == nil {
+		t.Fatal("an empty purpose must be rejected")
+	}
+	// Listing returns what was set, including a withdrawal.
+	if err := e.gdpr.SetConsent(ctx, e.crm, cid, "support", false); err != nil {
+		t.Fatal(err)
+	}
+	list, err := e.gdpr.ListConsents(ctx, e.crm, cid)
+	if err != nil || len(list) != 1 || list[0].Granted {
+		t.Fatalf("consent listing: %+v %v", list, err)
+	}
+	// Export and access on an unknown CID.
+	if _, err := e.gdpr.Export(ctx, e.crm, "CID-NOPE"); err != service.ErrNotFound {
+		t.Fatalf("export of an unknown cid: %v", err)
+	}
+	if _, err := e.gdpr.Access(ctx, e.crm, "CID-NOPE"); err != service.ErrNotFound {
+		t.Fatalf("access of an unknown cid: %v", err)
+	}
+	// consents denied: the listing surfaces the failure.
+	e2 := newFaultEnv(t, "consents")
+	cid2 := e2.register(t)
+	if _, err := e2.gdpr.ListConsents(ctx, e2.crm, cid2); err == nil {
+		t.Fatal("consent listing must surface a read failure")
+	}
+	// retention_policies denied: the sweep cannot read its policies.
+	e3 := newFaultEnv(t, "retention_policies")
+	if _, _, err := service.RunRetention(ctx, e3.gdpr.Pool); err == nil {
+		t.Fatal("retention must surface a policy-read failure")
 	}
 }

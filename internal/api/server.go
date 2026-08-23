@@ -115,7 +115,9 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		s.OTI = &service.OTI{Pool: st.Pool, Eng: eng, Ring: ring, Contacts: s.Contacts, TTL: cfg.OTITTL}
 		s.GDPR = &service.GDPR{Pool: st.Pool, Contacts: s.Contacts,
 			HTTPTimeout: cfg.WebhookTimeout, MaxAttempts: cfg.WebhookMaxAttempts}
-		s.Portal = &service.Portal{GDPR: s.GDPR, Contacts: s.Contacts}
+		if cfg.PortalEnabled {
+			s.Portal = &service.Portal{GDPR: s.GDPR, Contacts: s.Contacts, BaseURL: cfg.PortalBaseURL}
+		}
 		s.Auth = &auth.Authenticator{Pool: st.Pool}
 
 		if cfg.RedisAddr != "" {
@@ -146,7 +148,12 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("GET /v1/dsr/export", s.handleDSRExport)
 		s.Auth.Limiter = s.Limiter
 		s.mux.Handle("/v1/", s.Auth.Middleware(capturePattern(v1)))
-		s.registerPortal()
+		// The portal is only mounted on the main listener when it has no
+		// dedicated one: with mTLS on the API, citizens could never present
+		// a client certificate (review N12).
+		if s.Portal != nil && s.Cfg.PortalListen == "" {
+			s.registerPortal()
+		}
 	}
 	return s, nil
 }
@@ -271,6 +278,15 @@ func (s *Server) Run(ctx context.Context) error {
 					} else if n > 0 {
 						s.Log.Info("erasure events delivered", "count", n)
 					}
+					// Portal mail rides the same worker: Start must not
+					// block on a network round-trip (review N2).
+					if s.Portal != nil {
+						if n, err := s.Portal.DeliverPendingMail(ctx); err != nil {
+							s.Log.Error("portal mail delivery", "err", err.Error())
+						} else if n > 0 {
+							s.Log.Info("portal mail delivered", "count", n)
+						}
+					}
 				}
 			}
 		}()
@@ -284,17 +300,57 @@ func (s *Server) Run(ctx context.Context) error {
 			errCh <- srv.ListenAndServe()
 		}
 	}()
-	if s.Cfg.TLSCert != "" && s.Cfg.MTLSCA == "" {
+
+	// A dedicated portal listener: TLS (server-side) but never a client
+	// certificate requirement, so the API can stay behind mTLS while
+	// citizens reach the portal from a browser (review N12).
+	var portalSrv *http.Server
+	if s.Portal != nil && s.Cfg.PortalListen != "" {
+		portalSrv = &http.Server{
+			Addr:              s.Cfg.PortalListen,
+			Handler:           s.instrument(s.portalMux()),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		if s.Cfg.TLSCert != "" {
+			portalSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13}
+		}
+		go func() {
+			if s.Cfg.TLSCert != "" {
+				errCh <- portalSrv.ListenAndServeTLS(s.Cfg.TLSCert, s.Cfg.TLSKey)
+			} else {
+				errCh <- portalSrv.ListenAndServe()
+			}
+		}()
+		s.Log.Info("portal listening", "addr", s.Cfg.PortalListen, "tls", s.Cfg.TLSCert != "")
+	}
+
+	if s.Cfg.TLSCert == "" {
+		s.Log.Warn("serving WITHOUT TLS - credentials and PII cross the network in the clear; terminate TLS at an ingress or set SUNDER_TLS_CERT/KEY")
+	} else if s.Cfg.MTLSCA == "" {
 		s.Log.Warn("TLS is enabled WITHOUT mutual TLS - any network peer can reach the API with just a bearer credential; set SUNDER_MTLS_CA in production (docs/RUNBOOK-MTLS-ROTATION.md)")
 	}
-	s.Log.Info("listening", "addr", s.Cfg.Listen, "tls", s.Cfg.TLSCert != "", "mtls", s.Cfg.MTLSCA != "")
+	if s.Portal != nil && s.Cfg.PortalListen == "" && s.Cfg.MTLSCA != "" {
+		s.Log.Warn("the portal is mounted on the mTLS-protected API listener: browsers cannot present a client certificate, so citizens will be refused - set SUNDER_PORTAL_LISTEN")
+	}
+	s.Log.Info("listening", "addr", s.Cfg.Listen, "tls", s.Cfg.TLSCert != "",
+		"mtls", s.Cfg.MTLSCA != "", "portal", s.Portal != nil)
 
-	select {
-	case <-ctx.Done():
+	shutdown := func() error {
 		shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return srv.Shutdown(shCtx)
+		err := srv.Shutdown(shCtx)
+		if portalSrv != nil {
+			if perr := portalSrv.Shutdown(shCtx); err == nil {
+				err = perr
+			}
+		}
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return shutdown()
 	case err := <-errCh:
+		_ = shutdown()
 		return err
 	}
 }

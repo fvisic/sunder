@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fvisic/sunder/internal/crypto"
@@ -33,6 +34,20 @@ type Config struct {
 	RedisAddr       string // SUNDER_REDIS_ADDR (host:port)
 	RedisPassword   string // SUNDER_REDIS_PASSWORD
 	RedisFailClosed bool   // SUNDER_REDIS_FAIL_CLOSED=true blocks lookups when Redis is unreachable (default: fail open)
+
+	// Self-service privacy portal (P2.5). OFF by default: an upgrade must
+	// never silently open a new unauthenticated public surface.
+	PortalEnabled bool   // SUNDER_PORTAL_ENABLED=true
+	PortalListen  string // SUNDER_PORTAL_LISTEN: separate bind address for the portal, so the API can stay behind mTLS while citizens reach the portal (empty = same listener)
+	PortalBaseURL string // SUNDER_PORTAL_BASE_URL: public base URL used to build the magic link in the mail payload (e.g. https://privacy.acme.example)
+	// PortalCookieInsecure drops the Secure flag on the session cookie -
+	// local development only. Default (false) keeps Secure set even when
+	// TLS terminates at the ingress.
+	PortalCookieInsecure bool // SUNDER_PORTAL_COOKIE_INSECURE=true
+	// PortalClientIPHeader, when set, is trusted for per-IP rate limiting
+	// behind a reverse proxy (e.g. "X-Forwarded-For"). Opt-in only: a
+	// blindly trusted header is a limiter bypass.
+	PortalClientIPHeader string // SUNDER_PORTAL_CLIENT_IP_HEADER
 
 	// Tunables. Defaults match the documented v1 behaviour; see docs/CONFIG.md
 	// before changing them - several are security trade-offs, not preferences.
@@ -97,6 +112,12 @@ func FromEnvNoDB() (Config, error) {
 		RedisAddr:       os.Getenv("SUNDER_REDIS_ADDR"),
 		RedisPassword:   os.Getenv("SUNDER_REDIS_PASSWORD"),
 		RedisFailClosed: os.Getenv("SUNDER_REDIS_FAIL_CLOSED") == "true",
+
+		PortalEnabled:        os.Getenv("SUNDER_PORTAL_ENABLED") == "true",
+		PortalListen:         os.Getenv("SUNDER_PORTAL_LISTEN"),
+		PortalBaseURL:        os.Getenv("SUNDER_PORTAL_BASE_URL"),
+		PortalCookieInsecure: os.Getenv("SUNDER_PORTAL_COOKIE_INSECURE") == "true",
+		PortalClientIPHeader: os.Getenv("SUNDER_PORTAL_CLIENT_IP_HEADER"),
 	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		return c, fmt.Errorf("SUNDER_TLS_CERT and SUNDER_TLS_KEY must be set together")
@@ -111,6 +132,15 @@ func FromEnvNoDB() (Config, error) {
 	}
 	if c.Keystore == "vault" && (c.VaultAddr == "" || c.VaultToken == "") {
 		return c, fmt.Errorf("vault keystore requires SUNDER_VAULT_ADDR and SUNDER_VAULT_TOKEN")
+	}
+
+	if c.PortalBaseURL != "" && !strings.HasPrefix(c.PortalBaseURL, "https://") &&
+		!strings.HasPrefix(c.PortalBaseURL, "http://localhost") &&
+		!strings.HasPrefix(c.PortalBaseURL, "http://127.0.0.1") {
+		return c, fmt.Errorf("SUNDER_PORTAL_BASE_URL must be https:// (or loopback http for development)")
+	}
+	if c.PortalListen != "" && !c.PortalEnabled {
+		return c, fmt.Errorf("SUNDER_PORTAL_LISTEN requires SUNDER_PORTAL_ENABLED=true")
 	}
 
 	var err error

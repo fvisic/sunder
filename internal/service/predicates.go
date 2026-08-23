@@ -23,14 +23,28 @@ const (
 
 // Predicate is one issuer-authorized claim request.
 type Predicate struct {
-	Attr  string `json:"attr"`
-	Op    string `json:"op"`
-	Value int    `json:"value,omitempty"` // age_gte only
+	Attr string `json:"attr"`
+	Op   string `json:"op"`
+	// Value is required for age_gte (a pointer so an omitted threshold is
+	// a loud validation failure rather than a silently-always-true 0).
+	Value *int `json:"value,omitempty"`
 }
 
-// PredicateResult is one evaluated claim. Known=false means the attribute
-// was absent or unparseable - deliberately distinct from a failed check, so
-// "we don't know the birthdate" never reads as "under 18".
+// Threshold returns the age_gte threshold, or 0 when unset.
+func (p Predicate) Threshold() int {
+	if p.Value == nil {
+		return 0
+	}
+	return *p.Value
+}
+
+// PredicateResult is one evaluated claim.
+//
+// Known is op-specific, on purpose:
+//   - age_gte: false when the attribute is absent or unparseable, so "we do
+//     not know the birthdate" never reads as "under 18";
+//   - exists: always true - the question IS whether the attribute is there,
+//     so its absence is an answer, not an unknown.
 type PredicateResult struct {
 	Predicate
 	Result bool `json:"result"`
@@ -51,11 +65,16 @@ func validatePredicates(preds []Predicate) error {
 		}
 		switch p.Op {
 		case PredAgeGTE:
-			if p.Value < 0 || p.Value > 150 {
-				return fmt.Errorf("%w: age_gte value must be 0-150", ErrValidation)
+			// An omitted threshold used to mean 0, which is true for every
+			// parseable past date - a silent always-pass (review N20).
+			if p.Value == nil {
+				return fmt.Errorf("%w: age_gte requires an explicit value", ErrValidation)
+			}
+			if *p.Value < 1 || *p.Value > 150 {
+				return fmt.Errorf("%w: age_gte value must be 1-150", ErrValidation)
 			}
 		case PredExists:
-			if p.Value != 0 {
+			if p.Value != nil {
 				return fmt.Errorf("%w: exists takes no value", ErrValidation)
 			}
 		default:
@@ -98,7 +117,7 @@ func (o *OTI) evalPredicates(ctx context.Context, tx pgx.Tx, issuerCID string, p
 		case PredAgeGTE:
 			if bd, ok := parseDate(val); present && ok {
 				r.Known = true
-				r.Result = fullYears(bd, now) >= p.Value
+				r.Result = fullYears(bd, now) >= p.Threshold()
 			}
 		}
 		results = append(results, r)

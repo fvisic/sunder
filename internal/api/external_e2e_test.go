@@ -121,3 +121,35 @@ func TestEnumerationWarnLatch(t *testing.T) {
 		t.Fatal("a different client has its own latch")
 	}
 }
+
+// External-claims HTTP branches: bad body, missing action, dead pool.
+func TestExternalClaimsHTTPBranches(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	noAction, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "plain", Name: "Plain", Scope: "crm",
+		AllowedActions: []string{auth.ActLookup}, AllowedPurposes: []string{"support"}, RateLimit: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Listen: ":0", Keystore: "file", KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Missing claims.external action.
+	if code, _ := callJSON(t, srv, noAction, "POST", "/v1/claims/external",
+		`{"cid":"CID-X","envelope":"v4.public.x"}`); code != 403 {
+		t.Fatalf("missing action must be 403: %d", code)
+	}
+	// Malformed body.
+	if code, _ := callJSON(t, srv, noAction, "POST", "/v1/claims/external", `{broken`); code != 400 {
+		t.Fatal("broken JSON must be 400")
+	}
+	// Dead pool: 5xx, never a claim silently accepted.
+	st.Close()
+	if code, _ := callJSON(t, srv, noAction, "POST", "/v1/claims/external",
+		`{"cid":"CID-X","envelope":"v4.public.x"}`); code == 200 {
+		t.Fatal("a dead pool must not yield success")
+	}
+}

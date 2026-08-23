@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -43,7 +44,14 @@ type externalEnvelope struct {
 const (
 	maxExternalClaims    = 16
 	maxExternalClaimSize = 4096
+	// maxEnvelopeLifetime bounds how far ahead an issuer may pre-stage
+	// envelopes; without it the replay table can never be pruned.
+	maxEnvelopeLifetime = 24 * time.Hour
 )
+
+// issuerIDPattern mirrors the registry CHECK constraint. Applied to the
+// unverified payload before any lookup, audit write or error message.
+var issuerIDPattern = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
 
 // ExternalClaims verifies an issuer-signed envelope and merges its claims
 // into the caller-scope blob for cid, namespaced with the issuer id.
@@ -52,13 +60,12 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 	if !client.Can(auth.ActClaimsExternal) {
 		return nil, ErrForbidden
 	}
-	// Scope ownership first - external claims must not become a probe for
-	// foreign CIDs.
-	personID, err := c.personForClientCID(ctx, client, cid)
-	if err != nil {
+	// Scope ownership AND tombstone check first: external claims must not
+	// become a probe for foreign CIDs, nor a way to write fresh PII into a
+	// person who has been erased (personForClientCID enforces both).
+	if _, err := c.personForClientCID(ctx, client, cid); err != nil {
 		return nil, err
 	}
-	_ = personID
 
 	// Parse the UNVERIFIED payload only to learn which issuer to look up;
 	// nothing is trusted until the signature checks out below.
@@ -69,6 +76,14 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 	var env externalEnvelope
 	if err := json.Unmarshal(payload, &env); err != nil || env.Issuer == "" {
 		return nil, fmt.Errorf("%w: envelope missing issuer", ErrValidation)
+	}
+	// Validate the issuer id BEFORE it is used as a query parameter or
+	// written to the audit chain: it comes from the UNVERIFIED payload, and
+	// every audit append takes a global advisory lock. Unbounded
+	// attacker-chosen bytes there mean both audit inflation and
+	// service-wide serialisation behind that lock (review N4).
+	if !issuerIDPattern.MatchString(env.Issuer) {
+		return nil, fmt.Errorf("%w: malformed issuer id", ErrValidation)
 	}
 
 	var pubKey []byte
@@ -85,6 +100,14 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 	}
 	if err != nil {
 		return nil, err
+	}
+	// ed25519.Verify PANICS on a wrong-length key: the DB CHECK is the only
+	// thing preventing that today, so guard at the call site too. Go's
+	// verify is also cofactorless and accepts low-order points, so a
+	// degenerate key registered at onboarding would accept forged
+	// signatures - reject the known-bad all-zero key explicitly.
+	if len(pubKey) != ed25519.PublicKeySize || isAllZero(pubKey) {
+		return nil, fmt.Errorf("%w: issuer %q has unusable key material", ErrForbidden, env.Issuer)
 	}
 	if _, err := crypto.PasetoVerify(ed25519.PublicKey(pubKey), envelope); err != nil {
 		// Audit forgery attempts: a signature that fails against a REGISTERED
@@ -106,6 +129,11 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 	exp, err := time.Parse(time.RFC3339, env.Expires)
 	if err != nil || time.Now().After(exp) {
 		return nil, fmt.Errorf("%w: envelope expired or missing exp", ErrValidation)
+	}
+	// A bounded lifetime keeps pre-staged envelopes from living for years
+	// and makes the replay table prunable (review N16/N20).
+	if time.Until(exp) > maxEnvelopeLifetime {
+		return nil, fmt.Errorf("%w: envelope exp is more than %s ahead", ErrValidation, maxEnvelopeLifetime)
 	}
 	if len(env.Claims) == 0 || len(env.Claims) > maxExternalClaims {
 		return nil, fmt.Errorf("%w: 1-%d claims per envelope", ErrValidation, maxExternalClaims)
@@ -147,8 +175,8 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 	defer func() { _ = tx.Rollback(ctx) }()
 	// Anti-replay: the jti is consumed in the SAME transaction as the merge.
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO external_envelopes (jti, issuer_id) VALUES ($1,$2)`,
-		env.JTI, env.Issuer); err != nil {
+		`INSERT INTO external_envelopes (jti, issuer_id, expires_at) VALUES ($1,$2,$3)`,
+		env.JTI, env.Issuer, exp); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return nil, fmt.Errorf("%w: envelope already used", ErrValidation)
@@ -171,4 +199,13 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 		return nil, err
 	}
 	return stored, nil
+}
+
+func isAllZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
 }

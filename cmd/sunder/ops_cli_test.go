@@ -425,3 +425,174 @@ func TestBootstrapCmd(t *testing.T) {
 		t.Fatal("unattended without a credential file must error")
 	}
 }
+
+func TestBootstrapGuardsAndAtomicity(t *testing.T) {
+	ctx := context.Background()
+	cfg := testCfg(t)
+
+	// A stream target would put the credential in a container log.
+	st := testutil.NewDB(t)
+	if err := bootstrapCmd(ctx, cfg, st, []string{"-unattended", "-credential-file", "/dev/stdout"}); err == nil {
+		t.Fatal("a /dev/ credential target must be rejected")
+	}
+	// Nothing was created by the rejected run.
+	var n int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM clients`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("a rejected bootstrap must create no client, found %d", n)
+	}
+
+	// Unattended with no file at all: same guarantee.
+	st2 := testutil.NewDB(t)
+	if err := bootstrapCmd(ctx, cfg, st2, []string{"-unattended"}); err == nil {
+		t.Fatal("unattended without a file must be rejected")
+	}
+	if err := st2.Pool.QueryRow(ctx, `SELECT count(*) FROM clients`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("no client may exist after the guard fired, found %d", n)
+	}
+
+	// An unwritable credential path must roll the client back entirely.
+	st3 := testutil.NewDB(t)
+	if err := bootstrapCmd(ctx, cfg, st3, []string{
+		"-unattended", "-credential-file", "/definitely/not/a/dir/cred"}); err == nil {
+		t.Fatal("an unwritable credential file must fail the bootstrap")
+	}
+	if err := st3.Pool.QueryRow(ctx, `SELECT count(*) FROM clients`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("the admin row must roll back with the failed write, found %d", n)
+	}
+
+	// A bad TTL is rejected before anything is created.
+	if err := bootstrapCmd(ctx, cfg, st3, []string{"-ttl", "eventually"}); err == nil {
+		t.Fatal("a malformed ttl must be rejected")
+	}
+
+	// The happy path grants usable purposes (an admin with none is useless).
+	st4 := testutil.NewDB(t)
+	if err := bootstrapCmd(ctx, cfg, st4, []string{"-id", "ops", "-purposes", "support,billing"}); err != nil {
+		t.Fatal(err)
+	}
+	var purposes []string
+	if err := st4.Pool.QueryRow(ctx,
+		`SELECT allowed_purposes FROM clients WHERE client_id='ops'`).Scan(&purposes); err != nil {
+		t.Fatal(err)
+	}
+	if len(purposes) != 2 {
+		t.Fatalf("purposes must be applied: %v", purposes)
+	}
+	// The default is a real purpose, not an empty (deny-all) list.
+	st5 := testutil.NewDB(t)
+	if err := bootstrapCmd(ctx, cfg, st5, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st5.Pool.QueryRow(ctx,
+		`SELECT allowed_purposes FROM clients WHERE client_id='admin'`).Scan(&purposes); err != nil {
+		t.Fatal(err)
+	}
+	if len(purposes) == 0 {
+		t.Fatal("the default admin must have at least one usable purpose")
+	}
+}
+
+// Remaining CLI branches: retention prunes the new tables, issuer listing
+// with a wildcard grant, rotate-secret flag combinations.
+func TestCLIRemainingBranches(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+
+	// retention run now also prunes envelopes and portal rows.
+	if err := retentionCmd(ctx, st, []string{"run"}); err != nil {
+		t.Fatal(err)
+	}
+	// A wildcard issuer grant is explicit, and listing renders it.
+	pub := strings.Repeat("cd", 32)
+	if err := issuerCmd(ctx, st, []string{"add", "-id", "gw.any", "-pubkey", pub, "-claims", "*"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := issuerCmd(ctx, st, []string{"list"}); err != nil {
+		t.Fatal(err)
+	}
+	// rotate-secret: -ttl and -no-expiry are mutually exclusive.
+	if err := clientCmd(ctx, st, []string{"create", "-id", "rotme", "-name", "R", "-scope", "s"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "rotme", "-ttl", "30d", "-no-expiry"}); err == nil {
+		t.Fatal("-ttl with -no-expiry must be rejected")
+	}
+	// -no-expiry clears a previously set expiry.
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "rotme", "-ttl", "30d"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "rotme", "-no-expiry"}); err != nil {
+		t.Fatal(err)
+	}
+	var expires *time.Time
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT credential_expires_at FROM clients WHERE client_id='rotme'`).Scan(&expires); err != nil {
+		t.Fatal(err)
+	}
+	if expires != nil {
+		t.Fatal("-no-expiry must clear the stored expiry")
+	}
+	// A plain rotation PRESERVES the policy rather than silently clearing it.
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "rotme", "-ttl", "30d"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "rotme"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT credential_expires_at FROM clients WHERE client_id='rotme'`).Scan(&expires); err != nil {
+		t.Fatal(err)
+	}
+	if expires == nil {
+		t.Fatal("a plain rotation must preserve the expiry policy")
+	}
+}
+
+// CLI error branches on a dead pool: every ops command must surface the
+// failure rather than reporting success.
+func TestNewCommandsFailClosedOnDeadPool(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	st.Close()
+
+	if err := bootstrapCmd(ctx, cfg, st, nil); err == nil {
+		t.Fatal("bootstrap on a dead pool")
+	}
+	if err := issuerCmd(ctx, st, []string{"list"}); err == nil {
+		t.Fatal("issuer list on a dead pool")
+	}
+	if err := issuerCmd(ctx, st, []string{"add", "-id", "x", "-pubkey", strings.Repeat("ab", 32)}); err == nil {
+		t.Fatal("issuer add on a dead pool")
+	}
+	if err := issuerCmd(ctx, st, []string{"remove", "-id", "x"}); err == nil {
+		t.Fatal("issuer remove on a dead pool")
+	}
+	if err := issuerCmd(ctx, st, []string{"add", "-bogus"}); err == nil {
+		t.Fatal("issuer add bad flag")
+	}
+	if err := issuerCmd(ctx, st, []string{"remove", "-bogus"}); err == nil {
+		t.Fatal("issuer remove bad flag")
+	}
+	if err := issuerCmd(ctx, st, []string{"remove"}); err == nil {
+		t.Fatal("issuer remove without -id")
+	}
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "x"}); err == nil {
+		t.Fatal("rotate-secret on a dead pool")
+	}
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-bogus"}); err == nil {
+		t.Fatal("rotate-secret bad flag")
+	}
+	if err := retentionCmd(ctx, st, []string{"run"}); err == nil {
+		t.Fatal("retention run on a dead pool")
+	}
+}

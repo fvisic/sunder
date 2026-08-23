@@ -202,7 +202,16 @@ func retentionCmd(ctx context.Context, st *store.Store, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned\n", wiped, otiPruned)
+		envelopes, err := service.PruneEnvelopes(ctx, st.Pool)
+		if err != nil {
+			return err
+		}
+		portalRows, err := service.PrunePortal(ctx, st.Pool)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned, %d consumed envelope(s) pruned, %d portal row(s) pruned\n",
+			wiped, otiPruned, envelopes, portalRows)
 		fmt.Println("(audit rows are never pruned - the chain and its anchors are the tamper evidence)")
 		return nil
 	default:
@@ -711,13 +720,34 @@ func issuerCmd(ctx context.Context, st *store.Store, args []string) error {
 // hooks and provisioning scripts can call it unconditionally.
 func bootstrapCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
 	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
-	unattended := fs.Bool("unattended", false, "read SUNDER_BOOTSTRAP_* env and write the credential to a file instead of stdout")
+	unattended := fs.Bool("unattended", false, "write the credential to -credential-file instead of stdout")
 	id := fs.String("id", getenvDefault("SUNDER_BOOTSTRAP_CLIENT_ID", "admin"), "admin client id")
 	scope := fs.String("scope", getenvDefault("SUNDER_BOOTSTRAP_SCOPE", "admin"), "admin client scope")
-	purposes := fs.String("purposes", os.Getenv("SUNDER_BOOTSTRAP_PURPOSES"), "comma-separated purposes for the admin client")
-	credFile := fs.String("credential-file", os.Getenv("SUNDER_BOOTSTRAP_CREDENTIAL_FILE"), "unattended mode: path the credential is written to (0600)")
+	// An admin with no purposes cannot read a single attribute or issue an
+	// OTI (CanUse is deny-all), which made provisioning produce a useless
+	// credential (review N8). Default to a real, usable purpose.
+	purposes := fs.String("purposes", getenvDefault("SUNDER_BOOTSTRAP_PURPOSES", "admin"),
+		"comma-separated purposes for the admin client")
+	credFile := fs.String("credential-file", os.Getenv("SUNDER_BOOTSTRAP_CREDENTIAL_FILE"),
+		"unattended mode: file the credential is written to (created 0600; must not be a stream)")
 	ttl := fs.String("ttl", os.Getenv("SUNDER_BOOTSTRAP_TTL"), "credential lifetime (e.g. 90d); empty = non-expiring")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	// Validate BEFORE anything is created: a rejected flag combination must
+	// never leave a committed admin behind (review N7).
+	if *unattended && *credFile == "" {
+		return fmt.Errorf("bootstrap -unattended requires -credential-file or SUNDER_BOOTSTRAP_CREDENTIAL_FILE")
+	}
+	if *credFile != "" {
+		// A stream target cannot be 0600 and would land in container logs,
+		// where any log shipper forwards it (review N6).
+		if strings.HasPrefix(*credFile, "/dev/") || strings.HasPrefix(*credFile, "/proc/") {
+			return fmt.Errorf("-credential-file must be a real file, not %s: the credential would be written to a log stream", *credFile)
+		}
+	}
+	expiresAt, err := parseTTL(*ttl)
+	if err != nil {
 		return err
 	}
 	if err := st.Migrate(ctx); err != nil {
@@ -728,21 +758,30 @@ func bootstrapCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 	if err := ring.EnsureAll(ctx, eng); err != nil {
 		return fmt.Errorf("key bootstrap: %w", err)
 	}
-	// Idempotency: an existing admin client means this instance is already
-	// bootstrapped - never rotate or reprint on rerun.
+
+	// One transaction for the row, the persisted credential and the audit
+	// record: any failure rolls all three back, so a rerun can repair
+	// instead of reporting "already exists" over an unusable admin.
+	tx, err := st.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Advisory lock + in-transaction check: two concurrent bootstraps must
+	// not race past the existence check.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(0x53554E4442)`); err != nil {
+		return err
+	}
 	var n int
-	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM clients WHERE client_id=$1`, *id).Scan(&n); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM clients WHERE client_id=$1`, *id).Scan(&n); err != nil {
 		return err
 	}
 	if n > 0 {
 		fmt.Printf("bootstrap: client %q already exists - nothing to do\n", *id)
 		return nil
 	}
-	expiresAt, err := parseTTL(*ttl)
-	if err != nil {
-		return err
-	}
-	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+	cred, err := auth.CreateTx(ctx, tx, auth.Client{
 		ID: *id, Name: "Bootstrap admin", Scope: *scope,
 		AllowedActions: []string{auth.ActContactsRegister, auth.ActScopesIssue, auth.ActLookup,
 			auth.ActAttributesRead, auth.ActOTIIssue, auth.ActOTIVerify, auth.ActConsentManage,
@@ -754,24 +793,45 @@ func bootstrapCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 	if err != nil {
 		return err
 	}
-	if err := audit.Append(ctx, st.Pool, audit.Entry{
+	if err := audit.AppendTx(ctx, tx, audit.Entry{
 		ClientID: "operator", Action: "bootstrap",
 		Detail: map[string]any{"client_id": *id, "scope": *scope, "unattended": *unattended},
 	}); err != nil {
 		return err
 	}
 	if *unattended {
-		if *credFile == "" {
-			return fmt.Errorf("bootstrap -unattended requires -credential-file or SUNDER_BOOTSTRAP_CREDENTIAL_FILE")
-		}
-		if err := os.WriteFile(*credFile, []byte(cred+"\n"), 0o600); err != nil {
+		// Written before the commit: if this fails, the client is never
+		// created, so the credential can never be lost with a row behind it.
+		f, err := os.OpenFile(*credFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if err != nil {
 			return err
 		}
-		fmt.Printf("bootstrap: credential for %q written to %s (readable once - move it to your secret store)\n", *id, *credFile)
+		if _, err := f.WriteString(cred + "\n"); err != nil {
+			_ = f.Close()
+			return err
+		}
+		// O_CREATE does not tighten a pre-existing file's mode.
+		if err := f.Chmod(0o600); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			_ = os.Remove(*credFile)
+			return err
+		}
+		fmt.Printf("bootstrap: credential for %q written to %s (0600 - move it to your secret store)\n", *id, *credFile)
+		fmt.Printf("purposes: %s\n", *purposes)
 		return nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
 	}
 	fmt.Println("bootstrap complete. Admin credential (shown once, store it now):")
 	fmt.Println(cred)
+	fmt.Printf("purposes: %s (set SUNDER_BOOTSTRAP_PURPOSES or -purposes for your own)\n", *purposes)
 	return nil
 }
 

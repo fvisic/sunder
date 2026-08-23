@@ -140,7 +140,8 @@ claims evaluated against the **issuer's** data at verification, e.g.
 The verifier receives booleans only - the birthdate itself never crosses
 the scope boundary and nothing is copied into the verifier's blob.
 Supported ops: `age_gte` (attribute read as an ISO date `YYYY-MM-DD` or
-RFC 3339), `exists`. At most 8 predicates per token; unknown ops are
+RFC 3339; `value` is REQUIRED - an omitted threshold is rejected at issue
+time rather than silently meaning 0), `exists` (takes no value). At most 8 predicates per token; unknown ops are
 rejected at issue time.
 
 ### POST /v1/claims/external - accept an issuer-signed claim envelope
@@ -173,10 +174,13 @@ only verify tokens addressed to you.
 `200 {"cid": "CID-...", "shared": [...], "predicates": [...]}` - **the
 verifier's own scoped CID** for the person (auto-issued if absent), the
 attribute names copied via `share_attributes` (when any), and the evaluated
-predicate results (when the token carried any), each
-`{"attr", "op", "value", "result", "known"}`. `known: false` means the
-attribute was absent or unparseable - deliberately distinct from a failed
-check, so "we do not know the birthdate" never reads as "under 18". The
+predicate results (when the token carried any; returned to the verifier but
+NOT written to the audit chain - see the audit-content boundary in
+docs/THREAT-MODEL.md), each
+`{"attr", "op", "value", "result", "known"}`. `known` is op-specific: for `age_gte` it is false when the attribute is
+absent or unparseable (so "we do not know the birthdate" never reads as
+"under 18"); for `exists` it is always true, because absence IS the answer
+that predicate asks for. The
 issuer's pseudonym never crosses the scope
 boundary. Single use is enforced by an atomic `VALID -> USED` database
 transition, not just the signature. Errors: `token_invalid` (400, bad

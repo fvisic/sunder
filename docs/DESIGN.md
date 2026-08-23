@@ -68,8 +68,9 @@ own contacts.
 - **Selective disclosure (predicate claims)** - an OTI can carry
   issuer-authorized predicates (`age_gte`, `exists`) evaluated against the
   issuer's data at verification. The verifier receives booleans; the value
-  never crosses the scope boundary. Attribute absence reports
-  `known: false`, deliberately distinct from a failed check.
+  never crosses the scope boundary. For `age_gte`, an absent or
+  unparseable attribute reports `known: false` - distinct from a failed
+  check; for `exists`, absence is the answer, so `known` is always true.
 - **Algorithm agility** - each blob records its algorithm (`cids.pii_alg`);
   reads follow the stored value, writes use the configured one, and the
   `keys rekey` sweep converts the backlog. Should the current AEAD ever be
@@ -88,9 +89,23 @@ deliberately linkage-capable privileges exist - `scopes.issue` and the
 ## 4. Audit: tamper-evident, then anchored
 
 Every operation writes an audit record (client, action, CID,
-purpose/outcome - never attribute values or raw identifiers) **inside the
-same transaction** as the operation: the log cannot record what did not
-happen, nor miss what did. Records form a hash chain
+purpose/outcome - never attribute values or raw identifiers). Mutating
+operations (register, scope issuance, OTI issue/verify, consent, DSR,
+external claims) write it **inside the same transaction** as the
+operation, so the log cannot record what did not happen nor miss what
+did. Read paths (`attributes.read`, `lookup`) and the portal's own actions
+append in a separate transaction that must succeed **before** any value is
+released - the guarantee there is fail-closed disclosure rather than
+atomicity. **Invariant: the chain records what was asked and by whom, never what the
+data said.** Attribute reads log the attribute name, not its value;
+predicate verifications log the predicate that was asked
+(`birthdate age_gte 18`), not its boolean outcome. The outcome is a
+one-bit value about an identified person, and the chain is never pruned and
+outlives erasure - so recording it would keep a derived assertion about
+someone who exercised Article 17. The disclosure is fully accounted for by
+the request.
+
+Records form a hash chain
 (`hash_N = SHA-256(canonical(prev_hash, record))`, JSON-array canonical
 encoding so field contents cannot shift across boundaries); append-only
 triggers block UPDATE/DELETE/TRUNCATE at the database layer.
@@ -123,8 +138,11 @@ stop matching and stop verifying, and their search-token rows are purged.
 
 ### Supply chain
 
-The crypto hot path is Go stdlib (Ed25519, HMAC, AES-GCM, TLS) plus golang.org/x/crypto for the optional XChaCha20-Poly1305 PII algorithm; the
-sole runtime dependency is pgx. A "stdlib first" policy applies - a new
+The crypto hot path is Go stdlib (Ed25519, HMAC, AES-GCM, TLS) plus
+golang.org/x/crypto for the optional XChaCha20-Poly1305 PII algorithm.
+Runtime dependencies are three, all direct: pgx (database),
+golang.org/x/text (Unicode NFKC on every registration and lookup) and
+golang.org/x/crypto. A "stdlib first" policy applies - a new
 dependency needs justification - because the honest limit of any key
 handling is a compromised process reading working keys from RAM: the fewer
 third-party lines in that process, the smaller that risk. CI gates on

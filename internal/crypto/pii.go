@@ -83,3 +83,16 @@ func (p *PIIBox) Decrypt(ctx context.Context, boundTo string, blob []byte, keyID
 	}
 	return attrs, nil
 }
+
+// SealBytes/OpenBytes seal an opaque byte payload with the same AEAD, key
+// versioning and AAD binding as attribute blobs - for anything that must
+// not sit in the database in the clear but is not an attribute map (the
+// portal mail outbox: a live token plus an address).
+func (p *PIIBox) SealBytes(ctx context.Context, boundTo, keyID string, plain []byte) ([]byte, error) {
+	alg := p.Algorithm()
+	return p.eng.Seal(ctx, KeyPIIKEK+"/"+keyID, alg, aad(boundTo, keyID, alg), plain)
+}
+
+func (p *PIIBox) OpenBytes(ctx context.Context, boundTo string, blob []byte, keyID, alg string) ([]byte, error) {
+	return p.eng.Open(ctx, KeyPIIKEK+"/"+keyID, alg, aad(boundTo, keyID, alg), blob)
+}

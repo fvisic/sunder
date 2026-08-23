@@ -172,6 +172,28 @@ var clientIDPattern = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 
 // Create registers a client and returns the full bearer credential
 // ("<id>.<secret>") exactly once; only the hash is stored.
+// CreateTx is Create inside a caller-supplied transaction: bootstrap needs
+// the client row and the persisted credential to commit or roll back
+// together, or a failed write leaves an admin whose secret nobody holds
+// (review N7).
+func CreateTx(ctx context.Context, tx pgx.Tx, c Client) (string, error) {
+	if !clientIDPattern.MatchString(c.ID) {
+		return "", fmt.Errorf("client id must match %s", clientIDPattern)
+	}
+	secret, err := crypto.NewClientSecret()
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO clients (client_id, name, key_hash, scope, allowed_actions, allowed_purposes, rate_limit, credential_expires_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		c.ID, c.Name, crypto.HashSecret(secret), c.Scope, c.AllowedActions, c.AllowedPurposes,
+		c.RateLimit, c.CredentialExpiresAt); err != nil {
+		return "", err
+	}
+	return c.ID + "." + secret, nil
+}
+
 func Create(ctx context.Context, pool *pgxpool.Pool, c Client) (credential string, err error) {
 	if !clientIDPattern.MatchString(c.ID) {
 		return "", fmt.Errorf("client id must match %s", clientIDPattern)

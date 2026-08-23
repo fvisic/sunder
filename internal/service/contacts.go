@@ -368,8 +368,11 @@ func (c *Contacts) IssueScopedCid(ctx context.Context, client *auth.Client, cid,
 // scope's pseudonyms (that unlinkability is the whole point).
 func (c *Contacts) personForClientCID(ctx context.Context, client *auth.Client, cid string) (string, error) {
 	var personID, scope string
+	var erased bool
 	err := c.Pool.QueryRow(ctx,
-		`SELECT person_id, scope FROM cids WHERE cid=$1`, cid).Scan(&personID, &scope)
+		`SELECT c.person_id, c.scope, p.erased_at IS NOT NULL
+		 FROM cids c JOIN persons p ON p.id = c.person_id
+		 WHERE c.cid=$1`, cid).Scan(&personID, &scope, &erased)
 	if err == pgx.ErrNoRows {
 		return "", ErrNotFound
 	}
@@ -378,6 +381,14 @@ func (c *Contacts) personForClientCID(ctx context.Context, client *auth.Client, 
 	}
 	if scope != client.Scope {
 		// Indistinguishable from absence: do not leak that a foreign CID exists.
+		return "", ErrNotFound
+	}
+	// A tombstoned person is gone for every caller-facing path. Erasure
+	// keeps the cids row (the pseudonym must never be reissued), so without
+	// this check any path addressing the row by CID - attribute reads, OTI
+	// issuance, consent, external claims - could write or serve data for a
+	// person who exercised Article 17. Indistinguishable from absence.
+	if erased {
 		return "", ErrNotFound
 	}
 	return personID, nil

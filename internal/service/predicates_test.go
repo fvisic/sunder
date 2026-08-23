@@ -12,6 +12,10 @@ import (
 	"github.com/fvisic/sunder/internal/service"
 )
 
+// ptr is the age_gte threshold helper: the field is a pointer so an
+// omitted threshold fails loudly instead of meaning 0 (review N20).
+func ptr(v int) *int { return &v }
+
 func issueWithPreds(t *testing.T, e *faultEnv, cid string, preds []service.Predicate) string {
 	t.Helper()
 	tok, _, err := e.oti.IssueFull(context.Background(), e.crm, service.IssueInput{
@@ -45,7 +49,7 @@ func TestPredicateAgeGate(t *testing.T) {
 
 	check := func(cid string, wantResult, wantKnown bool) {
 		t.Helper()
-		tok := issueWithPreds(t, e, cid, []service.Predicate{{Attr: "birthdate", Op: "age_gte", Value: 18}})
+		tok := issueWithPreds(t, e, cid, []service.Predicate{{Attr: "birthdate", Op: "age_gte", Value: ptr(18)}})
 		out, err := e.oti.VerifyFull(ctx, e.verifier(), tok, "support", "billing")
 		if err != nil {
 			t.Fatal(err)
@@ -114,13 +118,14 @@ func TestPredicateValidationAtIssue(t *testing.T) {
 	ctx := context.Background()
 
 	bad := [][]service.Predicate{
-		{{Attr: "birthdate", Op: "age_lte", Value: 18}},  // unknown op
-		{{Attr: "", Op: "exists"}},                       // empty attr
-		{{Attr: "birthdate", Op: "age_gte", Value: -1}},  // negative
-		{{Attr: "birthdate", Op: "age_gte", Value: 200}}, // absurd
-		{{Attr: "tier", Op: "exists", Value: 5}},         // exists with value
-		{{Attr: strings.Repeat("a", 65), Op: "exists"}},  // overlong attr
-		make([]service.Predicate, 9),                     // too many
+		{{Attr: "birthdate", Op: "age_lte", Value: ptr(18)}},  // unknown op
+		{{Attr: "", Op: "exists"}},                            // empty attr
+		{{Attr: "birthdate", Op: "age_gte", Value: ptr(-1)}},  // negative
+		{{Attr: "birthdate", Op: "age_gte"}},                  // threshold omitted: must NOT mean 0
+		{{Attr: "birthdate", Op: "age_gte", Value: ptr(200)}}, // absurd
+		{{Attr: "tier", Op: "exists", Value: ptr(5)}},         // exists with value
+		{{Attr: strings.Repeat("a", 65), Op: "exists"}},       // overlong attr
+		make([]service.Predicate, 9),                          // too many
 	}
 	for i, preds := range bad {
 		if _, _, err := e.oti.IssueFull(ctx, e.crm, service.IssueInput{
@@ -144,7 +149,7 @@ func TestPredicatesCombineWithAttributeSharing(t *testing.T) {
 	tok, _, err := e.oti.IssueFull(ctx, e.crm, service.IssueInput{
 		CID: cid, Purpose: "support", Audience: "billing",
 		ShareAttributes: []string{"tier"},
-		SharePredicates: []service.Predicate{{Attr: "birthdate", Op: "age_gte", Value: 18}},
+		SharePredicates: []service.Predicate{{Attr: "birthdate", Op: "age_gte", Value: ptr(18)}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +197,7 @@ func TestPredicateBirthdayBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		tok := issueWithPreds(t, e, cid, []service.Predicate{{Attr: "birthdate", Op: "age_gte", Value: 18}})
+		tok := issueWithPreds(t, e, cid, []service.Predicate{{Attr: "birthdate", Op: "age_gte", Value: ptr(18)}})
 		out, err := e.oti.VerifyFull(ctx, e.verifier(), tok, "support", "billing")
 		if err != nil {
 			t.Fatal(err)
@@ -200,6 +205,44 @@ func TestPredicateBirthdayBoundary(t *testing.T) {
 		if out.Predicates[0].Result != tc.want || !out.Predicates[0].Known {
 			t.Fatalf("birthdate %s: result=%v known=%v, want %v/true",
 				tc.birthdate, out.Predicates[0].Result, out.Predicates[0].Known, tc.want)
+		}
+	}
+}
+
+// N22 (user review): the chain must record the predicate that was ASKED,
+// never its boolean outcome - the outcome is a one-bit value about a
+// person, and audit rows outlive erasure.
+func TestPredicateResultsAreNotAudited(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	adult := time.Now().UTC().AddDate(-30, 0, 0).Format("2006-01-02")
+	cid, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+		Email: "audited@example.com", Attributes: map[string]string{"birthdate": adult},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := issueWithPreds(t, e, cid, []service.Predicate{{Attr: "birthdate", Op: "age_gte", Value: ptr(18)}})
+	out, err := e.oti.VerifyFull(ctx, e.verifier(), tok, "support", "billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The verifier DOES learn the boolean.
+	if !out.Predicates[0].Result {
+		t.Fatal("verifier must receive the result")
+	}
+	var detail string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT detail FROM audit WHERE action='oti.verify' ORDER BY seq DESC LIMIT 1`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(detail, "predicates_asked") || !strings.Contains(detail, "birthdate age_gte 18") {
+		t.Fatalf("the chain must record what was asked: %s", detail)
+	}
+	// No outcome in any form.
+	for _, leak := range []string{`"result"`, `"known"`, "true,", ":true"} {
+		if strings.Contains(detail, leak) {
+			t.Fatalf("predicate outcome leaked into the audit chain (%q): %s", leak, detail)
 		}
 	}
 }

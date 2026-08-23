@@ -302,10 +302,12 @@ func TestEraseRevokesOutstandingOTIs(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("erased person re-linked into verifier scope (%d cids)", n)
 	}
-	// Erase is not repeatable on a tombstone.
+	// Erase is not repeatable on a tombstone. 404, not "already erased":
+	// after erasure the person is absent for every caller-facing path, and
+	// a distinct code would confirm that this CID existed and was erased.
 	rec, _ = e.do(t, credDPO, "POST", "/v1/dsr/erase", map[string]string{"cid": cid})
-	if rec.Code != 400 {
-		t.Fatalf("second erase must be a validation error: %d", rec.Code)
+	if rec.Code != 404 {
+		t.Fatalf("second erase must be indistinguishable from absence: %d", rec.Code)
 	}
 }
 

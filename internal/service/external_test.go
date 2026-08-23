@@ -203,3 +203,102 @@ func TestRegisterRejectsProvenanceForgery(t *testing.T) {
 		t.Fatal("self-registered '@' attribute names must be rejected")
 	}
 }
+
+// N1 (verified exploit in review): an erased person must not be
+// resurrectable through ANY path that addresses the row by CID.
+func TestErasedPersonIsUnreachableEverywhere(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	cid := e.register(t)
+	e.crm.AllowedActions = append(e.crm.AllowedActions, auth.ActClaimsExternal)
+
+	seed := make([]byte, 32)
+	seed[0] = 77
+	sk := ed25519.NewKeyFromSeed(seed)
+	registerIssuer(t, e, "gov", sk.Public().(ed25519.PublicKey), []string{"*"})
+
+	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err != nil {
+		t.Fatal(err)
+	}
+
+	// External claims must not write into the tombstone.
+	env := mintEnvelope(t, sk, "gov", cid, map[string]string{"age_gte_18": "true"}, time.Now().Add(time.Hour))
+	if _, err := e.svc.ExternalClaims(ctx, e.crm, cid, env); err != service.ErrNotFound {
+		t.Fatalf("external claims on an erased person: %v", err)
+	}
+	// And nothing reads back.
+	if _, err := e.svc.GetAttribute(ctx, e.crm, cid, "age_gte_18@gov", "support"); err != service.ErrNotFound {
+		t.Fatalf("attribute read on an erased person: %v", err)
+	}
+	// Every other CID-addressed path is equally closed.
+	if _, _, err := e.oti.Issue(ctx, e.crm, cid, "support", "billing", nil); err != service.ErrNotFound {
+		t.Fatalf("oti issue on an erased person: %v", err)
+	}
+	if err := e.gdpr.SetConsent(ctx, e.crm, cid, "support", true); err != service.ErrNotFound {
+		t.Fatalf("consent on an erased person: %v", err)
+	}
+	if _, err := e.gdpr.Access(ctx, e.crm, cid); err != service.ErrNotFound {
+		t.Fatalf("access on an erased person: %v", err)
+	}
+	if _, err := e.gdpr.Export(ctx, e.crm, cid); err != service.ErrNotFound {
+		t.Fatalf("export on an erased person: %v", err)
+	}
+	if _, err := e.svc.IssueScopedCid(ctx, e.crm, cid, "billing"); err != service.ErrNotFound {
+		t.Fatalf("scope issuance on an erased person: %v", err)
+	}
+	// A fresh registration of the same identifiers is a NEW person, not a
+	// revival: the tombstoned CID must not come back.
+	fresh, err := e.svc.Register(ctx, e.crm, service.RegisterInput{Email: "fault@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh == cid {
+		t.Fatal("re-registration must mint a new pseudonym, not reuse the tombstoned one")
+	}
+}
+
+// Unusable registered key material must be refused, not fed to
+// ed25519.Verify (which panics on a wrong length and accepts low-order
+// points).
+func TestExternalClaimsRejectsDegenerateIssuerKey(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	cid := e.register(t)
+	e.crm.AllowedActions = append(e.crm.AllowedActions, auth.ActClaimsExternal)
+
+	// An all-zero key passes the 32-byte CHECK but is degenerate.
+	registerIssuer(t, e, "degenerate", make([]byte, 32), []string{"*"})
+	seed := make([]byte, 32)
+	seed[0] = 55
+	sk := ed25519.NewKeyFromSeed(seed)
+	env := mintEnvelope(t, sk, "degenerate", cid, map[string]string{"x": "1"}, time.Now().Add(time.Hour))
+	if _, err := e.svc.ExternalClaims(ctx, e.crm, cid, env); err == nil {
+		t.Fatal("a degenerate issuer key must be refused")
+	}
+
+	// A malformed issuer id never reaches the registry lookup or the audit
+	// chain (it is attacker-controlled and unbounded).
+	payload, _ := json.Marshal(map[string]any{
+		"iss": strings.Repeat("A", 5000), "jti": "envelope-0001", "cid": cid,
+		"claims": map[string]string{"x": "1"},
+		"exp":    time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	})
+	if _, err := e.svc.ExternalClaims(ctx, e.crm, cid, crypto.PasetoSign(sk, payload)); err == nil {
+		t.Fatal("a malformed issuer id must be rejected before any lookup")
+	}
+	var n int
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit WHERE length(detail) > 1000`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("attacker-controlled bulk data reached the audit chain (%d rows)", n)
+	}
+
+	// An envelope valid for a year is refused: unbounded lifetimes make the
+	// replay table unprunable.
+	long := mintEnvelope(t, sk, "degenerate", cid, map[string]string{"x": "1"}, time.Now().Add(365*24*time.Hour))
+	if _, err := e.svc.ExternalClaims(ctx, e.crm, cid, long); err == nil {
+		t.Fatal("an over-long envelope lifetime must be rejected")
+	}
+}

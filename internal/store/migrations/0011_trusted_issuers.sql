@@ -4,7 +4,8 @@
 CREATE TABLE trusted_issuers (
     issuer_id      TEXT PRIMARY KEY CHECK (issuer_id ~ '^[a-z0-9._-]{1,64}$'),
     public_key     BYTEA NOT NULL CHECK (octet_length(public_key) = 32),
-    -- Claim names this issuer may assert; empty = any claim name.
+    -- Claim names this issuer may assert. DENY BY DEFAULT: an empty array
+    -- permits NOTHING; use '{*}' to allow any claim name explicitly.
     allowed_claims TEXT[] NOT NULL DEFAULT '{}',
     added_by       TEXT NOT NULL,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()

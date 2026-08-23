@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/fvisic/sunder/internal/config"
+	"github.com/fvisic/sunder/internal/testutil"
 )
 
 // selfSigned writes a throwaway cert/key pair for 127.0.0.1.
@@ -161,5 +162,64 @@ func TestRunMTLSRefusesClientsWithoutCert(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("graceful shutdown after mTLS refusals: %v", err)
+	}
+}
+
+// The portal on its own listener: the API can keep mTLS while citizens
+// reach the portal without a client certificate (review N12).
+func TestRunPortalOnSeparateListener(t *testing.T) {
+	st := testutil.NewDB(t)
+	apiAddr := freeAddr(t)
+	portalAddr := freeAddr(t)
+	// The portal is only constructed when the server has a store.
+	s, err := New(config.Config{
+		Listen: apiAddr, Keystore: "file", KeystorePath: t.TempDir(),
+		PortalEnabled: true, PortalListen: portalAddr,
+	}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if c, err := net.DialTimeout("tcp", portalAddr, 100*time.Millisecond); err == nil {
+			_ = c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the portal listener never came up")
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("server exited: %v", err)
+		default:
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// The portal answers on its own port...
+	res, err := http.Get("http://" + portalAddr + "/portal/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != 200 {
+		t.Fatalf("portal on its own listener: %d", res.StatusCode)
+	}
+	// ...and NOT on the API one.
+	res, err = http.Get("http://" + apiAddr + "/portal/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != 404 {
+		t.Fatalf("the portal must not double-mount on the API listener: %d", res.StatusCode)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("both listeners must shut down cleanly: %v", err)
 	}
 }

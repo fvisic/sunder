@@ -251,8 +251,9 @@ public sealed class SunderClient : IDisposable
     /// <summary>
     /// Like <see cref="VerifyOtiAsync" /> but returns the full JSON result:
     /// "cid", and when present "shared" (copied attribute names) and
-    /// "predicates" (attr/op/value/result/known; known=false means the
-    /// attribute was absent - NOT a failed check).
+    /// "predicates" (attr/op/value/result/known). For age_gte, known=false
+    /// means the attribute was absent or unparseable - NOT a failed check;
+    /// for exists, known is always true because absence is the answer.
     /// </summary>
     public async Task<JsonElement> VerifyOtiFullAsync(string token, string purpose, string audience)
     {

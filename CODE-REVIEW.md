@@ -1,148 +1,140 @@
-# Sunder - Full Project Code Review
+# Sunder - Code Review
 
-- **Date:** 2026-08-23
-- **Reviewed state:** commit `37c704d` (P2.1 signer split) plus uncommitted work-in-progress (P2.2 credential expiry: `internal/auth/auth.go`, `internal/store/migrations/0009_credential_expiry.sql`)
-- **Scope:** all Go code, documentation, tests, SDKs, ops/deploy tooling
-- **Method:** every production Go file read line-by-line; `go build`, `go vet` clean; full test suite (including DB integration tests against local Postgres 16) passes; four parallel deep-dive reviews (docs accuracy, SDKs, ops/tooling, test-suite quality); the highest-impact findings were verified with standalone repros.
+| Pass | Baseline | Findings |
+|---|---|---|
+| 1 | `37c704d` + uncommitted P2.2 | F1-F17 |
+| 2 | `e1f321e` (Phase 2, P2.1-P2.6) | N1-N23 |
+| 3 | `0f39e8c` + working tree | verified passes 1-2; raised P0-P11 |
+| **4 (this one)** | `0f39e8c` + working tree | verified pass 3 |
+
+**Method.** Every claimed fix is traced to its production call path, never read from a comment or a commit message. Load-bearing items are confirmed with executable repros: a live exploit test for the erasure bypass, a timing harness for the enumeration oracle, a concurrency test for the blob races, a forgery test against the project's own crypto primitives, and `helm template` for chart values.
 
 ## Verdict
 
-The core is in genuinely good shape: the crypto layer (PASETO v4.public, AAD-bound PII envelopes, strict keystore, the new Engine/signer split), authorization, scope isolation, audit chain, and GDPR flows are carefully designed and the documented security properties hold in code, with the exceptions listed below. Nothing found is an exploitable security hole. The two findings I would fix before the next release are **F1** (all per-handler metrics and both latency alerts are silently broken) and **F2** (lost-update races that can silently drop PII attributes under concurrency).
+**The tree is green again** - the mid-flight `0016` refactor that had 4 tests failing last pass is finished, and the full suite passes.
+
+**N2 (enumeration oracle) is now closed.** A 40 ms constant-time floor was added to `Start`. Measured, 25 distinct registered addresses vs 25 unknown, each probed exactly once so the per-address throttle never short-circuits:
+
+```
+before the floor:  UNKNOWN 1.98 ms   KNOWN 4.44 ms   (2.2x, near-total separation)
+after  the floor:  UNKNOWN 41.02 ms  KNOWN 40.81 ms  (gap -0.2 ms, i.e. noise)
+                   24 of 25 known probes fall inside the unknown range
+```
+
+That is the right kind of fix: it does not pretend the work is equal, it makes the difference unobservable, and the comment says exactly that. The accompanying test was also rewritten from a vacuous `hit <= miss + 300ms` tolerance into a real assertion (no perfect separation between the fastest hit and the slowest miss).
+
+**Two things now block CI**, and neither is in the feature code:
+
+- **Coverage is 89.2% against a gate that was just raised to 90.0%.** The gate went 88 → 90 in `.github/workflows/ci.yml` while actual coverage sits below it, so the pipeline fails on the raise itself.
+- **`TestAnchorEnvironmentErrors` is flaky under the exact CI command.** Reproduced once in five full-suite runs of `go test -race -coverprofile ... ./...`; never reproducible in isolation or with the `internal/audit` package alone (6 attempts). It only shows up when the whole suite loads the machine and contends on the shared Postgres, which is precisely the CI condition.
+
+**Everything raised in pass 3 is still open.** P0-a and P0-b in particular were the two HIGH items, and both still have a comment or a test asserting they are handled.
 
 ---
 
-## A. Code - correctness & security
+# Part A - Fixed this round
 
-### F1. HIGH - Per-handler metrics label is always `/v1/` for every API route; both latency alerts can never fire
+- **N2** - constant-time floor, measured above. `portalStartFloor = 40 * time.Millisecond` (`internal/service/portal.go:45`), applied in a `defer` so it covers every return path including errors.
+- **The `0016` refactor is complete** - `portal_test.go` no longer references the dropped `token` column, and the test that expected the old no-retry behaviour was updated to match the corrected worker.
+- **New outbox test coverage** - `internal/api/portal_hardening_test.go` adds transient-failure retry, attempt-cap give-up, a nothing-usable-at-rest check on the sealed payload, the timing test above, and handler edge cases. This closes the pass-3 complaint that the retry and settle logic - where P3 and P4 live - was the least-covered new code.
 
-`internal/api/server.go:155-160` reads `r.Pattern` in the `instrument` wrapper, which sits *outside* the auth middleware. The outer mux stamps `Pattern = "/v1/"` on the request in place, but `auth.Middleware` (`internal/auth/auth.go`) calls `next.ServeHTTP(w, r.WithContext(...))` - a shallow copy - so the inner v1 mux stamps `"POST /v1/lookup"` etc. only on the copy. The instrument wrapper never sees it. Verified with a standalone repro (Go 1.25): observed pattern after the middleware hop is `"/v1/"`.
-
-Consequences:
-
-- `sunder_requests_total` / `sunder_request_seconds` collapse all 11 API routes into one `handler="/v1/"` series.
-- `ops/prometheus-alerts.yaml:27` (`SunderLookupLatencyHigh`, `handler="POST /v1/lookup"`) and `:37` (`SunderOTIVerifyLatencyHigh`) match zero series - the alerts silently never fire.
-- The Grafana "by handler" panels (`ops/grafana-dashboard.json` panels 1-3) show one merged series.
-
-Fix in `server.go`, not in the alert files: record the pattern where it is actually known (e.g. instrument *inside* the middleware chain, or capture the pattern on the response-recorder from within the innermost handler layer).
-
-### F2. MEDIUM - Lost-update races on PII blob read-modify-write paths can silently drop attributes
-
-Three places read the encrypted blob, merge in memory, and write back without locking the row:
-
-1. `internal/service/contacts.go:271-300` (`registerTx`): `SELECT pii_encrypted ...` then `UPDATE cids SET pii_encrypted=...` inside the tx, but without `FOR UPDATE`. Two concurrent registrations that dedup onto the same person/cid (same contact arriving from two systems at once - exactly the dedup path's purpose) both read the old blob, both merge, and the last commit wins: the first writer's new attributes are silently lost. Read-committed isolation raises no error.
-2. `internal/service/oti.go:288-336` (`shareIntoScope`, inside `Verify`): same pattern against the verifier-scope blob; races with a concurrent register/verify on the same cid.
-3. `internal/service/rekey.go:154-165` (`rekeyPerson`): worse - the decrypt happens via `c.Pool` reads and the re-encrypt `UPDATE` is a separate non-transactional statement with no guard. A register/share that commits between the read and the write is overwritten with stale attributes (real data loss, and the row is stamped with the new key so nothing looks wrong afterwards).
-
-Fix: `SELECT ... FOR UPDATE` in (1) and (2); in (3) make the update conditional (`WHERE pii_key_id=$old AND pii_alg=$oldalg`) and skip the row when it no longer matches - it was re-keyed on touch anyway.
-
-### F3. LOW - Enumeration warning can be skipped entirely by the equality check
-
-`internal/api/lookup.go:44-48` logs the "possible enumeration attack" warning only when `misses == enumerationThreshold` (exactly 100). The weighted sliding-window count is not monotonic per call (the `frac*prev` term decays between calls; the Redis variant truncates a float), so the count can go 99 -> 101 and the warning never fires. The `sunder_lookup_misses_total` counter still increments per miss, so Prometheus-based alerting is unaffected - only the log line is unreliable. Fix: `>=` with a once-per-window latch.
-
-### F4. LOW - Redis limiter: INCR and EXPIRE are not atomic
-
-`internal/ratelimit/redis.go:196-201`: if the process dies or errors between `INCR` and `EXPIRE`, the bucket key lives forever (Redis memory leak; one stale key per client per window boundary hit). A Lua script or `SET ... EX NX` + `INCR` closes it. Also, `RedisLimiter.Failures()` is never exported to metrics, so fail-open degradation is invisible to ops.
-
-### F5. LOW - Signer socket: brief permission window and unenforced directory perms
-
-`internal/crypto/signer.go:94-99`: between `net.Listen` (socket created with umask-derived mode) and `os.Chmod(0o600)` there is a short window where another same-host user could connect if the parent directory allows traversal. `os.MkdirAll(dir, 0o700)` does not tighten a pre-existing directory. Low impact (deployments put the socket in a private dir), but cheap to fix: `syscall.Umask` around Listen, or verify/enforce directory ownership and mode at startup.
-
-### F6. LOW - Unknown-kid path in OTI verify is the cache-busting vector its comment denies
-
-`internal/service/oti.go:178-189`: every token with a forged unknown `kid` triggers `Ring.Invalidate()` plus a keys-table reload. The comment claims forged kids "cannot turn this into a cache-busting vector at scale", but each such (authenticated) request does exactly one cache invalidation + DB round trip, and also evicts the cache for concurrent legitimate requests. Impact is small (cheap query, authenticated callers only, rate-limitable), but the comment overstates the protection; a per-kind cooldown on the refresh would match the comment's intent.
-
-### F7. INFO - FileKeystore stale-lock reclaim shares the temp path
-
-`internal/crypto/keystore.go:96-99,130-145`: after a 30s stale-lock reclaim, two processes can both run `writeKey` against the same `p+".tmp"`; interleaved truncate/rename can transiently publish a short/empty key file, which `Key()` then rejects (`want 32 bytes`) until the next `Ensure`. Fail-closed and extremely unlikely; use a unique temp name (`os.CreateTemp`) if you ever care.
-
-### Work-in-progress (P2.1 / P2.2) - state as reviewed
-
-- **P2.1 signer split** (`crypto.Engine`, `ServeSigner`, `RemoteEngine`): clean design, behaviour-parity and malformed-frame tests present, full stack e2e over the socket passes. No correctness issues found beyond F5.
-- **P2.2 credential expiry** (uncommitted): logic is sound - the expiry check runs *after* the constant-time compare, so `credential_expired` only leaks validity of a secret the caller already holds (deliberate, acceptable). Incomplete as of this review: `RotateSecret` has no caller; the `sunder client rotate-secret` CLI referenced in migration `0009` does not exist yet; `client create` cannot set an expiry; the new expiry branch has no test.
+Carried forward as fixed from earlier passes: F6, F13, N1 (primary exploit), N3-N8, N10-N18, N20-N23, and the low items listed in pass 3. Of the 40 findings in passes 1-2, 34 are fully fixed, 3 partial, 2 not fixed, 1 resolved as a documented design decision.
 
 ---
 
-## B. Ops / deployment
+# Part B - Still open
 
-### F8. HIGH (when mTLS enabled) - Helm probes can never pass with `tls.mtlsSecretName` set
+Ordered by severity. Nothing here is new this round; all of it was raised in pass 3 and re-verified against the current tree.
 
-`deploy/helm/sunder/templates/deployment.yaml:26-29` uses `httpGet` probes with `scheme: HTTPS` when TLS is on, but a configured client CA sets `tls.RequireAndVerifyClientCert` (`internal/api/server.go:218`). Kubelet HTTPS probes present no client certificate, so every probe handshake is refused: pods never become Ready and are liveness-killed in a loop. Use `tcpSocket`/`exec` probes (or a separate plaintext health listener) for the mTLS configuration.
+### P0-a - the erasure guard is read outside the transaction that writes, and `GetAttribute` has no guard (HIGH)
 
-### F9. MEDIUM - Anchor CronJob likely cannot write to its PVC
+Unchanged. `contacts.go:417` is still `FROM cids WHERE cid=$1 AND scope=$2` with no `persons` join, and `mergeIntoBlob` (`contacts.go:465`) still takes `FOR UPDATE` on `cids` alone.
 
-`deploy/helm/sunder/templates/cronjobs.yaml:24-40` runs `sunder anchor -out /anchors` as uid 65532 (non-root image) but sets no `securityContext`/`fsGroup`; freshly provisioned PVCs typically mount root-owned 0755, so the daily `.tsr` export fails with permission denied. Add `fsGroup: 65532` (the main Deployment already has a proper securityContext).
+Two consequences. The tombstone check in `ExternalClaims` runs on `c.Pool` (autocommit) while the merge runs in a separate transaction, so an `erasePerson` that commits in between lets a fresh live blob land on a tombstoned CID. And `GetAttribute` returns 404 after an erasure only because the blob is NULL - the accident, not a guard - while appending the `attributes.read` audit row (`contacts.go:433`) *before* the empty-blob check at `:439`, so a read of an erased person is recorded as a real disclosure.
 
-### F10. LOW - databunker migrator: `-dry-run` + `-map-out` clobbers a real mapping file
+One change covers both: put the predicate in the locking read - `FROM cids c JOIN persons p ON p.id = c.person_id WHERE c.cid = $1 AND p.erased_at IS NULL FOR UPDATE OF c` - and add the same join to `GetAttribute`.
 
-`migrate/databunker/main.go:268-270` returns `("", nil)` in dry-run; the worker (`:113-117`) treats that as success and appends `{token, ""}`; `:144` `os.Create` truncates. A dry-run re-check after a real migration overwrites the only token->CID mapping record with empty CIDs. Dry-run should skip the mapping append and the CSV write. (Adjacent dead code at `:239-244`: the `default:` arm's `if k == "email" || k == "phone"` can never match - those keys are consumed by earlier `case` arms.)
+### P0-b - the degenerate-key guard misses the point that actually forges (HIGH)
 
-Verified clean: Dockerfile (non-root both stages, no secrets in layers, `.dockerignore` re-include works - checked with a real build), compose (loopback-only ports, env names match `config.go`), Helm env plumbing and v0.2.0 tags, Grafana metric names, demo scripts, benchmark/k6 endpoints, CI/release workflows (coverage gate, cosign, SBOM).
+Unchanged: `external.go:109` still rejects only `isAllZero(pubKey)`. That catches `00…00` and misses the **identity point `01 00…00`**, the one small-order encoding that is universally forgeable under Go's cofactorless verify. Re-verified against this repo's own primitives:
+
+```
+FORGERY ACCEPTED for message "anything"
+FORGERY ACCEPTED for message "{\"iss\":\"gov\",\"claims\":{\"age_gte_18\":\"true\"}}"
+FORGERY ACCEPTED for message ""
+isAllZero(identity point) = false   <- guard misses it
+```
+
+A 64-byte signature of `01` followed by zeros verifies for any payload under that key, and `sunder issuer add` (`main.go:646-670`) validates hex length only. It needs an operator to register that specific key, so it is onboarding integrity rather than a remote exploit - but the comment at `external.go:105-108` and the test at `external_test.go:263-277` both assert the class is handled, which is how a gap stops being looked at. Reject all eight small-order encodings, at `issuer add` as well as at verify.
+
+### P1 - every unauthenticated portal login attempt takes the global audit lock (MEDIUM-HIGH)
+
+`audit.Append` still runs before the `if !found` return (`portal.go:106-113`), and `AppendTx` takes `pg_advisory_xact_lock(appendLockKey)` - the single lock serialising every audit write in the product. An unauthenticated public endpoint can therefore serialise the whole service's write path. The 5/min per-IP limit is the only brake, and it is bypassable via N9 below.
+
+### P9 - the claims rate limit fails open, restoring the N4 DoS (MEDIUM)
+
+`redis.go:202` fails closed only for keys prefixed `portal:`; the `claims:` bucket (`api/contacts.go:118`) is not, and `SUNDER_REDIS_FAIL_CLOSED` defaults to false. A Redis outage removes the limit and any client holding `claims.external` can again serialise the instance behind the audit lock. The "degrade abuse control, not availability" rationale is inverted here - on this endpoint the abuse control *is* the availability control, which is the same reasoning that made the portal buckets fail closed.
+
+### N9 - the client-IP header reads the attacker-controlled end (MEDIUM)
+
+`api/portal.go:29-31` still takes the **left-most** `X-Forwarded-For` entry. nginx-ingress's default `$proxy_add_x_forwarded_for` appends, so the left-most value is caller-supplied: a random header per request yields a fresh bucket every time, defeating both the login-mail cap and the probe limit. `docs/CONFIG.md:73` still offers `X-Forwarded-For` as the example with no warning that the header must be one the proxy overwrites. Use right-most-minus-trusted-hops. The function's own comment already says "a blindly trusted header is a limiter bypass" - the intent is right, the index is wrong.
+
+### P3 - concurrent replicas double-send every mail (MEDIUM)
+
+Still no `FOR UPDATE SKIP LOCKED` or lease anywhere in `portal.go` or `gdpr.go`; the claim is a plain `SELECT ... WHERE status='PENDING'` and the POST precedes the status update. The worker runs in every replica and the chart defaults to `replicaCount: 2`, so every login link is mailed twice and the per-address cap of 3 becomes 3R. Worth fixing once for both workers.
+
+### P10 - envelope rows survive erasure; acceptance and pruning use different clocks (MEDIUM)
+
+`erasePerson` still touches no `external_envelopes` rows, so an issuer-chosen `jti` outlives an Article 17 erasure by up to `maxEnvelopeLifetime` plus a cron interval (~48h) - while `gdpr.go:525-527` states that is not acceptable. Acceptance uses the application clock (`external.go:130,135`), pruning the database clock (`gdpr.go:529`); a DB clock running ahead prunes rows for envelopes the app still accepts, reopening a replay window.
+
+### P4 - PENDING outbox rows are never pruned, and erasure does not clear them (LOW-MEDIUM)
+
+`PrunePortal` still deletes only `status <> 'PENDING'`, and `erasePerson` touches no portal tables (verified by grep). An unreachable mailer grows the table without bound, and a pending login or erase-confirm for a person erased in the meantime still gets delivered. Since `0016` the payload is sealed, so this is lifecycle and correctness, not plaintext-at-rest.
+
+### P2 - the audit chain records the hit/miss answer (LOW-MEDIUM)
+
+`Detail: {"queued": found}` (`portal.go:110`) sits three lines under a comment reading "Nothing about the address is logged - the audit chain must not become the enumeration oracle either". The address is not logged, so it is not an oracle by itself, but anyone who can read the chain and time their own probe gets confirmation. Logging the attempt without the outcome keeps the accountability value.
+
+### N19 - the TSA CA path is documented as configurable and is inert (LOW-MEDIUM)
+
+Unchanged, and still the F6 pattern: `deploy/helm/sunder/values.yaml:83` defines `anchor.caPath` with a comment naming the review finding, and `grep -rn caPath deploy/` returns exactly that one line. Re-proven by rendering:
+
+```
+$ helm template t deploy/helm/sunder --set anchor.caPath=/custom/my-ca.pem
+args: ["anchor", "-out", "/anchors", "-ca", "/etc/sunder/tsa-ca.pem"]
+```
+
+There is also no volume or secret to supply a different bundle, so pointing `anchor.tsaUrl` at your own TSA still makes `Anchor` hard-fail and silently stop producing evidence - which the values comment itself warns about while offering no way to avoid it.
+
+### Remaining low items (all unchanged)
+
+- **P5** - `allowEmailSend` autocommits before the token/outbox transaction, so a rolled-back transaction still burns a send; three such events lock a citizen out for 15 minutes with an empty inbox.
+- **P6** - the dedicated portal listener (`server.go:309-313`) sets only `ReadHeaderTimeout`; the main API server sets Read, Write and Idle. This is the unauthenticated public listener.
+- **P7** - one goroutine drains both queues sequentially (`server.go:276,284`), so a hanging mailer starves erasure webhook delivery and vice versa.
+- **P8** - no `SUNDER_PORTAL_*` variable appears anywhere under `deploy/`; the N12 configuration is correct but the documented deployment path cannot reach it.
+- **P11** - `iat` is decoded and never read (`external.go:40`); claim names are length-checked but not charset-checked, so an issuer with `*` can store names unreachable through `GET /v1/contacts/{cid}/attributes/{name}`; the 24h envelope lifetime and the new 429 are absent from `docs/API.md` and the OpenAPI spec; `PruneEnvelopes` carries `RunRetention`'s doc comment; `maxEnvelopeLifetime` and migration 0015's `DEFAULT now() + interval '24 hours'` are independently hardcoded and will drift; `external.go:112` discards `PasetoVerify`'s returned payload and keeps the struct parsed from the unverified one (safe today, unenforced).
+- **Webhook URL validation** is still prefix-only (`main.go:135-137`): `http://localhost.attacker.example/` passes the loopback branch.
+- **Issuer key rotation** still has no `revoked_at` or history, so remove-then-add silently re-attributes stored `<claim>@<issuer>` attributes to the new key holder.
 
 ---
 
-## C. Documentation & API contract
+# Part C - CI and test suite
 
-### F11. HIGH - `api/openapi.yaml` `OtiIssueRequest` schema is corrupted
+**Coverage: 89.2%, gate: 90.0% → CI fails.** Measured with the exact CI invocation (`go test -race -coverprofile=... -coverpkg=./internal/...,./cmd/... ./...`). The gate was raised from 88 to 90 in this working tree; coverage did not follow. Either the raise lands with the tests that justify it, or it lands after them.
 
-Lines ~686-704: `audience:` is an empty node; its `type: string`, description and example are mis-indented under `share_attributes`, which now has duplicate `type`/`description` keys. A YAML parser yields `audience: null` and `share_attributes: {type: string, ...}` - the array typing and description are lost. The file is embedded and served live at `GET /openapi.yaml` and RELEASING.md names it "the source of truth", so any codegen/validator consumer gets a wrong contract for `/v1/oti`. Re-indent the block.
+**`TestAnchorEnvironmentErrors` is flaky under the CI command.** Reproduced once in five full-suite `-race` runs; six attempts in isolation and package-alone were all clean, so it is load- or contention-dependent rather than deterministic. `internal/audit` tests manipulate process-global `PATH` via `t.Setenv` and shell out to `openssl`, and every package shares one Postgres server - any of those is a plausible source. Worth pinning down before it starts failing pull requests at random; a flaky gate teaches people to re-run rather than read.
 
-### F12. MEDIUM - `consent_denied` is missing from the error contract
-
-The server returns 403 `{"error":"consent_denied"}` (`internal/api/contacts.go:28-29`) from attribute reads and OTI issuance, but the code is absent from the OpenAPI `Error.error` enum (`api/openapi.yaml:741-753`), from the `ForbiddenOrPurpose` 403 responses, and from the canonical code list at the top of `docs/API.md` - even though both documents mention it elsewhere in prose. All five SDKs consequently map it to generic Forbidden (see F16).
-
-### F13. LOW - Stale/overbroad claims in design docs
-
-- `docs/THREAT-MODEL.md` row 9 calls the shared rate-limit backend "planned"; the Redis-backed limiter/detector exists (`internal/ratelimit/redis.go`) and is wired via `SUNDER_REDIS_ADDR`.
-- `docs/ARCHITECTURE.md` / `docs/DESIGN.md` §5: "the only runtime dependency is pgx" / "crypto hot path is stdlib only" - `golang.org/x/text` (NFKC on every registration/lookup) is a direct dependency and `x/crypto/chacha20poly1305` is on the crypto path. Side note: `go.mod` marks `golang.org/x/crypto` as `// indirect` despite the direct import - run `go mod tidy`.
-- `docs/API.md` (Audit section), `docs/DESIGN.md` §4, README: "audit ... inside the same transaction as the operation" is true for register/scopes.issue/oti.issue/oti.verify but NOT for `attributes.read` and `lookup`, which use standalone `audit.Append` (own transaction; the guarantee is preserved differently - fail-closed *before* the value is released). Reword.
-- `docs/API.md:39` and the `/v1/contacts` description in `openapi.yaml` hardcode "AES-256-GCM blob"; with algorithm agility, new blobs follow `SUNDER_PII_ALG` (the rest of the docs already say so).
+**Test quality moved in the right direction.** The portal timing test now asserts something real (no perfect separation between fastest hit and slowest miss) instead of a 300 ms tolerance ~120x the signal. It is still a weak-form assertion - it catches single-shot enumeration, not a gap that only becomes exploitable after statistical averaging - but it is honest about what it checks, and with the 40 ms floor in place there is no longer a gap for it to miss.
 
 ---
 
-## D. SDKs
+## Suggested order
 
-All five SDKs (python, typescript, java, php, dotnet) have correct endpoint paths, methods, field names, status-code expectations and retry policies; TLS verification is never disabled; python/ts/php/java test suites all pass locally. Findings:
-
-### F14. MEDIUM - TypeScript: unguarded `res.json()` on 2xx breaks the SDK's own error contract
-
-`sdks/typescript/src/index.ts:395`: a non-JSON success body escapes as a raw `SyntaxError` instead of `SunderError`, unlike the other four SDKs which map this to `bad_response` (and test it). Related: TS is also the only SDK that does not shape-check success bodies - a 2xx missing `cid` yields `{cid: undefined}` silently.
-
-### F15. LOW - TypeScript: error mapping is status-first, other SDKs are code-first
-
-`index.ts:72-94` switches on HTTP status and consults the server `error` code only inside the 400/403 arms; python/php/java/dotnet map the code first (explicitly tested behaviour there). Not a live bug (the server never emits mismatched pairs) but a cross-SDK divergence.
-
-### F16. LOW - `consent_denied` missing from every SDK's error map
-
-Consequence of F12: all five SDKs degrade it to generic Forbidden; callers cannot type-match "consent withdrawn" vs "action not granted". The raw code survives in the exception's `code` field.
-
-### F17. LOW - TypeScript: `combineSignals` leaks abort listeners on Node 18-20.2
-
-`index.ts:32-42`: the fallback path adds a `{once:true}` listener per request to a caller-supplied long-lived signal and never removes it on normal completion - unbounded accumulation (`MaxListenersExceededWarning`).
-
----
-
-## E. Test suite
-
-Strong overall (isolation via per-test databases, fault-injection, real e2e over TLS/mTLS/signer socket). Substantive issues:
-
-1. **`internal/api/fault_e2e_test.go:124`** - the "oti verify on dead pool" assertion never reaches the pool: purpose `"x"` fails the `CanUse` check before any DB access, so the test passes even if the dead-pool behaviour regressed. Use a granted purpose.
-2. **`internal/crypto/crypto_test.go:208-210`** (`TestCSPRNGFailureSurfaces`) - the Encrypt case exercises key *generation* failure, not the nonce CSPRNG branch in `LocalEngine.Seal` that the name promises. Create the key first, then stub `randRead`.
-3. **`internal/crypto/signer_test.go:101-107`** - the directory-permission assertion tests `os.MkdirTemp` (the helper), not `ServeSigner`; production could change to 0755 and it would still pass.
-4. **`internal/api/rotation_e2e_test.go:77-99`** - "retired signing key stops verifying" is asserted only via ring state; no test presents an actually-v1-signed token after retirement (the crafted-token technique from `TestOTIUnknownKidRejected` would work).
-5. **Flakiness risks:** fixed 400 ms sleep in `cmd/sunder/run_env_test.go:62` (migrate+bootstrap+listen on slow CI); 50 ms sleep after signer kill in `internal/api/signer_e2e_test.go:114-118` (pooled connection may still serve - poll until failure instead); minute-boundary race in `internal/api/lookup_e2e_test.go:94-103`; wall-clock vs Postgres-clock dependency in `internal/service/tunables_test.go:34-41`.
-6. **`internal/api/tls_run_test.go:109-143`** - the mTLS-refusal test passes vacuously if the server never bound (every `Get` errors); assert `Run`'s error via `<-done`.
-7. **Untested security branches (low risk, defense-in-depth):** the signed-claims audience check `internal/service/oti.go:193-195` (all existing tests fail earlier at the scope check) and the "signed but never persisted -> forged" branch at `oti.go:234-235` with a validly signed token. The new P2.2 credential-expiry branch in `internal/auth/auth.go` is currently untested.
-8. **`internal/store/store_test.go:11-36`** - the one test that migrates the shared `SUNDER_TEST_DB_URL` database directly instead of an isolated per-test DB; permanent schema pollution of the shared server.
-
----
-
-## Suggested priority
-
-| Order | Findings | Why |
+| Priority | Items | Rationale |
 |---|---|---|
-| 1 | F1, F11 | Silently broken today: no per-handler observability + published API contract wrong |
-| 2 | F2 | Only finding that can lose data (PII attributes) |
-| 3 | F8, F9 | Break the moment the corresponding deploy option is used |
-| 4 | F12, F14, F10 | Contract/SDK correctness, migrator data clobber |
-| 5 | Test items 1-4, 6 | Assertions that cannot catch their intended regression |
-| 6 | Everything else | Low severity / documentation hygiene |
+| 1 | Coverage vs the 90% gate; the anchor flake | Both fail CI today, neither is in the feature code |
+| 2 | **P0-a, P0-b** | The erasure guard is racy and `GetAttribute` relies on an accident; the key guard blocks the wrong point. Both have a comment or test asserting otherwise |
+| 3 | P1, N9, P9 | An unauthenticated endpoint that can serialise all audit writes, a bypassable brake in front of it, and a claims limiter that vanishes when Redis blinks |
+| 4 | P3, P4, P10 | Double-sent mail, unbounded PENDING rows, envelope rows outliving erasure; fix the claim pattern once for both workers |
+| 5 | N19 | Wire `caPath` and add a volume for a custom CA, or drop the value and state the chart is FreeTSA-only |
+| 6 | P2, P5-P8, P11, webhook URL validation, issuer revocation | Correctness and hardening |
