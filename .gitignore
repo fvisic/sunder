@@ -18,3 +18,6 @@ sdks/java/target/
 CODE-REVIEW.md
 # IDE state
 .idea/
+
+# Sales material: customer-facing decks, not part of the product.
+sales/
