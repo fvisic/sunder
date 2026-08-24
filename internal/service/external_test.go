@@ -204,7 +204,7 @@ func TestRegisterRejectsProvenanceForgery(t *testing.T) {
 	}
 }
 
-// N1 (verified exploit in review): an erased person must not be
+// An erased person must not be
 // resurrectable through ANY path that addresses the row by CID.
 func TestErasedPersonIsUnreachableEverywhere(t *testing.T) {
 	e := newFaultEnv(t)

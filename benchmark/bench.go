@@ -4,15 +4,15 @@
 //
 // Operations:
 //
-//	write   create one contact/user per request (email, phone, name + 2 custom fields)
-//	read    fetch by CID (Sunder: one attribute, purpose-checked+audited) /
-//	        by token (Databunker: full record)
-//	lookup  find by email (Sunder: POST /v1/lookup; Databunker: GET /v1/user/email/...)
+//	write create one contact/user per request (email, phone, name + 2 custom fields)
+//	read fetch by CID (Sunder: one attribute, purpose-checked+audited) /
+//	 by token (Databunker: full record)
+//	lookup find by email (Sunder: POST /v1/lookup; Databunker: GET /v1/user/email/...)
 //
 // Usage:
 //
-//	bench -target sunder     -base http://localhost:8080 -cred '<id.secret>' -op write -n 5000 -c 16
-//	bench -target databunker -base http://localhost:3000 -cred DEMO          -op write -n 5000 -c 16
+//	bench -target sunder -base http://localhost:8080 -cred '<id.secret>' -op write -n 5000 -c 16
+//	bench -target databunker -base http://localhost:3000 -cred DEMO -op write -n 5000 -c 16
 //
 // read/lookup phases reuse identities created by a preceding write run with
 // the same -seed, so run write first.

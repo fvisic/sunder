@@ -8,8 +8,8 @@ package ratelimit
 // Scheme: the same weighted two-bucket window as the in-memory limiter,
 // with one Redis counter per (key, window-start) bucket:
 //
-//	INCR rl:{key}:{start}       EXPIRE rl:{key}:{start} 2*window
-//	GET  rl:{key}:{start-1}     -> weighted sum decides
+//	INCR rl:{key}:{start} EXPIRE rl:{key}:{start} 2*window
+//	GET rl:{key}:{start-1}     -> weighted sum decides
 //
 // Failure mode is configurable fail-open/fail-closed; the default is
 // fail-open with a warning counter (rate limiting is abuse control - an
@@ -184,7 +184,7 @@ func (l *RedisLimiter) Failures() int64 {
 // failed decides what an unreachable Redis means. Fail-open is defensible
 // for authenticated callers (degrade abuse control, not availability) but
 // not on the unauthenticated portal surface, where it would turn a
-// rate-limited endpoint into a line-rate one (review N10). Portal buckets
+// rate-limited endpoint into a line-rate one. Portal buckets
 // are prefixed "portal:" and always fail CLOSED.
 func (l *RedisLimiter) failed(key string) bool {
 	l.mu.Lock()
@@ -192,15 +192,15 @@ func (l *RedisLimiter) failed(key string) bool {
 	l.mu.Unlock()
 	if l.OnFailure != nil {
 		// Ops visibility: fail-open degradation must not be silent
-		// (review finding F4).
+		//.
 		l.OnFailure()
 	}
 	// Fail-open degrades abuse control rather than availability, which is
 	// defensible for a plain authenticated lookup. It is NOT defensible
 	// where the limit is what protects a shared resource: the
-	// unauthenticated portal surface (review N10) and the external-claims
+	// unauthenticated portal surface and the external-claims
 	// endpoint, whose every call takes the global audit lock, so losing the
-	// limit lets one client serialise the instance (review P9).
+	// limit lets one client serialise the instance.
 	for _, mustFailClosed := range []string{"portal:", "claims:"} {
 		if strings.HasPrefix(key, mustFailClosed) {
 			return false
@@ -219,7 +219,7 @@ func (l *RedisLimiter) windowCount(prefix, key string, span time.Duration) (floa
 	prevKey := fmt.Sprintf("%s:%s:%d", prefix, key, prev)
 
 	// One atomic script: INCR and EXPIRE together, so a crash between the
-	// two can never leave an immortal counter key (review finding F4).
+	// two can never leave an immortal counter key.
 	cur, err := l.Client.cmd("EVAL",
 		"local c = redis.call('INCR', KEYS[1]) if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end return c",
 		"1", curKey, strconv.Itoa(int(2*span/time.Second)))
@@ -240,7 +240,7 @@ func (l *RedisLimiter) windowCount(prefix, key string, span time.Duration) (floa
 //
 // The comparison matches the in-memory backend exactly (>= limit denies):
 // the two disagreed by one, so the same client saw a different ceiling
-// depending on which backend was configured (review N10).
+// depending on which backend was configured.
 func (l *RedisLimiter) Allow(key string, limit int) bool {
 	if limit <= 0 {
 		return false

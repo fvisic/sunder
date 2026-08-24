@@ -124,7 +124,7 @@ func TestRunMTLSRefusesClientsWithoutCert(t *testing.T) {
 	}, Timeout: 5 * time.Second}
 	reached := false
 	// The port must actually be listening, or "every request failed" would
-	// pass vacuously (review finding, test item 6).
+	// pass vacuously.
 	var bound bool
 	for i := 0; i < 50; i++ {
 		if c, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
@@ -166,7 +166,7 @@ func TestRunMTLSRefusesClientsWithoutCert(t *testing.T) {
 }
 
 // The portal on its own listener: the API can keep mTLS while citizens
-// reach the portal without a client certificate (review N12).
+// reach the portal without a client certificate.
 func TestRunPortalOnSeparateListener(t *testing.T) {
 	st := testutil.NewDB(t)
 	apiAddr := freeAddr(t)

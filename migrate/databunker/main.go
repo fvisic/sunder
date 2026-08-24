@@ -11,9 +11,9 @@
 // Usage:
 //
 //	go run ./migrate/databunker \
-//	  -source http://localhost:3000 -source-token <root token> \
-//	  -target http://localhost:8080 -cred '<client_id.secret>' \
-//	  -map-out mapping.csv [-batch 100] [-c 8] [-dry-run]
+//	 -source http://localhost:3000 -source-token <root token> \
+//	 -target http://localhost:8080 -cred '<client_id.secret>' \
+//	 -map-out mapping.csv [-batch 100] [-c 8] [-dry-run]
 //
 // The Sunder client needs the contacts.register action. Records without an
 // email or phone cannot be registered (nothing searchable) and are reported

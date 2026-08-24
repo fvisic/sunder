@@ -15,7 +15,7 @@ import (
 // The list is the canonical libsodium blacklist (identity, zero, the two
 // order-8 points, p-1, p, p+1). Rejecting the all-zero key alone - as an
 // earlier guard did - misses the identity point, which is the encoding that
-// actually forges (review P0-b).
+// actually forges.
 var smallOrderPoints = [][]byte{
 	mustHex("0000000000000000000000000000000000000000000000000000000000000000"),
 	mustHex("0100000000000000000000000000000000000000000000000000000000000000"),

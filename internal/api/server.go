@@ -150,7 +150,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		s.mux.Handle("/v1/", s.Auth.Middleware(capturePattern(v1)))
 		// The portal is only mounted on the main listener when it has no
 		// dedicated one: with mTLS on the API, citizens could never present
-		// a client certificate (review N12).
+		// a client certificate.
 		if s.Portal != nil && s.Cfg.PortalListen == "" {
 			s.registerPortal()
 		}
@@ -164,7 +164,7 @@ func (s *Server) Handler() http.Handler { return s.instrument(s.mux) }
 // patternKey carries a *string through the request context so the route
 // pattern stamped by the INNER v1 mux (on the shallow request copy the
 // auth middleware makes) reaches the outer instrument wrapper - reading
-// r.Pattern out here would always see "/v1/" (review finding F1).
+// r.Pattern out here would always see "/v1/".
 type patternKey struct{}
 
 // capturePattern runs inside the middleware chain, right around the inner
@@ -275,7 +275,7 @@ func (s *Server) Run(ctx context.Context) error {
 				case <-ticker.C:
 					// The two queues drain CONCURRENTLY: sequentially, a
 					// hanging mailer starved erasure webhook delivery and
-					// vice versa (review P7). Each sweep claims its own
+					// vice versa. Each sweep claims its own
 					// rows, so replicas and ticks cannot double-send.
 					var wg sync.WaitGroup
 					wg.Add(1)
@@ -315,12 +315,12 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// A dedicated portal listener: TLS (server-side) but never a client
 	// certificate requirement, so the API can stay behind mTLS while
-	// citizens reach the portal from a browser (review N12).
+	// citizens reach the portal from a browser.
 	var portalSrv *http.Server
 	if s.Portal != nil && s.Cfg.PortalListen != "" {
 		// The same timeout set as the API server: this is the
 		// UNAUTHENTICATED public listener, so a slow-loris there is
-		// cheaper for the attacker than anywhere else (review P6).
+		// cheaper for the attacker than anywhere else.
 		portalSrv = &http.Server{
 			Addr:              s.Cfg.PortalListen,
 			Handler:           s.instrument(s.portalMux()),

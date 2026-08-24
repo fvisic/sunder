@@ -257,7 +257,7 @@ func (o *OTI) VerifyFull(ctx context.Context, client *auth.Client, token, purpos
 		return nil, ErrTokenExpired
 	}
 	// Consent is checked at ISSUE and re-checked here: a withdrawal within
-	// the token's 5-minute life must stop the handoff (review finding P2.3).
+	// the token's 5-minute life must stop the handoff.
 	if denied, err := consentDenied(ctx, o.Pool, claims.CID, purpose); err != nil {
 		return nil, err
 	} else if denied {
@@ -341,8 +341,7 @@ func (o *OTI) VerifyFull(ctx context.Context, client *auth.Client, token, purpos
 	// result is that value, one bit wide. Logging it would put a derived
 	// personal-data assertion ("this person is over 18") into a log that is
 	// never pruned and survives erasure as a tombstone-keyed row. The
-	// disclosure event is fully accounted for by the request itself
-	// (user review finding N22).
+	// disclosure event is fully accounted for by the request itself.
 	askedPredicates := make([]string, 0, len(predResults))
 	for _, r := range predResults {
 		if r.Op == PredAgeGTE {
@@ -389,7 +388,7 @@ func (o *OTI) shareIntoScope(ctx context.Context, tx pgx.Tx, issuerCID, verifier
 	var dstBlob []byte
 	var dstKey, dstAlg string
 	// FOR UPDATE: the merge into the verifier blob must not race a
-	// concurrent register/verify on the same cid (review finding F2).
+	// concurrent register/verify on the same cid.
 	if err := tx.QueryRow(ctx,
 		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1 FOR UPDATE`,
 		verifierCID).Scan(&dstBlob, &dstKey, &dstAlg); err != nil {

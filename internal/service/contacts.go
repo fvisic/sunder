@@ -414,7 +414,7 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 	// The tombstone predicate is part of THIS read: relying on the blob
 	// being NULL after an erasure was an accident, not a guard, and it let
 	// an attributes.read audit row be written for an erased person as if a
-	// real disclosure had happened (review P0-a).
+	// real disclosure had happened.
 	var blob []byte
 	var keyID, alg string
 	err := c.Pool.QueryRow(ctx,
@@ -466,9 +466,9 @@ func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid string, att
 	var oldKeyID, oldAlg string
 	// FOR UPDATE: two concurrent merges onto the same row (dedup is the
 	// whole point of this path) must serialize, or the first writer's
-	// attributes are silently lost (review F2).
+	// attributes are silently lost.
 	//
-	// The tombstone predicate is in the SAME locking read (review P0-a): a
+	// The tombstone predicate is in the SAME locking read: a
 	// check done earlier on the pool could be overtaken by an erasure that
 	// commits before this transaction writes, landing a fresh live blob on
 	// a forgotten person. FOR UPDATE OF c locks the cids row only - persons
@@ -519,7 +519,7 @@ func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid string, att
 const maxBlobBytes = 256 * 1024
 
 // MergeIntoBlobForTest exposes mergeIntoBlob to the external test package so
-// the erasure race in review P0-a can be exercised at the write itself,
+// the erasure race can be exercised at the write itself,
 // not only through a caller that pre-checks.
 func (c *Contacts) MergeIntoBlobForTest(ctx context.Context, tx pgx.Tx, cid string, attrs map[string]string) error {
 	return c.mergeIntoBlob(ctx, tx, cid, attrs)

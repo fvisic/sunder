@@ -89,7 +89,7 @@ func ServeSigner(ctx context.Context, socketPath string, eng Engine) error {
 	}
 	// MkdirAll leaves a PRE-EXISTING directory's mode alone; tighten it, or
 	// a group/world-traversable dir would expose the socket during the
-	// listen/chmod window (review finding F5).
+	// listen/chmod window.
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
@@ -103,7 +103,7 @@ func ServeSigner(ctx context.Context, socketPath string, eng Engine) error {
 		_ = os.Remove(socketPath)
 	}
 	// Close the umask window: the socket is created 0600 from the start
-	// rather than chmod'ed after the fact (review finding F5).
+	// rather than chmod'ed after the fact.
 	old := syscall.Umask(0o177)
 	l, err := net.Listen("unix", socketPath)
 	syscall.Umask(old)

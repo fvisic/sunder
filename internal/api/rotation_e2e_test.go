@@ -76,7 +76,7 @@ func TestOTISigningKeyRotationDualWindow(t *testing.T) {
 
 	// Retire v1 and present a token ACTUALLY signed under v1: it must stop
 	// verifying (leak cure), not merely disappear from the ring listing
-	// (review finding, test item 4).
+	//.
 	v1Signed := craftToken(t, e, "v1", crmCID, "create_order", "erp")
 	if err := e.srv.Contacts.Ring.Retire(ctx, "oti-sign", "v1"); err != nil {
 		t.Fatal(err)

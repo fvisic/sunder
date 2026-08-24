@@ -13,3 +13,8 @@ coverage.out
 
 # Java build output (Maven); regenerable, never committed.
 sdks/java/target/
+
+# Internal review notes: findings, resolution log, work in progress.
+CODE-REVIEW.md
+# IDE state
+.idea/

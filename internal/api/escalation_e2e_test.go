@@ -6,12 +6,12 @@ package api
 // The point this test pins: an OTI lives five minutes, so a delayed send
 // can NEVER be "an OTI saved for later". The correct shape is:
 //
-//	t0  CRM opens the ticket, issues an OTI (purpose escalation_notify,
-//	    audience notifier); the notifier verifies it immediately and stores
-//	    ONLY its own scoped CID next to the ticket id - no email, no name.
+//	t0 CRM opens the ticket, issues an OTI (purpose escalation_notify,
+//	 audience notifier); the notifier verifies it immediately and stores
+//	 ONLY its own scoped CID next to the ticket id - no email, no name.
 //	t+N escalation fires: the notifier fetches the email attribute
-//	    just-in-time (purpose-checked, consent-checked, audited), sends,
-//	    and still stores nothing.
+//	 just-in-time (purpose-checked, consent-checked, audited), sends,
+//	 and still stores nothing.
 //
 // A notifier database leak therefore contains ticket ids and CIDs - zero
 // PII - and the person can kill escalation emails at any moment by

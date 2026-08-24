@@ -18,7 +18,7 @@ import (
 )
 
 // queuedToken opens the SEALED outbox payload the way the worker does -
-// the token is no longer readable straight from the row (review probe C).
+// the token is no longer readable straight from the row.
 func queuedToken(t *testing.T, e *faultEnv, kind string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -63,7 +63,7 @@ func TestPortalConfirmTokenIsPersonBound(t *testing.T) {
 	}
 
 	// A confirmation token minted for A must not erase B. The token is
-	// mailed out of band now, so read it from the outbox (review N3).
+	// mailed out of band now, so read it from the outbox.
 	if err := p.RequestErase(ctx, personA); err != nil {
 		t.Fatal(err)
 	}

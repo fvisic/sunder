@@ -358,7 +358,7 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 	}
 	// Portal state dies with the person: a queued login or erase-confirm
 	// mail must not still be delivered, and a live session must not
-	// outlive the data (review P4).
+	// outlive the data.
 	for _, q := range []string{
 		`DELETE FROM portal_sessions WHERE person_id=$1`,
 		`DELETE FROM portal_tokens WHERE person_id=$1`,
@@ -371,7 +371,7 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 		}
 	}
 	// Consumed-envelope records for this person's pseudonyms: the jti is
-	// issuer-chosen and may reference the subject (review P10).
+	// issuer-chosen and may reference the subject.
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM external_envelopes WHERE cid IN (SELECT cid FROM cids WHERE person_id=$1)`,
 		personID); err != nil {
@@ -437,7 +437,7 @@ func (g *GDPR) maxAttempts() int {
 // records, not operational noise.
 func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 	// Claim the batch: without SKIP LOCKED every replica delivered every
-	// event (review P3).
+	// event.
 	claim, err := g.Pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -568,13 +568,13 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 // expires_at no envelope with that jti can still be accepted, so the row
 // no longer has anti-replay value - and issuer-chosen jtis may reference a
 // subject, so keeping them past an Article 17 erasure is not acceptable
-// (review N16).
+// .
 func PruneEnvelopes(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 	// The safety margin covers clock skew between the application (which
 	// decides acceptance) and the database (which decides pruning): without
 	// it, a database clock running ahead deletes rows for envelopes the
 	// application would still accept, reopening a replay window
-	// (review P10).
+	//.
 	tag, err := pool.Exec(ctx,
 		`DELETE FROM external_envelopes WHERE expires_at < now() - interval '1 hour'`)
 	if err != nil {
