@@ -69,7 +69,7 @@ func TestRunServe(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- run("serve", nil) }()
 	// Poll for the listener instead of a fixed sleep: migrate + keystore
-	// bootstrap + listen is slower on loaded CI (review finding, item 5).
+	// bootstrap + listen is slower on loaded CI.
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		if c, err := net.DialTimeout("tcp", listen, 100*time.Millisecond); err == nil {

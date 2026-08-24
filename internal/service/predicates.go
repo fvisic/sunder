@@ -41,10 +41,10 @@ func (p Predicate) Threshold() int {
 // PredicateResult is one evaluated claim.
 //
 // Known is op-specific, on purpose:
-//   - age_gte: false when the attribute is absent or unparseable, so "we do
-//     not know the birthdate" never reads as "under 18";
-//   - exists: always true - the question IS whether the attribute is there,
-//     so its absence is an answer, not an unknown.
+// - age_gte: false when the attribute is absent or unparseable, so "we do
+// not know the birthdate" never reads as "under 18";
+// - exists: always true - the question IS whether the attribute is there,
+// so its absence is an answer, not an unknown.
 type PredicateResult struct {
 	Predicate
 	Result bool `json:"result"`
@@ -66,7 +66,7 @@ func validatePredicates(preds []Predicate) error {
 		switch p.Op {
 		case PredAgeGTE:
 			// An omitted threshold used to mean 0, which is true for every
-			// parseable past date - a silent always-pass (review N20).
+			// parseable past date - a silent always-pass.
 			if p.Value == nil {
 				return fmt.Errorf("%w: age_gte requires an explicit value", ErrValidation)
 			}

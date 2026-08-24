@@ -134,7 +134,7 @@ func (f *FileKeystore) writeKey(p string) error {
 	}
 	// Unique temp name: after a stale-lock reclaim two processes may write
 	// concurrently, and a shared "<name>.tmp" could transiently publish a
-	// short key file (review finding F7).
+	// short key file.
 	tf, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".tmp*")
 	if err != nil {
 		return err

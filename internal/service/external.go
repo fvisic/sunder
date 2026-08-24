@@ -47,7 +47,7 @@ const (
 	// envelopes; without it the replay table can never be pruned.
 	// maxEnvelopeLifetime is the ONLY definition of this window: the
 	// migration's column default exists solely for pre-existing rows, and
-	// every insert writes an explicit expires_at from here (review P11).
+	// every insert writes an explicit expires_at from here.
 	maxEnvelopeLifetime = 24 * time.Hour
 )
 
@@ -87,7 +87,7 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 	// written to the audit chain: it comes from the UNVERIFIED payload, and
 	// every audit append takes a global advisory lock. Unbounded
 	// attacker-chosen bytes there mean both audit inflation and
-	// service-wide serialisation behind that lock (review N4).
+	// service-wide serialisation behind that lock.
 	if !issuerIDPattern.MatchString(env.Issuer) {
 		return nil, fmt.Errorf("%w: malformed issuer id", ErrValidation)
 	}
@@ -110,7 +110,7 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 	}
 	// Unusable key material must never reach ed25519.Verify: a wrong length
 	// panics, and ANY small-order point (not just the all-zero one) makes
-	// every signature verify (review P0-b).
+	// every signature verify.
 	if err := crypto.ValidEd25519PublicKey(pubKey); err != nil {
 		return nil, fmt.Errorf("%w: issuer %q has unusable key material: %v", ErrForbidden, env.Issuer, err)
 	}
@@ -136,13 +136,13 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 		return nil, fmt.Errorf("%w: envelope expired or missing exp", ErrValidation)
 	}
 	// A bounded lifetime keeps pre-staged envelopes from living for years
-	// and makes the replay table prunable (review N16/N20).
+	// and makes the replay table prunable.
 	if time.Until(exp) > maxEnvelopeLifetime {
 		return nil, fmt.Errorf("%w: envelope exp is more than %s ahead", ErrValidation, maxEnvelopeLifetime)
 	}
 	// iat was parsed and never read: an envelope dated in the future is
 	// either a clock problem or a pre-staged token, and both deserve a
-	// refusal rather than silent acceptance (review P11).
+	// refusal rather than silent acceptance.
 	if env.IssuedA != "" {
 		iat, err := time.Parse(time.RFC3339, env.IssuedA)
 		if err != nil {
@@ -164,7 +164,7 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 		// GET /v1/contacts/{cid}/attributes/{name} and must not carry the
 		// '@' provenance separator (which could impersonate another issuer
 		// after suffixing). Anything else would store an attribute the API
-		// cannot serve (review P11).
+		// cannot serve.
 		if !claimNamePattern.MatchString(name) {
 			return nil, fmt.Errorf("%w: claim names must match %s", ErrValidation, claimNamePattern)
 		}

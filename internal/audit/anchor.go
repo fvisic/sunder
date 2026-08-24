@@ -33,7 +33,7 @@ import (
 // opensslBin is the timestamping helper this package shells out to. It is a
 // variable so tests can point it at a stub or at a nonexistent binary
 // WITHOUT touching the process-global PATH: doing that made the suite
-// order-dependent and intermittently flaky (review, CI section).
+// order-dependent and intermittently flaky.
 var opensslBin = "openssl"
 
 // SetOpenSSLForTest points the package at a specific timestamping binary.

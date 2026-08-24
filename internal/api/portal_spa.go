@@ -5,7 +5,7 @@ package api
 //
 // No inline event handlers: every listener is attached from the single
 // nonce-carrying script block, so the CSP needs no 'unsafe-inline' and
-// actually mitigates XSS (review N14). __NONCE__ is substituted per
+// actually mitigates XSS. __NONCE__ is substituted per
 // response by handlePortalSPA.
 var portalSPA = []byte(`<!doctype html>
 <html lang="en">

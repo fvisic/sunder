@@ -207,7 +207,7 @@ func TestCSPRNGFailureSurfaces(t *testing.T) {
 	}
 	// Encrypt: create the key FIRST (with a working CSPRNG) so the failure
 	// exercised here is the nonce draw inside Seal, not key generation
-	// (review finding, test item 2).
+	//.
 	randRead = old
 	ksDir := t.TempDir()
 	warm := &FileKeystore{Dir: ksDir}

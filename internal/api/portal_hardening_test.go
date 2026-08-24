@@ -1,6 +1,6 @@
 package api
 
-// Permanent regression tests for three properties a review probe found
+// Permanent regression tests for three properties that were once
 // broken: the outbox must survive a transient mailer failure, it must hold
 // nothing usable at rest, and Start must not separate known from unknown
 // addresses by timing.

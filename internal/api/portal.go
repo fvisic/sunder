@@ -22,14 +22,14 @@ const portalSessionCookie = "sunder_portal"
 // default; a proxy header only when the operator explicitly names one
 // (SUNDER_PORTAL_CLIENT_IP_HEADER) - a blindly trusted header is a limiter
 // bypass, and behind an ingress RemoteAddr alone collapses every citizen
-// into one bucket (review N9).
+// into one bucket.
 func (s *Server) portalClientIP(r *http.Request) string {
 	if h := s.Cfg.PortalClientIPHeader; h != "" {
 		if v := r.Header.Get(h); v != "" {
 			// The RIGHT-most entry is the address the adjacent proxy
 			// appended; the left-most is whatever the caller sent, so
 			// reading it hands every requester a fresh rate-limit bucket
-			// (review N9). With more than one trusted hop, skip that many
+			//. With more than one trusted hop, skip that many
 			// entries from the right.
 			parts := strings.Split(v, ",")
 			idx := len(parts) - 1 - s.Cfg.PortalTrustedProxyHops
@@ -54,7 +54,7 @@ func (s *Server) portalClientIP(r *http.Request) string {
 // portalLimit applies a PER-ROUTE, per-requester rate limit: the mail-
 // sending route is abuse bait and must be far stricter than reading your
 // own data, and one bucket for all six routes let 31 requests lock every
-// citizen out of the portal entirely (review N9).
+// citizen out of the portal entirely.
 func (s *Server) portalLimit(bucket string, limit int, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.Limiter != nil && !s.Limiter.Allow("portal:"+bucket+":"+s.portalClientIP(r), limit) {
@@ -63,7 +63,7 @@ func (s *Server) portalLimit(bucket string, limit int, next http.HandlerFunc) ht
 		}
 		// Portal responses carry decrypted PII and the cross-scope audit
 		// trail: never cacheable, never in bfcache or on disk after the
-		// session dies (review N13).
+		// session dies.
 		w.Header().Set("Cache-Control", "no-store, max-age=0")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -104,7 +104,7 @@ func (s *Server) handlePortalSession(w http.ResponseWriter, r *http.Request) {
 	}
 	// Secure unless explicitly opted out for local development: TLS usually
 	// terminates at the ingress, so keying this off our own certificate
-	// left the cookie unprotected in the standard deployment (review N11).
+	// left the cookie unprotected in the standard deployment.
 	http.SetCookie(w, &http.Cookie{
 		Name: portalSessionCookie, Value: session, Path: "/portal",
 		HttpOnly: true, Secure: !s.Cfg.PortalCookieInsecure,
@@ -166,7 +166,7 @@ func (s *Server) handlePortalEraseRequest(w http.ResponseWriter, r *http.Request
 	}
 	// The confirmation token is NOT in this response: it is mailed to the
 	// address on file, so holding the session cookie is not enough to
-	// finish an irreversible cross-scope erasure (review N3).
+	// finish an irreversible cross-scope erasure.
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"status": "a confirmation link has been sent to the address on file",
 	})
@@ -200,7 +200,7 @@ func (s *Server) registerPortal() {
 // portalMux builds the portal routes. Returned separately so the portal can
 // also be served on its own listener (SUNDER_PORTAL_LISTEN), which is how a
 // deployment keeps mTLS on the API while citizens reach the portal without
-// a client certificate (review N12).
+// a client certificate.
 func (s *Server) portalMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	// Mail-sending is the abuse-bait route; reads are cheap and shared.
@@ -231,7 +231,7 @@ func (s *Server) handlePortalLogout(w http.ResponseWriter, r *http.Request) {
 
 // handlePortalSPA serves the single-file UI. The script carries a
 // per-response nonce and the page has no inline event handlers, so the CSP
-// needs no 'unsafe-inline' and actually mitigates XSS (review N14).
+// needs no 'unsafe-inline' and actually mitigates XSS.
 func (s *Server) handlePortalSPA(w http.ResponseWriter, r *http.Request) {
 	nonceRaw := make([]byte, 16)
 	if _, err := rand.Read(nonceRaw); err != nil {

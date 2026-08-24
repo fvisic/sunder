@@ -17,7 +17,7 @@ func TestMigrate(t *testing.T) {
 	}
 	ctx := context.Background()
 	// An ISOLATED database: migrating the shared server's database would
-	// leave permanent schema pollution behind (review finding, item 8).
+	// leave permanent schema pollution behind.
 	s := testutil.NewDB(t)
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)

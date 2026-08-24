@@ -158,7 +158,7 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 			}
 			// Guarded write: if a register/share re-encrypted the row after
 			// our read, skip it - clobbering would resurrect stale
-			// attributes (review finding F2). The row was re-keyed on touch
+			// attributes. The row was re-keyed on touch
 			// anyway.
 			tag, err := c.Pool.Exec(ctx,
 				`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4

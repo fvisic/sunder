@@ -175,7 +175,7 @@ var clientIDPattern = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 // CreateTx is Create inside a caller-supplied transaction: bootstrap needs
 // the client row and the persisted credential to commit or roll back
 // together, or a failed write leaves an admin whose secret nobody holds
-// (review N7).
+// .
 func CreateTx(ctx context.Context, tx pgx.Tx, c Client) (string, error) {
 	if !clientIDPattern.MatchString(c.ID) {
 		return "", fmt.Errorf("client id must match %s", clientIDPattern)

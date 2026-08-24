@@ -122,7 +122,7 @@ func TestDeadPoolFailsClosedEverywhere(t *testing.T) {
 		t.Fatal("oti issue on dead pool")
 	}
 	// A GRANTED purpose so the call reaches the DB instead of failing the
-	// CanUse check first (review finding, test item 1).
+	// CanUse check first.
 	if _, err := oti.Verify(ctx, crm, "v4.public.junk", "newsletter", "crm"); err == nil {
 		t.Fatal("oti verify on dead pool")
 	}

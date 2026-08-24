@@ -113,7 +113,7 @@ func TestFullStackOverSignerSocket(t *testing.T) {
 	// local key material.
 	cancel()
 	// Poll: a pooled connection may still serve one request after the
-	// listener closes (review finding, item 5).
+	// listener closes.
 	failed := false
 	for i := 0; i < 100; i++ {
 		if code, _ = do("POST", "/v1/lookup", cred, `{"email":"remote@example.com"}`); code != 200 {

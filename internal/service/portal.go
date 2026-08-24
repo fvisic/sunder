@@ -71,7 +71,7 @@ func (p *Portal) Start(ctx context.Context, email string) error {
 	// measurement. Every call therefore returns no earlier than
 	// portalStartFloor, which dominates that variance. Combined with the
 	// 5/min per-IP limit and the per-address cap, enumeration is
-	// impractical rather than merely inconvenient (review N2).
+	// impractical rather than merely inconvenient.
 	defer func() {
 		if remaining := portalStartFloor - time.Since(startedAt); remaining > 0 {
 			select {
@@ -82,15 +82,15 @@ func (p *Portal) Start(ctx context.Context, email string) error {
 	}()
 
 	// The work itself is still kept as symmetric as practical:
-	//   - the address is resolved over ALL live key versions (no early
-	//     return on a hit, which would be observably faster);
-	//   - a hit ENQUEUES the mail into portal_outbox and returns; the
-	//     delivery (a network round-trip that used to run inline and made
-	//     the two branches trivially separable) happens in the background
-	//     worker.
+	// - the address is resolved over ALL live key versions (no early
+	// return on a hit, which would be observably faster);
+	// - a hit ENQUEUES the mail into portal_outbox and returns; the
+	// delivery (a network round-trip that used to run inline and made
+	// the two branches trivially separable) happens in the background
+	// worker.
 	// This is not cryptographic constant time - the hit path does one more
 	// INSERT - but the observable difference is no longer a network
-	// round-trip, which is what made enumeration practical (review N2).
+	// round-trip, which is what made enumeration practical.
 	normalized, nerr := crypto.NormalizeEmail(email)
 	var personID string
 	var found bool
@@ -103,13 +103,13 @@ func (p *Portal) Start(ctx context.Context, email string) error {
 	}
 	// NO audit row in this request path, deliberately, for two reasons:
 	//
-	//   - every audit append takes the global advisory lock that serialises
-	//     all audit writes, and this endpoint is UNAUTHENTICATED: writing
-	//     here lets anyone serialise the product's whole write path
-	//     (review P1);
-	//   - a row whose presence or content depends on whether the address
-	//     exists is an enumeration oracle for anyone who can read the
-	//     chain and time their own probe (review P2).
+	// - every audit append takes the global advisory lock that serialises
+	// all audit writes, and this endpoint is UNAUTHENTICATED: writing
+	// here lets anyone serialise the product's whole write path
+	// ;
+	// - a row whose presence or content depends on whether the address
+	// exists is an enumeration oracle for anyone who can read the
+	// chain and time their own probe.
 	//
 	// Accountability is not lost: the outbox worker records
 	// portal.mail.delivered / .failed / .no_mailer for every queued mail,
@@ -131,7 +131,7 @@ func (p *Portal) Start(ctx context.Context, email string) error {
 	// The per-address throttle is counted INSIDE the transaction that mints
 	// the token: counted outside, a rolled-back transaction still burned a
 	// send, and three of those locked a citizen out for 15 minutes with an
-	// empty inbox (review P5).
+	// empty inbox.
 	allowed, err := p.allowEmailSend(ctx, tx, normalized)
 	if err != nil {
 		return err
@@ -182,7 +182,7 @@ func (p *Portal) allowEmailSend(ctx context.Context, tx pgx.Tx, normalized strin
 }
 
 // mailPayload is what the outbox holds - SEALED, never in the clear: the
-// token is a live credential and the address is PII (review probe C).
+// token is a live credential and the address is PII.
 type mailPayload struct {
 	Email string `json:"email"`
 	Token string `json:"token"`
@@ -190,7 +190,7 @@ type mailPayload struct {
 
 // maxMailAttempts bounds retries before a queued mail is abandoned. A
 // single transient mailer blip must not permanently lose a login link
-// (review probe A).
+// .
 const maxMailAttempts = 5
 
 func (p *Portal) enqueueMail(ctx context.Context, tx pgx.Tx, kind, email, token string, expires time.Time) error {
@@ -220,7 +220,7 @@ func (p *Portal) enqueueMail(ctx context.Context, tx pgx.Tx, kind, email, token 
 func (p *Portal) DeliverPendingMail(ctx context.Context) (int, error) {
 	// CLAIM the rows: the worker runs in every replica (the chart defaults
 	// to two), so a plain SELECT ... WHERE status='PENDING' had every
-	// replica mail every link (review P3). SKIP LOCKED lets replicas work
+	// replica mail every link. SKIP LOCKED lets replicas work
 	// disjoint batches; the transaction holds the claim until the outcome
 	// is recorded.
 	claim, err := p.GDPR.Pool.Begin(ctx)
@@ -340,7 +340,7 @@ func (p *Portal) findPersonByEmail(ctx context.Context, normalized string) (stri
 		return "", false, err
 	}
 	// Every live version is queried on BOTH outcomes: returning on the
-	// first hit made a hit observably cheaper than a miss (review N2).
+	// first hit made a hit observably cheaper than a miss.
 	var hit string
 	for _, v := range versions {
 		tok, err := p.Contacts.Tok.EmailToken(ctx, v, normalized)
@@ -368,7 +368,7 @@ func (p *Portal) findPersonByEmail(ctx context.Context, normalized string) (stri
 // mail posts a signed portal event to the '_portal' webhook and returns
 // the REAL outcome: errNoMailer when none is configured, an error when the
 // transport or the receiver failed. The caller (the outbox worker) records
-// it; no request path blocks on this (review N2/N15).
+// it; no request path blocks on this.
 func (p *Portal) mail(ctx context.Context, kind, email, token string, expires time.Time) error {
 	var url, secret string
 	err := p.GDPR.Pool.QueryRow(ctx,
@@ -499,7 +499,7 @@ func (p *Portal) SetConsent(ctx context.Context, personID, cid, purpose string, 
 // RequestErase starts an erasure: the confirmation token is mailed
 // OUT OF BAND (same mailer path as login), never returned to the caller.
 // Returning it to the session that asked for it was security theatre -
-// whoever holds the cookie just makes two calls (review N3). Erasure is
+// whoever holds the cookie just makes two calls. Erasure is
 // irreversible and cross-scope, so the second factor must leave the
 // session: possession of the mailbox is what confirms it.
 //
@@ -639,7 +639,7 @@ func firstCID(scopes []ScopeData) string {
 }
 
 // Logout revokes the current session immediately. A citizen surface with no
-// way to end a session is a gap, not a simplification (review, low).
+// way to end a session is a gap, not a simplification.
 func (p *Portal) Logout(ctx context.Context, session string) error {
 	_, err := p.GDPR.Pool.Exec(ctx,
 		`DELETE FROM portal_sessions WHERE session_hash=$1`, hashToken(session))
@@ -649,7 +649,7 @@ func (p *Portal) Logout(ctx context.Context, session string) error {
 // PrunePortal deletes expired sessions, spent or expired one-time tokens,
 // and settled outbox rows, and drops everything belonging to an erased
 // person. Runs from `sunder retention run` - none of these tables were
-// cleaned up before (review, low).
+// cleaned up before.
 func PrunePortal(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 	var total int64
 	for _, q := range []string{
@@ -662,7 +662,7 @@ func PrunePortal(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 		`DELETE FROM portal_outbox WHERE status NOT IN ('PENDING','SENDING') AND created_at < now() - interval '7 days'`,
 		// A PENDING row whose token has expired can never be useful: an
 		// unreachable mailer would otherwise grow this table without bound
-		// (review P4).
+		//.
 		`DELETE FROM portal_outbox WHERE status='PENDING' AND expires_at < now()`,
 		// A claim left behind by a crashed worker returns to the queue.
 		`UPDATE portal_outbox SET status='PENDING'

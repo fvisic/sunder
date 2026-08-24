@@ -13,7 +13,7 @@ import (
 )
 
 // ptr is the age_gte threshold helper: the field is a pointer so an
-// omitted threshold fails loudly instead of meaning 0 (review N20).
+// omitted threshold fails loudly instead of meaning 0.
 func ptr(v int) *int { return &v }
 
 func issueWithPreds(t *testing.T, e *faultEnv, cid string, preds []service.Predicate) string {
@@ -209,7 +209,7 @@ func TestPredicateBirthdayBoundary(t *testing.T) {
 	}
 }
 
-// N22 (user review): the chain must record the predicate that was ASKED,
+// The chain must record the predicate that was ASKED,
 // never its boolean outcome - the outcome is a one-bit value about a
 // person, and audit rows outlive erasure.
 func TestPredicateResultsAreNotAudited(t *testing.T) {

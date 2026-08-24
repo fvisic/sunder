@@ -110,7 +110,7 @@ func TestDetectorGCAndBackendParity(t *testing.T) {
 		t.Fatal("the detector must keep counting across a GC pass")
 	}
 	// The in-memory limiter denies AT the limit, which the Redis backend
-	// now matches exactly (review N10).
+	// now matches exactly.
 	l := NewLimiter()
 	const limit = 3
 	allowed := 0

@@ -112,7 +112,7 @@ func TestSignerSocketPermissions(t *testing.T) {
 }
 
 // ServeSigner must TIGHTEN a pre-existing loose directory, not inherit it -
-// os.MkdirAll leaves existing modes alone (review finding F5/test item 3).
+// os.MkdirAll leaves existing modes alone.
 func TestSignerTightensLooseDirectory(t *testing.T) {
 	dir, err := os.MkdirTemp("", "sgn")
 	if err != nil {
@@ -228,8 +228,16 @@ func TestVerifyFailedSurvivesTheWire(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Tampered token: the error must carry ErrVerifyFailed across the IPC
-	// boundary so callers can distinguish 4xx from 5xx.
-	_, err = remote.VerifyToken(ctx, "oti-sign/v1", tok[:len(tok)-2]+"AA")
+	// boundary so callers can distinguish 4xx from 5xx. The last character
+	// is FLIPPED rather than replaced with a literal - a token that already
+	// ended in that literal would have been left valid, which made this
+	// test flake roughly once in every few thousand runs.
+	last := tok[len(tok)-1]
+	flipped := byte('A')
+	if last == 'A' {
+		flipped = 'B'
+	}
+	_, err = remote.VerifyToken(ctx, "oti-sign/v1", tok[:len(tok)-1]+string(flipped))
 	if !errors.Is(err, ErrVerifyFailed) {
 		t.Fatalf("tampered token must be ErrVerifyFailed, got %v", err)
 	}

@@ -113,7 +113,7 @@ func (e *portalEnv) login(t *testing.T, email string) string {
 		t.Fatalf("start: %d", rec.Code)
 	}
 	// Mail is queued, not sent inline (that inline send was the
-	// enumeration oracle, review N2): drain the outbox like the background
+	// enumeration oracle): drain the outbox like the background
 	// worker does.
 	if _, err := e.srv.Portal.DeliverPendingMail(context.Background()); err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func TestPortalFullLifecycle(t *testing.T) {
 		t.Fatalf("erase request: %d", rec.Code)
 	}
 	// The response must NOT carry the token: holding the cookie is not
-	// enough to finish an irreversible erasure (review N3).
+	// enough to finish an irreversible erasure.
 	if _, leaked := out["confirm_token"]; leaked {
 		t.Fatal("the confirmation token must not be returned to the session")
 	}
@@ -212,7 +212,7 @@ func TestPortalNoEnumerationAndTokenHygiene(t *testing.T) {
 	}
 
 	// Login tokens are single-use and garbage is rejected. Drain the outbox
-	// first: nothing is mailed inline any more (review N2).
+	// first: nothing is mailed inline any more.
 	if _, err := e.srv.Portal.DeliverPendingMail(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +440,7 @@ func TestPortalClientIPResolution(t *testing.T) {
 
 	// The RIGHT-most entry is the one our proxy appended; the left-most is
 	// caller-supplied, so trusting it hands every requester a fresh bucket
-	// (review N9).
+	//.
 	trusting := &Server{Cfg: config.Config{PortalClientIPHeader: "X-Forwarded-For"}}
 	if got := trusting.portalClientIP(req); got != "10.0.0.1" {
 		t.Fatalf("right-most XFF entry expected: %q", got)

@@ -2,8 +2,8 @@
 //
 // Subcommands:
 //
-//	serve    start the HTTP service (default)
-//	migrate  apply database migrations and exit
+//	serve start the HTTP service (default)
+//	migrate apply database migrations and exit
 package main
 
 import (
@@ -134,7 +134,7 @@ func webhookCmd(ctx context.Context, st *store.Store, args []string) error {
 		// HTTPS only (loopback exempt for local development): erasure events
 		// carry pseudonyms and must not travel plaintext. Parsed, not
 		// prefix-matched: "http://localhost.attacker.example/" satisfies a
-		// prefix check on "http://localhost" (review, low).
+		// prefix check on "http://localhost".
 		if err := validWebhookURL(*url); err != nil {
 			return err
 		}
@@ -658,7 +658,7 @@ func issuerCmd(ctx context.Context, st *store.Store, args []string) error {
 		}
 		// Registration is where unusable key material must be stopped: a
 		// small-order point accepts forged signatures for every payload
-		// (review P0-b).
+		//.
 		if err := crypto.ValidEd25519PublicKey(key); err != nil {
 			return fmt.Errorf("refusing to register issuer %q: %w", *id, err)
 		}
@@ -710,7 +710,7 @@ func issuerCmd(ctx context.Context, st *store.Store, args []string) error {
 		}
 		// RETIRE rather than delete: the row is history, and re-adding the
 		// same id under a new key would silently re-attribute every stored
-		// `<claim>@<id>` attribute to the new key holder (review, low).
+		// `<claim>@<id>` attribute to the new key holder.
 		tag, err := st.Pool.Exec(ctx,
 			`UPDATE trusted_issuers SET revoked_at=now() WHERE issuer_id=$1 AND revoked_at IS NULL`, *id)
 		if err != nil {
@@ -743,7 +743,7 @@ func bootstrapCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 	scope := fs.String("scope", getenvDefault("SUNDER_BOOTSTRAP_SCOPE", "admin"), "admin client scope")
 	// An admin with no purposes cannot read a single attribute or issue an
 	// OTI (CanUse is deny-all), which made provisioning produce a useless
-	// credential (review N8). Default to a real, usable purpose.
+	// credential. Default to a real, usable purpose.
 	purposes := fs.String("purposes", getenvDefault("SUNDER_BOOTSTRAP_PURPOSES", "admin"),
 		"comma-separated purposes for the admin client")
 	credFile := fs.String("credential-file", os.Getenv("SUNDER_BOOTSTRAP_CREDENTIAL_FILE"),
@@ -753,13 +753,13 @@ func bootstrapCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 		return err
 	}
 	// Validate BEFORE anything is created: a rejected flag combination must
-	// never leave a committed admin behind (review N7).
+	// never leave a committed admin behind.
 	if *unattended && *credFile == "" {
 		return fmt.Errorf("bootstrap -unattended requires -credential-file or SUNDER_BOOTSTRAP_CREDENTIAL_FILE")
 	}
 	if *credFile != "" {
 		// A stream target cannot be 0600 and would land in container logs,
-		// where any log shipper forwards it (review N6).
+		// where any log shipper forwards it.
 		if strings.HasPrefix(*credFile, "/dev/") || strings.HasPrefix(*credFile, "/proc/") {
 			return fmt.Errorf("-credential-file must be a real file, not %s: the credential would be written to a log stream", *credFile)
 		}

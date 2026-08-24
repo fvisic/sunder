@@ -32,7 +32,7 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 			s.Metrics.Inc(fmt.Sprintf(`sunder_lookup_misses_total{client=%q}`, client.ID))
 			// ">=" with a per-client latch: the sliding-window count is not
 			// monotonic (decay between calls), so an exact "==" crossing can
-			// be skipped entirely (review finding F3).
+			// be skipped entirely.
 			if misses >= enumerationThreshold && s.warnLatch(client.ID) {
 				s.Log.Warn("possible enumeration attack", "client", client.ID, "misses_10m", misses)
 			}
