@@ -29,6 +29,7 @@ exist.
 
 | Registry | Enable (variable) | Credential (secret) | Notes |
 |---|---|---|---|
+| Go module proxy | - | - | nothing to publish: `sdks/go` is its own module, so `go get github.com/fvisic/sunder/sdks/go@vX.Y.Z` resolves from the repo tag. The SDK's own version constant lives in `sdks/go/sunder.go` |
 | npm | `PUBLISH_NPM=true` | `NPM_TOKEN` | register the `@sunder-id` scope first; publishes with provenance |
 | PyPI | `PUBLISH_PYPI=true` | `PYPI_API_TOKEN` | project name `sunder-client` |
 | NuGet | `PUBLISH_NUGET=true` | `NUGET_API_KEY` | package `SunderId.Client` |

@@ -26,7 +26,7 @@ one of them - or all three - and there is nothing to join on. Only your
 Sunder instance can map between scopes, and every mapping is audited in a
 tamper-evident hash chain.
 
-> **Status**: feature-complete v1 with a GDPR layer and five SDKs
+> **Status**: feature-complete v1 with a GDPR layer and six SDKs
 > (v0.2.0). Pre-1.0 - interfaces may still move; read the threat model
 > in `docs/` before production use.
 
@@ -90,7 +90,7 @@ not establish.
 - **GDPR layer** - consent per purpose (enforced on reads and handoffs),
   org-wide right of access, erasure with signed webhooks per scope,
   portability export, retention TTLs.
-- **Five SDKs** - TypeScript, Python, PHP, Java, .NET; identical
+- **Six SDKs** - Go, TypeScript, Python, PHP, Java, .NET; identical
   interface and error taxonomy, zero runtime dependencies each.
 
 ## What's in the box
@@ -99,7 +99,7 @@ not establish.
 |---|---|
 | `cmd/sunder`, `internal/` | the service + CLI (`serve`, `signer`, `bootstrap`, `migrate`, `client create/rotate-secret`, `keys rotate/rekey/retire`, `anchor`, `verify-audit`, `webhook`, `retention`, `dsr`, `issuer`) |
 | `api/` | OpenAPI 3.1 contract (also served at `/openapi.yaml`) + Postman collection |
-| `sdks/` | the five SDKs, each with a mock-server test suite |
+| `sdks/` | the six SDKs (Go, TypeScript, Python, PHP, Java, .NET), each with a mock-server test suite |
 | `demo/` | narrated demos: lookup + one-time handoff, escalation e-mail handoff |
 | `benchmark/`, `loadtest/` | Databunker head-to-head + k6 latency targets |
 | `migrate/databunker/` | migration tool: Databunker records to Sunder contacts |
