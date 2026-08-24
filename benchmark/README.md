@@ -3,6 +3,61 @@
 Goal: same machine, same database engine, same load tool, comparable
 operations - and Sunder at least 50% more efficient.
 
+## Server measurement (2026-08-24): a ceiling the laptop runs hid
+
+Run on a 12-core / 47 GB Debian server (load average 0.14 at the start),
+both systems in Docker on PostgreSQL 16, benchmark client on the same host
+network. This was meant to be the clean re-measurement the laptop numbers
+below still owed. It found something more useful than a better number.
+
+**Sunder does not scale past four concurrent clients on this machine.**
+
+| Concurrency | Sunder (write) | Databunker (write) |
+|---|---|---|
+| 1  | 131 rps | 92 rps |
+| 4  | 451 rps | 270 rps |
+| 16 | 468 rps | 443 rps |
+| 32 | 459 rps | 463 rps |
+
+Per request Sunder is still faster (+43% at c=1, +67% at c=4). But its
+total throughput flattens at roughly 460 rps and stays there, while
+Databunker keeps climbing and overtakes it at c=32.
+
+**Cause, measured rather than inferred.** Sampling `pg_locks` during a
+24-client run shows 7 of 8 held advisory locks in a waiting state: at any
+moment exactly one session is inside the audit append and every other
+active session is blocked behind it. `audit.AppendTx` takes
+`pg_advisory_xact_lock` so the hash chain stays linear, and that lock is
+held across a transaction that must commit to disk. The instance-wide
+ceiling is therefore roughly one audited operation per serialized commit.
+
+This machine's storage does `fdatasync` at 2,003 ops/sec (499 us/op).
+A laptop NVMe is an order of magnitude faster at the same call, which is
+why the laptop runs below never reached the plateau: the serialization was
+always there, it was just cheap enough to stay invisible.
+
+**What this means honestly.**
+
+- The throughput advantage in the laptop numbers below is real but
+  conditional: it holds where storage `fsync` is fast and concurrency is
+  moderate. It is not a general claim about throughput under load.
+- Sunder's maximum audited-operation rate is bounded by storage commit
+  latency, not by cores. More CPU does not raise it.
+- ~460 audited operations per second is still ample for the internal
+  identity traffic of most organisations, and the per-request latency
+  advantage is unaffected. But an instance fronting a high-volume public
+  path needs either faster storage or a change to the chain design.
+- Nothing here is a correctness problem. The linear chain is what makes
+  the audit log tamper-evident; the lock is what keeps it linear.
+
+**Options if this ceiling matters for a deployment** (none implemented, all
+trade something away): a chain per scope instead of one per instance
+(parallel writers, but "which scope touched this person" needs a join
+across chains); batching several records under one lock acquisition
+(higher throughput, coarser ordering); or moving the chain to an append
+log outside the transaction (much faster, but loses the same-transaction
+guarantee that an operation and its audit record commit together).
+
 ## Result summary (2026-08-23, review pass 4 build, quieter machine)
 
 Re-measured on the pass-4 build with the machine largely free (load average

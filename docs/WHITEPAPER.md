@@ -1,16 +1,16 @@
 # Sunder: an identity decoupling layer for internal systems
 
 Sunder is a self-hosted service that stops your internal systems from
-sharing a person identifier. Instead of a CRM, a billing platform and a
-data warehouse all keying customer records on the same email address,
-phone number or national identifier, each system keys on its own random
-pseudonym, and only Sunder can map between them. Every mapping and every
-attribute read goes into a tamper-evident audit chain.
+sharing a person identifier. Instead of a CRM, a billing platform and a data
+warehouse all keying customer records on the same email address, phone
+number or national identifier, each system keys on its own random pseudonym,
+and only Sunder can map between them. Every mapping and every attribute read
+goes into a tamper-evident audit chain.
 
-Sunder is an independent personal open-source project under Apache-2.0,
-not affiliated with, endorsed by, or developed for any employer or
-commercial product. It is pre-1.0: interfaces may still move, and there
-are no production users yet.
+Sunder is an independent personal open-source project under Apache-2.0, not
+affiliated with, endorsed by, or developed for any employer or commercial
+product. It is pre-1.0: interfaces may still move, and there are no
+production users yet.
 
 ## 1. The problem: shared identifiers as permanent join keys
 
@@ -25,10 +25,10 @@ The cost is invisible until something leaks, and then it is structural. A
 leaked email column from a ticketing tool joins to a CRM export from two
 years ago, which joins to an analytics extract. Each leak may be modest;
 together they form a profile, because they share a join key. Nothing has to
-be misconfigured for this to work: the linkability is a property of the
-schema choice, not of the breach. And the key is permanent. A password
-rotates; a national identifier does not, and in practice neither does a
-long-lived email address or mobile number.
+be misconfigured for this: the linkability is a property of the schema
+choice, not of the breach. And the key is permanent - a password rotates, a
+national identifier does not, and in practice neither does a long-lived
+email address or mobile number.
 
 The EU regulatory direction points the other way. The eIDAS 2.0 framework
 and the EUDI Wallet work are built around relying-party-specific pseudonyms,
@@ -36,12 +36,10 @@ selective disclosure and data minimisation: the verifier learns what it
 needs for its own purpose, not a universal handle. Whether a particular
 schema satisfies a particular obligation is a legal question depending on
 facts this paper cannot know, and nothing here is a legal conclusion. The
-engineering observation is narrower and does not depend on the legal one: a
-design that gives every system its own unlinkable handle removes the join,
-and a design that shares one identifier cannot.
-
-Sunder applies that principle inside a single organisation. No central
-party, no shared identifiers between systems, self-hosted by design.
+engineering observation is narrower: a design that gives every system its
+own unlinkable handle removes the join, and one that shares an identifier
+cannot. Sunder applies that principle inside a single organisation - no
+central party, no shared identifiers between systems, self-hosted.
 
 ## 2. The approach: scoped pseudonyms and one-time identifiers
 
@@ -50,9 +48,9 @@ Sunder splits identity into two objects with different lifetimes.
 **CID** is a random 128-bit pseudonym, one per `(person, scope)`, where a
 scope is an internal domain (`crm`, `billing`, `analytics`). It is not
 derived from anything, so there is no preimage to reverse and no dictionary
-to search. Each system stores its own scope's CID as its customer key and
-knows no other. The `persons` table holds one row per real person, carrying
-HMAC search tokens only; `cids` maps a person to one pseudonym per scope.
+to search. Each system stores its own scope's CID and knows no other. The
+`persons` table holds one row per real person, carrying HMAC search tokens
+only; `cids` maps a person to one pseudonym per scope.
 
 **OTI** is a one-time identifier: a signed token, valid five minutes by
 default, bound to one purpose and one audience, consumed exactly once. It is
@@ -65,26 +63,24 @@ single organisation-wide token is easier to operate, but it is a join key
 again: if the CRM and the analytics warehouse both store token `T` for the
 same customer, a leak of both databases is joinable on `T` exactly as it was
 joinable on the email address. Such a token is pseudonymous towards the
-outside world and fully linkable across your own systems, which is where the
-aggregation risk actually lives, because it is your own systems that
-collectively hold the profile. With per-scope pseudonyms, three databases
-hold three unrelated random values for the same person. Leak one, or all
-three, and there is nothing to join on.
+outside world and fully linkable across your own systems - which is where
+the aggregation risk lives. With per-scope pseudonyms, three databases hold
+three unrelated random values for one person; leak all three and there is
+nothing to join on.
 
 The cost is that cross-system correlation stops being free: following a
 person across scopes needs an explicit, audited call rather than a `JOIN`.
 Sunder provides two such paths, both deliberately privileged:
 `scopes.issue`, which returns another scope's CID, and the `dsr.*` actions
 for privacy-officer tooling. An organisation that grants `scopes.issue` to
-everything has rebuilt the shared identifier with extra steps. The design
-makes that visible rather than preventing it.
+everything has rebuilt the shared identifier with extra steps; the design
+makes that visible rather than impossible.
 
 ## 3. Mechanisms
 
 Every system is a registered *client* with its own credential (bearer key
-hashed at rest, optional mTLS), a scope, a set of allowed actions and a set
-of allowed purposes. A compromised credential is capped by its grants and
-fully audited.
+hashed at rest, optional mTLS), a scope, allowed actions and allowed
+purposes, so a compromised credential is capped by its grants and audited.
 
 ### Keyed-HMAC search tokens
 
@@ -95,36 +91,32 @@ token per live key version. Lookup recomputes the token and does an exact
 index match.
 
 *Buys*: no searchable plaintext in the database, and nothing recoverable
-from a database-only compromise. A plain hash would not achieve this: the
-space of email addresses and phone numbers is small enough to enumerate, so
-unkeyed hashes are effectively reversible. The key lives outside the
-database.
+from a database-only compromise, because the key lives outside it. A plain
+hash would not do - the space of email addresses and phone numbers is small
+enough to enumerate, so unkeyed hashes are effectively reversible.
 
 *Costs*: exact match only, so no fuzzy or partial search. A name alone is
 rejected with a 400, since a name is a narrowing key beside an email or
 phone, never an identifier. Lookup is an enumeration surface, so it is
-rate-limited per client with a sliding window, audited on hits and misses,
-and warns when a client crosses 100 weighted misses in ten minutes. And a
-hit proves nothing about who is calling - `LOOKUP != AUTHENTICATION` is a
-stated doctrine, because that confusion turns a directory into an
-impersonation oracle.
+rate-limited per client, audited on hits and misses, and warns when a client
+crosses 100 weighted misses in ten minutes. And a hit proves nothing about
+who is calling: `LOOKUP != AUTHENTICATION` is a stated doctrine, because
+that confusion turns a directory into an impersonation oracle.
 
 ### Per-scope AEAD attribute blobs
 
 Attributes are stored encrypted per scope, on the `cids` row, as one AEAD
 blob. The default is AES-256-GCM; XChaCha20-Poly1305 is selectable. The
-additional authenticated data binds the blob to its CID and key version
-(and, for non-default algorithms, to the algorithm name), so an attacker
-with `UPDATE` access to the database cannot transplant one person's
-ciphertext into another person's row, nor silently downgrade the key version
-or algorithm. Reads are field-level: one named attribute per call, with a
-mandatory `purpose` that must be in the caller's grants, a consent check,
+additional authenticated data binds the blob to its CID and key version, so
+an attacker with `UPDATE` access to the database cannot transplant one
+person's ciphertext into another person's row, nor silently downgrade the
+key version or algorithm. Reads are field-level: one named attribute per
+call, with a mandatory `purpose` from the caller's grants, a consent check,
 and an audit record written before the value is released.
 
 *Buys*: deduplication onto a shared person never exposes what another scope
-stored, so if billing and the CRM both register the same customer each reads
-exactly what it wrote. Field-level reads mean the chain records which field
-was wanted and why, not "someone opened the record".
+stored, and the chain records which field was wanted and why, not "someone
+opened the record".
 
 *Costs*: an attribute held in two scopes is encrypted and updated twice, and
 there is no cross-scope view except through the privileged DSR path.
@@ -132,17 +124,16 @@ there is no cross-scope view except through the privileged DSR path.
 Each blob records its own algorithm in `cids.pii_alg`: reads follow the
 stored value, writes use the configured one, and a `keys rekey` sweep
 converts the backlog. That is what makes algorithm agility operational
-rather than aspirational, and key versions work the same way - `keys rotate`
-demotes the previous version to RETIRING, every live version is accepted
-during the dual-key window, rows re-key on touch, and `keys retire` is the
-cure for a leaked key.
+rather than aspirational. Key versions work the same way, with a dual-key
+window during rotation, re-keying on touch, and `keys retire` as the cure
+for a leaked key.
 
 ### OTI purpose and audience binding, atomic single use
 
 An OTI is a PASETO v4.public token (Ed25519). The version pins the
 algorithm, removing the JWT-style algorithm-confusion class entirely, since
 there is no `alg` field to attack. The payload carries a JTI, the issuer's
-CID, purpose, audience, timestamps, and the signing key version as `kid`;
+CID, purpose, audience, timestamps and the signing key version as `kid`;
 verification only tries key versions the keyring lists as live, so a forged
 `kid` cannot point the verifier at an arbitrary key name.
 
@@ -150,22 +141,19 @@ The signature is not the replay guard. Single use is enforced by an atomic
 `VALID -> USED` database transition whose `WHERE` clause also matches the
 row's CID, purpose and audience against the signed claims - defence in
 depth, so that even with a compromised signing key a crafted token cannot
-consume a JTI bound to different parameters. The whole verification,
-including the mapping to the verifier's CID and the audit append, is one
-transaction, so a failure anywhere rolls the token back to VALID rather than
-burning a handoff that was never delivered. The verifier must hold the
-purpose in its own grants and its scope must equal the token's audience, and
-consent is checked at issue and re-checked at verification, so a withdrawal
-inside the token's five-minute life stops the handoff.
+consume a JTI bound to different parameters. Verification, the mapping to
+the verifier's CID and the audit append are one transaction, so a failure
+anywhere rolls the token back to VALID rather than burning a handoff that
+was never delivered. Consent is checked at issue and re-checked at
+verification, so a withdrawal inside the token's life stops the handoff.
 
 By default a handoff shares no attributes. An issuer may list
-`share_attributes`, copying named fields from its own blob into the
-verifier's blob at verification. This is the pattern behind delayed flows
-such as an escalation email: consume the token immediately, fetch the shared
-attribute just in time when the delayed action fires, store nothing in
-between.
+`share_attributes`, copying named fields into the verifier's blob at
+verification - the pattern behind delayed flows such as an escalation email,
+where the verifier fetches the shared attribute just in time and stores
+nothing in between.
 
-*Costs*: the receiving system must act within the TTL. It is configurable
+*Costs*: the receiving system must act within the TTL, which is configurable
 from 30 seconds to 24 hours, and raising it widens the window in which an
 intercepted token is usable. Verification is never blind-retried by the
 SDKs, because a retry after an ambiguous failure would legitimately return
@@ -190,35 +178,31 @@ holding a birthdate.
 `known` is operation-specific, and the distinction matters. For `age_gte` it
 is false when the attribute is absent or unparseable, so "we do not know the
 birthdate" never reads as "under 18". For `exists` it is always true,
-because absence *is* the answer that predicate asks for. A verifier that
-treats `known` uniformly will misread one of the two.
+because absence *is* the answer that predicate asks for.
 
 *Costs*: this is evaluation by a trusted evaluator, not a zero-knowledge
-proof. It is a data-minimisation mechanism, not a cryptographic one.
+proof - a data-minimisation mechanism, not a cryptographic one.
 
 ### Hash-chained audit log, RFC 3161 anchoring, off-host export
 
 Every operation writes an audit record: client, action, CID,
 purpose/outcome. Mutating operations write it inside the same transaction as
 the operation, so the log cannot record what did not happen nor miss what
-did. Read paths (`attributes.read`, `lookup`) and the portal's own actions
-append in a separate transaction that must succeed *before* any value is
-released; the guarantee there is fail-closed disclosure rather than
-atomicity. The chain is `hash_N = SHA-256(canonical(prev_hash, record))`
-with a JSON-array canonical encoding, so field contents cannot shift across
-boundaries, and append-only triggers block UPDATE, DELETE and TRUNCATE at
-the database layer on both the `audit` and `audit_anchor` tables.
+did. Read paths and portal actions append in a separate transaction that
+must succeed *before* any value is released; the guarantee there is
+fail-closed disclosure rather than atomicity. The chain is `hash_N =
+SHA-256(canonical(prev_hash, record))`, and append-only triggers block
+UPDATE, DELETE and TRUNCATE at the database layer on both the `audit` and
+`audit_anchor` tables.
 
-One invariant deserves calling out, because it is a deliberate trade-off
-rather than an oversight: **the chain records what was asked and by whom,
-never what the data said.** Attribute reads log the attribute name, not its
-value. Predicate verifications log `predicates_asked: ["birthdate age_gte
-18"]` and not the boolean outcome, which is a one-bit derived assertion
-about an identified person; since the chain is never pruned and outlives
-erasure, recording it would retain a derived personal-data assertion about
-someone who exercised Article 17. The accepted consequence: from the chain
-alone you can reconstruct what a verifier was authorised to ask and when,
-but not what it concluded.
+One invariant is a deliberate trade-off rather than an oversight: **the
+chain records what was asked and by whom, never what the data said.**
+Attribute reads log the attribute name, not its value. Predicate
+verifications log `predicates_asked: ["birthdate age_gte 18"]` and not the
+boolean outcome, which is a one-bit derived assertion about an identified
+person that a never-pruned log would retain about someone who exercised
+Article 17. From the chain you can therefore reconstruct what a verifier was
+authorised to ask and when, but not what it concluded.
 
 A bare hash chain proves internal consistency, not existence at a time - a
 privileged attacker could rewrite it consistently. `sunder anchor` therefore
@@ -228,12 +212,11 @@ file for write-once storage **off the database host**, since anchors kept
 only in the database are circular. `sunder verify-audit` recomputes the
 chain, validates every token offline against a CA bundle, and cross-checks
 the export directory, so deleted anchor rows are exposed by the surviving
-files; it refuses to report success when anchors exist but cannot be
-verified.
+files.
 
-*Costs*: the audit table grows without pruning, by design, and the whole
-mechanism is worth nothing unless the operator actually schedules the
-anchoring job and syncs the files off-host.
+*Costs*: the audit table grows without pruning, by design, and the mechanism
+is worth nothing unless the operator schedules the anchoring job and syncs
+the files off-host.
 
 ### The signer process split
 
@@ -241,11 +224,11 @@ The worst case in the threat model is malicious code inside the API process
 reading working keys from RAM. The codebase is compiled against a single
 crypto interface, `crypto.Engine`, with six operations (MAC, Seal, Open,
 Sign, VerifyToken, Ensure), none of which returns key bytes. With
-`SUNDER_SIGNER_SOCKET` unset, the default in-process implementation opens
-the keystore directly. With it set, every cryptographic operation goes over
-a Unix socket (mode 0600 in a 0700 directory) to a separate `sunder signer`
-process that is the sole keystore holder, needs no database credentials, and
-as a container needs no network at all.
+`SUNDER_SIGNER_SOCKET` set, every cryptographic operation goes over a Unix
+socket (mode 0600 in a 0700 directory) to a separate `sunder signer` process
+that is the sole keystore holder, needs no database credentials, and as a
+container needs no network at all; unset, the default in-process
+implementation opens the keystore directly.
 
 *Buys*: a compromised API process holds no key material. It can still *use*
 the six operations at whatever rate it can drive, which the rate limiter and
@@ -253,14 +236,9 @@ the audit chain bound and record, but it cannot exfiltrate keys.
 
 *Costs*: a socket round-trip per crypto operation, one more process to run,
 and a hard failure mode - a dead signer fails every crypto path closed, with
-no local fallback, deliberately.
-
-The signer is the honest limit of the design, and the dependency posture
-supports it: the crypto hot path is Go standard library plus
-`golang.org/x/crypto` for the optional XChaCha20-Poly1305, and runtime
-dependencies number three, all direct. Builds are `CGO_ENABLED=0`, images
-distroless and non-root, and CI gates on `govulncheck`, `go vet` and 90
-percent test coverage.
+no local fallback, deliberately. The signer is the honest limit of the
+design, which is why the crypto hot path is Go standard library plus
+`golang.org/x/crypto` and runtime dependencies number three, all direct.
 
 ## 4. GDPR posture
 
@@ -273,58 +251,48 @@ any single piece of software. What follows is what the code does.
 
 **Consent** is recorded per `(cid, purpose)`. An explicit `granted=false`
 blocks attribute reads and OTI issuance for that purpose with a distinct
-`consent_denied` error, and is re-checked when a token is verified. The
-absence of a record means the purpose is governed by another legal basis,
-which is the honest default: not every purpose is consent-based, and
-treating a missing record as refusal would misrepresent contract and
-legitimate-interest processing. Enforcement runs only after scope-ownership
-checks, so consent state can never become an oracle about foreign CIDs.
-Decisions survive erasure, for accountability.
+`consent_denied` error, and is re-checked at verification. The absence of a
+record means the purpose is governed by another legal basis: treating a
+missing record as refusal would misrepresent contract and
+legitimate-interest processing. Enforcement runs after scope-ownership
+checks, so consent state cannot become an oracle about foreign CIDs.
 
 **Right of access** is org-wide, because Sunder is the only component that
 knows which scopes hold a given person: `GET /v1/dsr/access` returns every
-scope's data plus the audit trail of who touched it. It is a
-linkage-capable, high-privilege action for privacy-officer tooling only.
+scope's data plus the audit trail of who touched it. It is high-privilege,
+for privacy-officer tooling only.
 
 **Erasure** runs in one transaction: every scope's blob is wiped, all search
 tokens deleted, outstanding OTIs revoked, and the person becomes a tombstone
 so client-side CID references do not break. One erasure event per scope is
-queued and delivered to that scope's registered webhook as JSON signed with
+delivered to that scope's registered webhook as JSON signed with
 `X-Sunder-Signature: hex(HMAC-SHA256(secret, body))`, with a bounded retry
-queue, a configurable attempt cap and audited delivery tracking. Sunder
-cannot delete data inside your CRM; the signed webhook is how it tells the
-CRM to.
+queue and audited delivery tracking. Sunder cannot delete data inside your
+CRM; the signed webhook is how it tells the CRM to.
 
 **Portability** is a per-scope JSON export, deliberately not per-attribute
-purpose-gated, because portability is its own legal basis and a withdrawn
-marketing consent should not block a subject's access to their own data.
-That makes it a bulk read, to be granted as sparingly as `scopes.issue`.
+purpose-gated, because portability is its own legal basis. That makes it a
+bulk read, to be granted as sparingly as `scopes.issue`.
 
 **Retention** is a per-scope TTL keyed on last activity, applied by a
-scheduled run that wipes expired blobs and prunes long-expired OTI rows.
-Search tokens survive a retention wipe, because retention is not erasure.
-Audit rows are never pruned.
+scheduled run. Search tokens survive a retention wipe, because retention is
+not erasure, and audit rows are never pruned.
 
 **The self-service privacy portal** lets a person see everything every scope
 stores about them, flip consents, and erase, without going through your
 support desk. It is off by default, because an upgrade must never silently
 open a new unauthenticated public surface. Authentication is a single-use
-magic link with a 15-minute lifetime, delivered by the organisation's own
-mailer through a signed webhook; Sunder sends no email itself. Erasure
-requires a second, separately confirmed step, so a hijacked session cannot
-erase in one call. The login-start endpoint answers identically for known
-and unknown addresses in body, status and timing - mail is queued rather
-than sent inline, the lookup queries every live key version on both
-outcomes, and a 40 ms constant-time floor dominates the remainder - and that
-property is measured by a test that fails the build on perfect separation
-rather than asserted in prose. The outbox holds a live login token, so it is
-sealed with the PII KEK, and the per-address send throttle is keyed by an
-HMAC token rather than a bare hash of the address.
+magic link, delivered by the organisation's own mailer through a signed
+webhook; Sunder sends no email itself. Erasure needs a second, separately
+confirmed step. The login-start endpoint answers identically for known and
+unknown addresses in body, status and timing - the last achieved with a
+40 ms constant-time floor and measured by a test that fails the build on
+perfect separation.
 
 What Sunder does not do: decide your legal bases, produce your records of
 processing, cover data your systems hold outside it, or assert eIDAS
-conformance. The EUDI-related positioning is "designed in line with eIDAS
-2.0 / EUDI Wallet principles", never "certified".
+conformance. The positioning is "designed in line with eIDAS 2.0 / EUDI
+Wallet principles", never "certified".
 
 ## 5. Deployment model
 
@@ -335,47 +303,30 @@ There is no multi-tenant mode, and that is a decision rather than a missing
 feature. The threat motivating the entire design is the existence of one
 place where identities from many contexts can be joined. A multi-tenant
 instance holding CID mappings for many companies would be exactly that
-place, at a larger scale than any of its tenants: the super-target the
-per-scope model exists to eliminate. Row-level isolation inside a shared
-database does not change the fact that one compromise reaches every tenant's
-mappings and keys. The answer for organisations that do not want to run
-their own instance is therefore **managed single-tenant**: an isolated
-instance per customer, with its own Kubernetes namespace, database, keystore
-mount, audit chain and anchors, and admin credential. Operations are
-centralised; the isolation is not.
+place, at a larger scale than any of its tenants, and row-level isolation
+inside a shared database does not change the fact that one compromise
+reaches every tenant's mappings and keys. The answer for organisations that
+do not want to run their own instance is therefore **managed
+single-tenant**: an isolated instance per customer, with its own Kubernetes
+namespace, database, keystore mount, audit chain and admin credential,
+provisioned by one script that installs the Helm chart and runs an idempotent
+`sunder bootstrap -unattended`. Operations are centralised; the isolation is
+not. Offboarding follows an ordered runbook: export, erase with webhooks,
+anchor the final state off-host, destroy the keys (crypto-shredding is the
+real deletion, since without the KEK surviving backups are unreadable), then
+delete the deployment and database.
 
-Provisioning is one script that creates the namespace and database secret,
-installs the Helm chart, and runs an idempotent `sunder bootstrap
--unattended`, which applies migrations, ensures key material for every live
-key version, and emits the first admin credential once. Offboarding follows
-an ordered runbook: export, erase with webhooks, anchor the final state
-off-host, destroy the keys (crypto-shredding is the real deletion, since
-without the KEK surviving ciphertext backups are unreadable), then delete
-the deployment and the database.
-
-The operational surface is deliberately small:
-
-- **PostgreSQL only.** No message broker, no search cluster, no object
-  store. Redis is optional, and only for sharing rate-limit windows across
-  replicas.
-- **Configuration is environment variables only.** No config files, and
-  invalid values fail startup with a specific error, so a typo cannot
-  silently fall back to a default.
-- **Helm chart** with TLS and mTLS, Vault keystore, the signer sidecar, a
-  NetworkPolicy, and CronJobs for anchoring, retention and webhook delivery.
-  Nothing is centralised across instances by default.
-- **Cron anchoring**, with the `.tsr` export directory synced to write-once
-  storage off the database host.
-- **Observability**: Prometheus text-format metrics (optionally
-  bearer-gated, since per-client counters reveal client identities and
-  activity), a Grafana dashboard and alert rules. No PII in logs or metrics:
-  the logging middleware records method, route pattern, status and duration
-  only.
-
-Integration goes through five SDKs (TypeScript, Python, PHP, Java, .NET)
-with identical method names, error taxonomy and retry policy. They contain
-zero cryptography and are roughly 500-line transport clients, so nothing
-security-critical exists in five copies.
+The operational surface is deliberately small. **PostgreSQL only** - no
+message broker, no search cluster, no object store, with Redis optional and
+only for sharing rate-limit windows across replicas. **Configuration is
+environment variables only**, and invalid values fail startup on a specific
+error so a typo cannot silently fall back to a default. The **Helm chart**
+covers TLS and mTLS, the Vault keystore, the signer sidecar, a NetworkPolicy
+and CronJobs for anchoring, retention and webhook delivery. Metrics are
+Prometheus text format, optionally bearer-gated, with no PII in logs or
+metrics. Integration goes through five SDKs (TypeScript, Python, PHP, Java,
+.NET) with identical method names, error taxonomy and retry policy,
+containing zero cryptography.
 
 ## 6. Performance
 
@@ -395,39 +346,29 @@ Clean pass, measured 2026-08-23:
 | read | 3,443 rps, p50 4.51 ms, p99 5.64 ms | 2,139 rps, p50 6.45 ms, p99 19.33 ms | +61%, p99 3.4x lower |
 
 Medians of the five interleaved rounds agree and are slightly wider: write
-+134%, lookup +78%, read +75%.
-
-The caveats belong in the same breath as the numbers.
++134%, lookup +78%, read +75%. The caveats belong in the same breath.
 
 **This is a laptop under a real desktop load, not a controlled server
 benchmark.** Load average was around 4 at the start and drifted to about 8
-under the benchmark's own load. Quote the ratios, not the absolute numbers.
-An earlier run on the same code measured a read advantage of +30%, which
-turned out to be machine noise at load average 10 to 14 - a fair
-illustration of how load-dependent these figures are.
+under the benchmark's own load. Quote the ratios, not the absolute numbers:
+an earlier run on the same code measured a read advantage of only +30%,
+which turned out to be machine noise at load average 10 to 14.
 
 **Part of the advantage is Databunker degrading with table size inside a
-single run.** Across the five rounds both systems accumulate rows and their
-trends diverge: Sunder's write throughput rose from 2,108 to 2,824 rps as
-caches warmed, while Databunker's fell from 1,325 to 1,076 rps. Two
-Databunker measurements in round 5 were discarded as a failed run rather
-than averaged in, noted here because silently dropping them would flatter
-the comparison.
+single run.** Across the five rounds Sunder's write throughput rose from
+2,108 to 2,824 rps as caches warmed, while Databunker's fell from 1,325 to
+1,076 rps. Two Databunker measurements in round 5 were discarded as a failed
+run rather than averaged in, noted because silently dropping them would
+flatter the comparison.
 
 **The operations are comparable but not identical.** Sunder's read returns
 one field-level, purpose-checked attribute; Databunker's returns the full
 record. Sunder's search index is a keyed HMAC per identifier per live key
 version; Databunker's is a hash index. Sunder writes a hash-chained,
-same-transaction, globally ordered audit record per operation; Databunker
-has its own audit that is not hash-chained.
-
-That last asymmetry is the interesting part: Sunder does more work per
-request throughout and is still faster on this hardware, for unglamorous
-reasons. Hot paths are single indexed point queries, because an HMAC token
-is an exact match; key material is immutable per versioned name and cached
-in process memory, so there is no keystore I/O per request; and the audit
-chain's global ordering lock is held only for the final append-and-commit
-window of each transaction.
+same-transaction audit record per operation; Databunker's audit is not
+hash-chained. That asymmetry is the interesting part: Sunder does more work
+per request and is still faster here, because its hot paths are single
+indexed point queries and key material is cached in process memory.
 
 ## 7. Limitations and open gaps
 
@@ -437,38 +378,34 @@ window of each transaction.
   claims until someone else has checked them.
 - **No production users.** Pre-1.0; interfaces may still move.
 - **The PKCS#11 keystore driver is a stub** that returns "not implemented
-  yet". HSM-backed key storage is a placeholder, not a capability. The
+  yet". HSM-backed key storage is a placeholder, not a capability; the
   working drivers are file (pilots) and HashiCorp Vault (production).
-- **No fuzzy or partial search.** This follows directly from keyed HMAC
+- **No fuzzy or partial search**, which follows directly from keyed HMAC
   indexes: exact match is the only match. Roadmap.
 - **No file vault and no value tokenization.** Sunder stores attribute maps,
   not documents, and issues no format-preserving surrogate values. Roadmap.
 - **The OpenID4VP bridge is deferred.** What exists today is the
   external-issuer trust registry and signed claim-envelope intake:
   registered issuers with Ed25519 keys and per-issuer claim allowlists, and
-  a `POST /v1/claims/external` endpoint that accepts a PASETO envelope only
-  when the issuer is registered and not retired, the signature verifies
-  against the registered key, the expiry is in the future and at most 24
-  hours ahead, the signed CID matches the target, the JTI has never been
-  used, and every claim name is allowlisted. Claims land with provenance in
-  the attribute name (`age_gte_18@gov.wallet`). The wallet-facing protocol
-  bridge - OpenID4VP presentation flows, SD-JWT VC or mdoc verification, EU
-  trust-list and revocation checks - is deliberately deferred to a separate
-  gateway process while those specifications are still moving, so the core's
-  small security surface does not absorb a large evolving protocol stack.
-- **The audit log grows without pruning, by design.** The chain and its
-  anchors are the tamper evidence, so capacity planning must account for one
-  audit row per operation, permanently.
+  a `POST /v1/claims/external` endpoint that verifies the signature against
+  the registered key and enforces a bounded lifetime, subject binding (the
+  signed CID must match the target), replay protection on the JTI and the
+  claim allowlist. Claims land with provenance in the attribute name
+  (`age_gte_18@gov.wallet`). The wallet-facing protocol bridge -
+  presentation flows, SD-JWT VC or mdoc verification, EU trust-list and
+  revocation checks - is deferred to a separate gateway process while those
+  specifications are still moving.
+- **The audit log grows without pruning, by design**, so capacity planning
+  must account for one audit row per operation, permanently.
 - **Rate limiting is per replica unless you configure Redis.**
 - **The instance is still the organisation's crown jewel.** Removing the
-  central multi-organisation party does not remove the value of the single
-  instance holding the mappings. Reviewing which clients hold
-  `scopes.issue`, `dsr.access` and `dsr.export` remains a human governance
-  duty that no mechanism performs for you.
+  central multi-organisation party does not remove the value of the one
+  instance holding the mappings, and reviewing which clients hold
+  `scopes.issue`, `dsr.access` and `dsr.export` stays a human duty.
 - **A client system that stores a national identifier next to its CID has
-  defeated the design**, and Sunder cannot see that happening. Its own
-  schema has no column for one and the service neither accepts nor returns
-  one, but that only covers Sunder's own storage.
+  defeated the design**, and Sunder cannot see that happening. Its schema
+  has no column for one and the service neither accepts nor returns one, but
+  that only covers Sunder's own storage.
 
 ## 8. Comparison
 
@@ -476,33 +413,30 @@ window of each transaction.
 overlapping problem: encrypted PII storage with searchable indexes, GDPR
 tooling and its own audit. The architectural difference is the identifier
 model - Databunker issues one token per person, organisation-wide, while
-Sunder issues one pseudonym per person per scope. If the concern is "encrypt
-customer PII in one place and support subject requests", Databunker
-addresses it. If the concern is specifically that your own systems can be
+Sunder issues one pseudonym per person per scope. If the concern is
+"encrypt customer PII in one place and support subject requests", Databunker
+addresses it; if the concern is specifically that your own systems can be
 joined to each other, a single organisation-wide token does not break that
 join. Databunker's core is MIT with a paid Pro edition; Sunder is Apache-2.0
-with no separate tier. A migration tool for Databunker records to Sunder
-contacts is in the repository.
+with no separate tier, and a migration tool for Databunker records is in the
+repository.
 
 **HashiCorp Vault** is a different category: a secrets and key management
 system, which Sunder uses as one, since Vault is the recommended production
 keystore driver. Vault does not model people, pseudonyms, purposes, consent
-or subject requests, and is not trying to. These compose rather than
-compete.
+or subject requests. These compose rather than compete.
 
 **DIY encryption** in each application is where most organisations start,
 and it can be done well. What it rarely delivers in practice is the parts
 that only pay off later: keyed rather than plain search indexes, key
 rotation that actually runs, an audit trail a privileged database user
-cannot rewrite, and consistent purpose and consent enforcement across every
-system. Each is a project of its own.
+cannot rewrite, and consistent purpose and consent enforcement everywhere.
 
 **AWS Cognito** and similar managed identity services solve authentication
 and user directory management: sign-in, federation, tokens for end users.
-Sunder solves neither. It has no authentication of end users at all
-(`LOOKUP != AUTHENTICATION` is an explicit doctrine) and no sign-in flows.
-An organisation can reasonably run Cognito for authenticating people and
-Sunder for decoupling how its internal systems store them.
+Sunder solves neither - it has no authentication of end users at all and no
+sign-in flows. An organisation can reasonably run Cognito for authenticating
+people and Sunder for decoupling how its internal systems store them.
 
 ## 9. Roadmap
 
@@ -518,13 +452,10 @@ Everything in this section is a plan, not a shipped capability.
 - **The EUDI gateway**: the deferred OpenID4VP bridge as a separate process,
   speaking presentation requests to wallets, validating against EU trust and
   status lists, and translating verified attestations into the existing
-  stable envelope contract. Member-state wallet deadlines in December 2026
-  are the natural trigger. It composes with the predicate mechanism, which
-  is why the envelope contract was built first: a wallet attests
-  `age_gte_18` once through the gateway, and internal systems then use
-  ordinary OTI handoffs with `share_predicates: [{"attr":
-  "age_gte_18@gateway", "op": "exists"}]`, so the attestation stays in one
-  scope and every downstream system only ever learns a boolean.
+  envelope contract. It composes with predicate claims, which is why the
+  envelope contract was built first: a wallet attests `age_gte_18` once, and
+  internal systems then use ordinary OTI handoffs with an `exists` predicate
+  on it, so every downstream system learns only a boolean.
 - **A working PKCS#11 driver** for HSM-backed keystores.
 - **Independent security review**, and the 1.0 interface freeze that should
   follow it.
@@ -533,6 +464,6 @@ Everything in this section is a plan, not a shipped capability.
 
 Sunder is at `github.com/fvisic/sunder` under Apache-2.0. The design
 rationale is in `docs/DESIGN.md`, the adversary analysis in
-`docs/THREAT-MODEL.md`, the API surface and error taxonomy in
-`docs/API.md`, and the benchmark harness and raw results in `benchmark/`,
-reproducible with one script. Read the threat model before production use.
+`docs/THREAT-MODEL.md`, the API surface and error taxonomy in `docs/API.md`,
+and the benchmark harness and raw results in `benchmark/`, reproducible with
+one script. Read the threat model before production use.

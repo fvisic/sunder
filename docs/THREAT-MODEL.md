@@ -78,3 +78,28 @@ KEK through the crypto engine (AAD-bound like attribute blobs), and the
 per-address send throttle is keyed by an HMAC search token, never a bare
 hash of the address. A database reader without key access can neither log
 in as anyone nor enumerate registered addresses from these tables.
+
+
+## Audit chain: the cost of linearity (measured 2026-08-24)
+
+The hash chain is linear by construction, and `audit.AppendTx` holds
+`pg_advisory_xact_lock` across the appending transaction to keep it that
+way. That lock is instance-wide, so audited operations serialize.
+
+Measured on a 12-core server: throughput flattens at roughly 460 audited
+operations per second and does not improve past four concurrent clients.
+Sampling `pg_locks` under load shows one session inside the append and
+every other active session waiting. The ceiling tracks storage commit
+latency (`fdatasync` at 2,003 ops/sec on that machine), not core count.
+
+This is a deliberate trade, not a defect: the linear chain is what makes
+silent tampering detectable, and a lock is what keeps it linear. It is
+recorded here because it is a capacity limit an operator must plan for,
+and because it is invisible on fast local storage - a laptop reaches
+roughly 2,700 ops/sec on the same path and never meets the plateau.
+
+Availability consequence: an instance fronting a high-volume public path
+needs faster storage, or one of the chain-design changes listed in
+`benchmark/README.md` (per-scope chains, batched appends, or an
+out-of-transaction append log), each of which gives up something the
+current design guarantees.
