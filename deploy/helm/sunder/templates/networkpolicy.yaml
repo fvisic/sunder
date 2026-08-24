@@ -1,0 +1,86 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- if and (not .Values.networkPolicy.clientLabel) (not .Values.networkPolicy.allowedNamespaces) }}
+{{- fail "networkPolicy.enabled with neither clientLabel nor allowedNamespaces would render an allow-all ingress rule - set at least one" }}
+{{- end }}
+# P2.2 network policies: Sunder accepts traffic only from labelled client
+# workloads and talks out only to what it genuinely needs (DB, TSA, Vault,
+# webhook receivers, DNS). Everything else is dropped by the CNI.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-sunder
+  labels: {{- include "sunder.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "sunder.labels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        {{- if .Values.networkPolicy.clientLabel }}
+        - podSelector:
+            matchLabels:
+              {{ .Values.networkPolicy.clientLabel }}: "true"
+        {{- end }}
+        {{- range .Values.networkPolicy.allowedNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+      ports:
+        - {port: 8080, protocol: TCP}
+    {{- if .Values.networkPolicy.monitoringNamespace }}
+    # The Prometheus scrape docs/PROVISIONING.md recommends would otherwise
+    # be blocked by the client-label selector above (review N18).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - {port: 8080, protocol: TCP}
+    {{- end }}
+    {{- if and .Values.portal.enabled .Values.portal.listenPort }}
+    # The portal is citizen-facing: it is reached from the ingress, not
+    # from labelled client workloads (review P8).
+    - {{- if .Values.networkPolicy.ingressNamespace }}
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+      {{- end }}
+      ports:
+        - {port: {{ .Values.portal.listenPort }}, protocol: TCP}
+    {{- end }}
+  egress:
+    # DNS
+    - ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    # PostgreSQL
+    - ports:
+        - {port: {{ .Values.networkPolicy.dbPort }}, protocol: TCP}
+      {{- with .Values.networkPolicy.dbCIDR }}
+      to:
+        - ipBlock: {cidr: {{ . }}}
+      {{- end }}
+    {{- if .Values.redis.addr }}
+    # Redis: without this, fail-closed limiting turns every lookup into a
+    # 503 and fail-open silently degrades to per-replica windows (N18).
+    - ports:
+        - {port: {{ .Values.networkPolicy.redisPort }}, protocol: TCP}
+      {{- with .Values.networkPolicy.redisCIDR }}
+      to:
+        - ipBlock: {cidr: {{ . }}}
+      {{- end }}
+    {{- end }}
+    # HTTPS out: TSA anchoring, Vault, webhook receivers. Narrow with
+    # egressCIDRs when the receiver set is known.
+    - ports:
+        - {port: 443, protocol: TCP}
+        - {port: 8200, protocol: TCP}
+      {{- with .Values.networkPolicy.egressCIDRs }}
+      to:
+        {{- range . }}
+        - ipBlock: {cidr: {{ . }}}
+        {{- end }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,20 @@
+/sunder
+keystore/
+*.tsr
+# ...except the committed offline test fixture:
+!internal/audit/testdata/*.tsr
+.env
+dist/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+coverage.out
+
+# Java build output (Maven); regenerable, never committed.
+sdks/java/target/
+
+# Internal review notes: findings, resolution log, work in progress.
+CODE-REVIEW.md
+# IDE state
+.idea/

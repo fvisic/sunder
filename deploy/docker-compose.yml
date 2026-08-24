@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: sunder
+      POSTGRES_USER: sunder
+      POSTGRES_PASSWORD: sunder-dev-only
+    volumes:
+      # Persist data: recreating the stack must not invalidate issued
+      # credentials and registered contacts (the keystore volume already
+      # persists keys - losing one but not the other splits the state).
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Loopback only: never expose the dev database on all interfaces.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sunder"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  sunder:
+    build:
+      context: ..
+      target: runtime
+    environment:
+      SUNDER_DB_URL: postgres://sunder:sunder-dev-only@postgres:5432/sunder
+      SUNDER_LISTEN: ":8080"
+      SUNDER_KEYSTORE: file
+      SUNDER_KEYSTORE_PATH: /keystore
+    volumes:
+      - keystore:/keystore
+    ports:
+      # Loopback only, like the database: the dev API should not listen on
+      # every interface of the developer's machine.
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  keystore:
+  pgdata:

@@ -1,0 +1,19 @@
+# Patterns are root-anchored by default: use **/ so nested build artifacts
+# (sdks/typescript/node_modules, dist, __pycache__) stay out of the context.
+.git
+.env
+**/keystore/
+**/*.tsr
+**/*.key
+**/dist/
+**/node_modules/
+**/__pycache__/
+**/.venv/
+coverage.out
+deploy/
+# The ops image vendors the TSA root CA:
+!deploy/freetsa/cacert.pem
+docs/
+sdks/
+demo/
+loadtest/

@@ -1,0 +1,1061 @@
+openapi: 3.1.0
+
+info:
+  title: Sunder API
+  version: 1.0.0
+  description: |
+    Sunder is a pseudonymous identity provider. Each API client lives in a
+    **scope** (a CID namespace) and can only ever reference CIDs of its own
+    scope - foreign CIDs are indistinguishable from nonexistent ones (404).
+    Attributes are stored in per-(person, scope) encrypted blobs: a scope
+    reads exactly the attributes it stored itself (**scope isolation**).
+
+    Key security semantics:
+    - **LOOKUP != AUTHENTICATION** - a lookup hit returns a pseudonym; it
+      never proves the caller is talking to that person.
+    - **OTIs are single-use** - a one-time identifier is valid for 5 minutes,
+      one use, one audience, one purpose; single use is enforced by an atomic
+      VALID -> USED database transition, not just the signature.
+    - Every client has a scope, allowed actions, and allowed purposes;
+      purpose is checked server-side on every purpose-bearing call.
+
+    Errors are JSON objects: `{"error": "<code>"}` with an optional `detail`
+    (only `validation` errors carry detail; everything else is generic to
+    avoid oracle behavior).
+  license:
+    name: See repository LICENSE
+    identifier: LicenseRef-Repository-LICENSE
+
+servers:
+  - url: /
+    description: The Sunder instance itself (per-vendor deployment).
+
+security:
+  - bearerClientKey: []
+
+tags:
+  - name: contacts
+    description: Contact registration, scoped CID issuance, attribute reads.
+  - name: lookup
+    description: Token-based contact lookup (LOOKUP != AUTHENTICATION).
+  - name: oti
+    description: One-time identifiers for cross-system handoff.
+  - name: ops
+    description: Unauthenticated operational endpoints.
+
+paths:
+  /v1/contacts:
+    post:
+      tags: [contacts]
+      operationId: registerContact
+      summary: Register a contact
+      description: |
+        Action `contacts.register`. At least one email or phone is required;
+        the plural `emails`/`phones` lists make additional identifiers
+        searchable. Reserved attribute names (`email`, `phone`, `name`,
+        `email_N`, `phone_N`) are rejected inside `attributes`; the service
+        stores the normalized identifiers under them. Identifiers are
+        normalized (Unicode NFKC; email lowercased; phone to E.164), HMAC
+        search tokens are computed, and all values land in the caller-scope
+        AEAD blob (AES-256-GCM by default, per `SUNDER_PII_ALG`).
+
+        Dedup: an existing person is matched by email token first, then
+        phone, and reused - re-registering returns the same scoped CID and
+        merges new attributes into the caller's blob (new values win).
+        Attributes stored by other scopes are never readable through dedup
+        (per-scope blobs - scope isolation).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterContactRequest'
+      responses:
+        '201':
+          description: Contact registered (or deduplicated onto an existing person). Returns the pseudonym in the caller's scope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CidResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /v1/contacts/{cid}/scopes:
+    post:
+      tags: [contacts]
+      operationId: issueScopedCid
+      summary: Issue a CID in another scope
+      description: |
+        Action `scopes.issue`. Returns a different pseudonym for the same
+        person, in the target scope.
+
+        **Grant sparingly**: this action is linkage-capable - the caller
+        learns the target scope's pseudonym. It exists for trusted
+        integration components; regular cross-system handoff should use
+        OTIs, where the verifier learns its own CID and the issuer learns
+        nothing.
+      parameters:
+        - $ref: '#/components/parameters/Cid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scope]
+              properties:
+                scope:
+                  type: string
+                  description: Target scope to issue the CID in.
+                  examples: [billing]
+      responses:
+        '200':
+          description: The same person's pseudonym in the target scope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CidResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /v1/contacts/{cid}/attributes/{name}:
+    get:
+      tags: [contacts]
+      operationId: getAttribute
+      summary: Fetch one attribute field
+      description: |
+        Action `attributes.read`. `purpose` is mandatory and must be in the
+        caller's allowed purposes. Decryption is server-side only; exactly
+        one field is returned per call; every fetch is written to the audit
+        chain. Only attributes stored by the caller's own scope are readable
+        (scope isolation - per-scope encrypted blobs).
+      parameters:
+        - $ref: '#/components/parameters/Cid'
+        - name: name
+          in: path
+          required: true
+          description: Attribute name (e.g. `email`, `phone`, `name`, or a custom attribute).
+          schema:
+            type: string
+        - name: purpose
+          in: query
+          required: true
+          description: Declared purpose of the read; must be in the caller's allowed purposes.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The decrypted attribute value.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [value]
+                properties:
+                  value:
+                    type: string
+                    examples: [filip@example.com]
+        '400':
+          $ref: '#/components/responses/Validation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenOrPurpose'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /v1/lookup:
+    post:
+      tags: [lookup]
+      operationId: lookup
+      summary: Find a contact without exposing PII
+      description: |
+        Action `lookup`. Valid key combinations: `email` alone, `phone`
+        alone, `name` + `email`, or `name` + `phone`. **Name alone is
+        rejected (400)** - a name is a narrowing key, never an identifier.
+        Identifiers are normalized, HMAC-tokenized under every active key
+        version and matched against token indexes; no PII is compared or
+        stored in plaintext on this path.
+
+        A 404 covers both "no such person" and "person exists but has no CID
+        in the caller's scope" - anything else would let one scope enumerate
+        another's customer base. Every lookup, hit or miss, is audited;
+        misses feed the enumeration detector.
+
+        **LOOKUP != AUTHENTICATION** - a hit never proves the caller is
+        talking to that person.
+
+        Rate-limited per client: requests beyond the client's per-minute
+        limit get 429 `rate_limited`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LookupRequest'
+      responses:
+        '200':
+          description: Match found. Returns the pseudonym in the caller's scope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CidResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /v1/oti:
+    post:
+      tags: [oti]
+      operationId: issueOti
+      summary: Issue a one-time identifier
+      description: |
+        Action `oti.issue`. `purpose` must be in the caller's allowed
+        purposes; `cid` must belong to the caller's scope (a foreign or
+        unknown CID is 404). Returns a PASETO v4.public token (Ed25519, no
+        negotiable algorithm) valid for **5 minutes, one use, one audience,
+        one purpose**. The signing key version travels as `kid`;
+        verification only accepts key versions the keyring lists as live.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtiIssueRequest'
+      responses:
+        '201':
+          description: One-time identifier issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OtiIssueResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenOrPurpose'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /portal/api/start:
+    post:
+      tags: [portal]
+      operationId: portalStart
+      summary: Request a portal login link (citizen-facing, unauthenticated)
+      description: |
+        Self-service privacy portal (SUNDER_PORTAL_ENABLED). No client
+        credential: the data subject authenticates with a one-time link.
+
+        Always answers 202 with the same body whether or not the address is
+        known, and never blocks on the mailer - the link is queued to the
+        webhook registered under the reserved scope `_portal` and delivered
+        by a background worker, so response timing does not reveal whether
+        an address exists.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: {type: string, format: email}
+      responses:
+        '202':
+          description: Accepted. Identical for known, unknown and malformed addresses.
+        '429':
+          description: Per-requester rate limit (this route is deliberately the strictest).
+
+  /portal/api/session:
+    post:
+      tags: [portal]
+      operationId: portalSession
+      summary: Redeem a login token for a portal session
+      description: Single-use, 15-minute token; sets an HttpOnly, Secure, SameSite=Strict session cookie valid 30 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: {type: string}
+      responses:
+        '200':
+          description: Session started; the cookie is set.
+        '404':
+          description: Unknown, expired or already-used token.
+
+  /portal/api/me:
+    get:
+      tags: [portal]
+      operationId: portalData
+      summary: Everything every scope stores about the signed-in person
+      description: Cookie-authenticated. Returns each scope's decrypted attributes and consents plus the cross-scope audit trail. Never cacheable (no-store).
+      responses:
+        '200':
+          description: The person's own data across all scopes.
+        '401':
+          description: No session, or the session expired (also after erasure).
+
+  /portal/api/consent:
+    post:
+      tags: [portal]
+      operationId: portalSetConsent
+      summary: Grant or withdraw a consent on one of your own pseudonyms
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cid, purpose, granted]
+              properties:
+                cid: {$ref: '#/components/schemas/Cid'}
+                purpose: {type: string}
+                granted: {type: boolean}
+      responses:
+        '200':
+          description: Recorded; it takes effect immediately on reads and handoffs.
+        '404':
+          description: The CID does not belong to the signed-in person.
+
+  /portal/api/erase:
+    post:
+      tags: [portal]
+      operationId: portalRequestErase
+      summary: Start an erasure (step 1 of 2)
+      description: |
+        Mails a confirmation code to the address on file. The code is NOT
+        returned in the response: holding the session cookie must not be
+        enough to complete an irreversible cross-scope erasure.
+      responses:
+        '202':
+          description: A confirmation link has been queued to the address on file.
+
+  /portal/api/erase/confirm:
+    post:
+      tags: [portal]
+      operationId: portalConfirmErase
+      summary: Confirm an erasure (step 2 of 2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm_token]
+              properties:
+                confirm_token: {type: string}
+      responses:
+        '200':
+          description: Erased; every scope is notified via its signed webhook.
+        '404':
+          description: Unknown, expired, already-used, or issued for a different person.
+
+  /portal/api/logout:
+    post:
+      tags: [portal]
+      operationId: portalLogout
+      summary: End the portal session immediately
+      responses:
+        '200':
+          description: Signed out; the session row is deleted and the cookie cleared.
+
+  /v1/claims/external:
+    post:
+      tags: [contacts]
+      operationId: submitExternalClaims
+      summary: Accept an issuer-signed claim envelope (federation)
+      description: |
+        Action `claims.external`. Verifies a PASETO v4.public envelope from
+        a REGISTERED external issuer (trust registry, `sunder issuer add`)
+        and merges its claims into the caller-scope blob with provenance
+        (`<claim>@<issuer>`). Rejected unless the issuer is trusted, the
+        signature verifies against the registered key, `exp` is in the
+        future and every claim name is in the issuer's allowlist.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cid, envelope]
+              properties:
+                cid: {$ref: '#/components/schemas/Cid'}
+                envelope:
+                  type: string
+                  description: |
+                    PASETO v4.public token signed by the registered issuer. Payload: {"iss", "jti", "cid", "claims", "iat", "exp"}. The signed "cid" must equal the target (subject binding), "jti" is consumed once (anti-replay), "exp" may be at most 24 hours ahead, and "iat" must not be in the future. Claim names must match ^[a-zA-Z0-9_.-]{1,64}$; values are capped at 4 KB.
+      responses:
+        '200':
+          description: Claims stored with provenance.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stored]
+                properties:
+                  stored:
+                    type: array
+                    items: {type: string}
+                    description: Attribute names as stored (claim@issuer).
+        '400':
+          description: Malformed or expired envelope, invalid signature, or claim-name limits exceeded.
+        '403':
+          description: Missing claims.external action, untrusted issuer, or claim outside the issuer's allowlist.
+        '404':
+          description: CID absent from the caller's scope (or the person has been erased).
+        '429':
+          description: Per-client rate limit - every envelope, accepted or rejected, appends to the audit chain.
+
+  /v1/oti/verify:
+    post:
+      tags: [oti]
+      operationId: verifyOti
+      summary: Verify and consume a one-time identifier
+      description: |
+        Action `oti.verify`. The caller's scope must equal the token's
+        `audience` - you can only verify tokens addressed to you
+        (403 `audience_mismatch` otherwise).
+
+        On success, returns **the verifier's own scoped CID** for the person
+        (auto-issued if absent); the issuer's pseudonym never crosses the
+        scope boundary. **Single use** is enforced by an atomic
+        VALID -> USED database transition, not just the signature: a second
+        verification of the same token returns 409 `token_used`. Do not
+        blind-retry this call after an ambiguous network failure - the retry
+        can legitimately return `token_used`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtiVerifyRequest'
+      responses:
+        '200':
+          description: Token verified and consumed. Returns the verifier's own scoped CID for the person, plus any shared attributes and evaluated predicate claims.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OtiVerifyResponse'
+        '400':
+          description: Bad JSON body, validation failure, or an invalid token (bad signature, wrong purpose, malformed shape) - `error` is `bad_json`, `validation` or `token_invalid`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                token_invalid:
+                  value: {"error": "token_invalid"}
+                bad_json:
+                  value: {"error": "bad_json"}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller lacks the action, the purpose is not allowed, or the caller's scope does not equal the token audience - `error` is `forbidden`, `purpose_not_allowed` or `audience_mismatch`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                audience_mismatch:
+                  value: {"error": "audience_mismatch"}
+                forbidden:
+                  value: {"error": "forbidden"}
+        '409':
+          description: The token was already used (single-use, atomic VALID -> USED transition) - `error` is `token_used`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                token_used:
+                  value: {"error": "token_used"}
+        '410':
+          description: The token expired (5-minute validity) - `error` is `token_expired`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                token_expired:
+                  value: {"error": "token_expired"}
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /v1/consent:
+    post:
+      tags: [gdpr]
+      operationId: setConsent
+      summary: Record a consent decision
+      description: |
+        Action `consent.manage`; the CID must belong to the caller's scope.
+        Absence of a record means the purpose is not consent-governed; an
+        explicit granted=false blocks attribute reads and OTI issuance for
+        that purpose (403 consent_denied) until re-granted. Audited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cid, purpose, granted]
+              properties:
+                cid: {type: string}
+                purpose: {type: string}
+                granted: {type: boolean}
+      responses:
+        '200':
+          description: Decision recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cid: {type: string}
+                  purpose: {type: string}
+                  granted: {type: boolean}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/consent/{cid}:
+    get:
+      tags: [gdpr]
+      operationId: listConsents
+      summary: List recorded consent decisions for a caller-scope CID
+      parameters:
+        - {name: cid, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Recorded decisions (empty list when none).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  consents:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        purpose: {type: string}
+                        granted: {type: boolean}
+                        updated_at: {type: string, format: date-time}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/dsr/access:
+    get:
+      tags: [gdpr]
+      operationId: dsrAccess
+      summary: GDPR right of access (org-wide)
+      description: |
+        Action `dsr.access` - high-privilege and linkage-capable (privacy
+        officer only): returns every scope's data for the person plus the
+        audit trail of who touched them. Audited.
+      parameters:
+        - {name: cid, in: query, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: All scopes' data and the access trail.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scopes:
+                    type: array
+                    items: {$ref: '#/components/schemas/ScopeData'}
+                  audit_trail:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        seq: {type: integer}
+                        ts: {type: string, format: date-time}
+                        client_id: {type: string}
+                        action: {type: string}
+                        cid: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/dsr/erase:
+    post:
+      tags: [gdpr]
+      operationId: dsrErase
+      summary: GDPR right to be forgotten (org-wide)
+      description: |
+        Action `dsr.erase`. Transactionally wipes every scope's blob,
+        deletes all search tokens, tombstones the person (CID references in
+        client systems never break) and queues one signed webhook event per
+        scope. Audited. Re-registration afterwards creates a new person.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cid]
+              properties:
+                cid: {type: string}
+      responses:
+        '200':
+          description: Erasure executed; events queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  erasure_id: {type: integer}
+                  scopes: {type: integer}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/dsr/export:
+    get:
+      tags: [gdpr]
+      operationId: dsrExport
+      summary: GDPR data portability (caller scope only)
+      parameters:
+        - {name: cid, in: query, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Machine-readable dump of the caller-scope data.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScopeData'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /healthz:
+    get:
+      tags: [ops]
+      operationId: healthz
+      summary: Liveness probe
+      description: Liveness check. No authentication.
+      security: []
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: ok
+
+  /readyz:
+    get:
+      tags: [ops]
+      operationId: readyz
+      summary: Readiness probe
+      description: DB-backed readiness check (pings the database with a 2 s timeout). No authentication.
+      security: []
+      responses:
+        '200':
+          description: Database reachable; ready to serve.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: ready
+        '503':
+          description: Database unavailable.
+          content:
+            text/plain:
+              schema:
+                type: string
+                examples: [db unavailable]
+
+  /metrics:
+    get:
+      tags: [ops]
+      operationId: metrics
+      summary: Prometheus metrics
+      description: |
+        Prometheus text exposition format. Unauthenticated by default -
+        protect at the network layer. When `SUNDER_METRICS_TOKEN` is set the
+        endpoint requires `Authorization: Bearer <token>` (per-client
+        counters reveal client ids and activity) and returns 401 otherwise.
+      security: []
+      responses:
+        '200':
+          description: Current metrics in Prometheus text format.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          description: Returned only when SUNDER_METRICS_TOKEN is configured and the bearer token is missing or wrong.
+          headers:
+            WWW-Authenticate:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    bearerClientKey:
+      type: http
+      scheme: bearer
+      bearerFormat: client_id.secret
+      description: |
+        `Authorization: Bearer <client_id>.<secret>` - credentials issued
+        once by `sunder client create`; only a hash is stored server-side.
+        Every client has a scope (CID namespace), allowed actions and
+        allowed purposes. With mTLS configured, the listener additionally
+        requires a valid client certificate.
+
+  parameters:
+    Cid:
+      name: cid
+      in: path
+      required: true
+      description: A CID pseudonym in the caller's scope. Foreign CIDs are indistinguishable from nonexistent ones (404).
+      schema:
+        $ref: '#/components/schemas/Cid'
+
+  schemas:
+    Cid:
+      type: string
+      description: A scoped pseudonym. Different scopes hold different, unlinkable CIDs for the same person.
+      pattern: '^CID-'
+      examples: [CID-01J8ZK3V4WXYZ]
+
+    CidResponse:
+      type: object
+      required: [cid]
+      properties:
+        cid:
+          $ref: '#/components/schemas/Cid'
+
+    PredicateResult:
+      type: object
+      required: [attr, op, result, known]
+      properties:
+        attr: {type: string}
+        op: {type: string, enum: [age_gte, exists]}
+        value: {type: integer}
+        result: {type: boolean}
+        known:
+          type: boolean
+          description: |
+            Op-specific. For age_gte: false when the attribute is absent or unparseable, so "we do not know the birthdate" never reads as "under 18". For exists: always true, because absence is the answer that predicate asks for.
+
+    OtiVerifyResponse:
+      type: object
+      required: [cid]
+      properties:
+        cid:
+          $ref: '#/components/schemas/Cid'
+        shared:
+          type: array
+          items: {type: string}
+          description: Attribute names copied into the verifier's scope (share_attributes); absent when nothing was shared.
+        predicates:
+          type: array
+          items: {$ref: '#/components/schemas/PredicateResult'}
+          description: Evaluated predicate claims (share_predicates); absent when the token carried none.
+
+    ScopeData:
+      type: object
+      description: One scope's view of a person (DSR responses).
+      properties:
+        scope: {type: string}
+        cid: {type: string}
+        attributes:
+          type: object
+          additionalProperties: {type: string}
+        consents:
+          type: array
+          items:
+            type: object
+            properties:
+              purpose: {type: string}
+              granted: {type: boolean}
+              updated_at: {type: string, format: date-time}
+
+    RegisterContactRequest:
+      type: object
+      description: |
+        At least one email or phone is required. A contact can carry several
+        searchable emails/phones: the singular field is the primary, the
+        plural lists add more - all are searchable and dedup-relevant.
+        Normalized identifiers are stored as attributes `email`, `email_2`,
+        …, `phone`, `phone_2`, ….
+      properties:
+        email:
+          type: string
+          description: Primary email; normalized server-side (Unicode NFKC, lowercased).
+          examples: [Filip@Example.com]
+        emails:
+          type: array
+          items:
+            type: string
+          description: Additional searchable emails.
+        phone:
+          type: string
+          description: Primary phone; normalized server-side to E.164.
+          examples: ['+385 91 123 4567']
+        phones:
+          type: array
+          items:
+            type: string
+          description: Additional searchable phones.
+        name:
+          type: string
+          description: A narrowing key, never an identifier on its own.
+          examples: [Filip Visic]
+        attributes:
+          type: object
+          description: Free-form attributes stored in the caller-scope encrypted blob (multiple addresses go here under caller-chosen names). `email`, `phone`, `name` and the generated `email_N`/`phone_N` are reserved names and rejected here.
+          additionalProperties:
+            type: string
+          examples:
+            - loyalty_tier: gold
+              address_home: 'Ilica 1, Zagreb'
+              address_billing: 'Savska 10, Zagreb'
+      anyOf:
+        - required: [email]
+        - required: [phone]
+        - required: [emails]
+        - required: [phones]
+
+    LookupRequest:
+      type: object
+      description: |
+        Valid combinations: `email` alone, `phone` alone, `name` + `email`,
+        or `name` + `phone`. Name alone is rejected with 400 `validation`.
+      properties:
+        email:
+          type: string
+          examples: [filip@example.com]
+        phone:
+          type: string
+          examples: ['+385911234567']
+        name:
+          type: string
+          description: Narrowing key only - must be accompanied by email or phone.
+          examples: [Filip Visic]
+      anyOf:
+        - required: [email]
+        - required: [phone]
+
+    OtiIssueRequest:
+      type: object
+      required: [cid, purpose, audience]
+      properties:
+        cid:
+          $ref: '#/components/schemas/Cid'
+        purpose:
+          type: string
+          description: Must be in the caller's allowed purposes; bound into the token.
+          examples: [create_order]
+        audience:
+          type: string
+          description: The scope that will verify the token; only that scope can consume it.
+          examples: [erp]
+        share_attributes:
+          type: array
+          items: {type: string}
+          description: Issuer-scope attributes copied into the verifier's scope blob at verification. Absent/empty = the handoff shares nothing.
+        share_predicates:
+          type: array
+          maxItems: 8
+          description: Issuer-authorized predicate claims evaluated against the ISSUER's data at verification; the verifier receives booleans only, never the value (selective disclosure).
+          items:
+            type: object
+            required: [attr, op]
+            properties:
+              attr: {type: string, maxLength: 64, description: Attribute name in the issuer's scope.}
+              op: {type: string, enum: [age_gte, exists]}
+              value: {type: integer, minimum: 1, maximum: 150, description: "Required for age_gte (an omitted threshold is rejected at issue time, not treated as 0); must be absent for exists."}
+
+    OtiIssueResponse:
+      type: object
+      required: [token, expires_at]
+      properties:
+        token:
+          type: string
+          description: PASETO v4.public token (Ed25519). Valid 5 minutes, one use, one audience, one purpose. Treat as a secret in transit.
+          examples: ['v4.public.eyJjaWQiOiJ...']
+        expires_at:
+          type: string
+          format: date-time
+          description: RFC 3339 expiry timestamp (5 minutes from issue).
+
+    OtiVerifyRequest:
+      type: object
+      required: [token, purpose, audience]
+      properties:
+        token:
+          type: string
+          examples: ['v4.public.eyJjaWQiOiJ...']
+        purpose:
+          type: string
+          description: Must match the purpose the token was issued for.
+          examples: [create_order]
+        audience:
+          type: string
+          description: Must equal the caller's own scope - you can only verify tokens addressed to you.
+          examples: [erp]
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code.
+          enum:
+            - unauthorized
+            - credential_expired
+            - forbidden
+            - consent_denied
+            - purpose_not_allowed
+            - audience_mismatch
+            - not_found
+            - validation
+            - bad_json
+            - token_invalid
+            - token_used
+            - token_expired
+            - rate_limited
+            - service_unavailable
+            - internal
+        detail:
+          type: string
+          description: Human-readable detail. Only present on `validation` errors; other errors are deliberately generic to avoid oracle behavior.
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid `Authorization` bearer credentials - `error` is `unauthorized`.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            const: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unauthorized:
+              value: {"error": "unauthorized"}
+
+    Forbidden:
+      description: The client is not allowed to perform this action - `error` is `forbidden`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            forbidden:
+              value: {"error": "forbidden"}
+
+    ForbiddenOrPurpose:
+      description: The client is not allowed to perform this action, or the declared purpose is not in the client's allowed purposes - `error` is `forbidden` or `purpose_not_allowed`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            forbidden:
+              value: {"error": "forbidden"}
+            purpose_not_allowed:
+              value: {"error": "purpose_not_allowed"}
+
+    NotFound:
+      description: No such CID in the caller's scope, or no match. Foreign-scope and nonexistent resources are deliberately indistinguishable - `error` is `not_found`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            not_found:
+              value: {"error": "not_found"}
+
+    Validation:
+      description: Request failed validation - `error` is `validation`, with a `detail` message.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            validation:
+              value: {"error": "validation", "detail": "purpose required"}
+
+    BadRequest:
+      description: Malformed JSON body or failed validation - `error` is `bad_json` or `validation` (validation carries a `detail` message).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            bad_json:
+              value: {"error": "bad_json"}
+            validation:
+              value: {"error": "validation", "detail": "email or phone required"}
+
+    RateLimited:
+      description: The client exceeded its per-minute lookup limit - `error` is `rate_limited`. Misses also feed the enumeration detector.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            rate_limited:
+              value: {"error": "rate_limited"}
+
+    Internal:
+      description: Internal server error - `error` is `internal`. Clients should map any 5xx to ServiceUnavailable.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            internal:
+              value: {"error": "internal"}

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.sunderid</groupId>
+  <artifactId>sunder-client</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+
+  <name>Sunder Java SDK</name>
+  <description>
+    Thin client for the Sunder pseudonymous identity provider (v1 API):
+    transport, auth, timeouts, retries and error mapping. Zero runtime
+    dependencies, zero cryptography client-side.
+  </description>
+  <url>https://github.com/fvisic/sunder</url>
+
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+    </license>
+  </licenses>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <!-- Zero runtime dependencies by design (PLAN section 10.2). -->
+  <dependencies/>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <!-- Tests are a plain main-method runner (no JUnit); skip surefire and
+           run the suite directly in the test phase. Locally, run-tests.sh
+           does the same with plain javac/java. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+        <configuration>
+          <skipTests>true</skipTests>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.2.0</version>
+        <executions>
+          <execution>
+            <id>run-sdk-tests</id>
+            <phase>test</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <executable>java</executable>
+              <arguments>
+                <argument>-cp</argument>
+                <classpath/>
+                <argument>io.sunderid.client.SunderClientTest</argument>
+              </arguments>
+              <classpathScope>test</classpathScope>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -1,0 +1,63 @@
+# Prometheus alert rules over Sunder's built-in metrics.
+# Load via rule_files or a PrometheusRule CR (wrap `groups` accordingly).
+groups:
+  - name: sunder
+    rules:
+      - alert: SunderDown
+        expr: up{job="sunder"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Sunder instance down"
+          description: "No scrape from {{ $labels.instance }} for 2 minutes. Lookups, OTI handoffs and registrations are failing org-wide."
+
+      - alert: SunderHighErrorRate
+        expr: |
+          sum(rate(sunder_requests_total{job="sunder", code=~"5.."}[5m]))
+            / clamp_min(sum(rate(sunder_requests_total{job="sunder"}[5m])), 0.001) > 0.02
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Sunder 5xx rate above 2%"
+          description: "Check database connectivity and the service logs; audit appends failing shows up here first (operations fail closed)."
+
+      - alert: SunderLookupLatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(sunder_request_seconds_bucket{job="sunder", handler="POST /v1/lookup"}[5m]))) > 0.015
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Lookup p99 above the 15ms design target"
+          description: "Check PostgreSQL load, index bloat on person_tokens, and connection-pool saturation."
+
+      - alert: SunderOTIVerifyLatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(sunder_request_seconds_bucket{job="sunder", handler="POST /v1/oti/verify"}[5m]))) > 0.010
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "OTI verify p99 above the 10ms design target"
+          description: "The verify hot path is a single CAS update; sustained latency means database contention."
+
+      - alert: SunderEnumerationSuspected
+        expr: sum by (client) (increase(sunder_lookup_misses_total{job="sunder"}[10m])) > 100
+        labels: {severity: critical}
+        annotations:
+          summary: "Possible enumeration attack by client {{ $labels.client }}"
+          description: "More than 100 lookup misses in 10 minutes. The service logs a matching warning; review the audit trail for this client and consider suspending its credential."
+
+      - alert: SunderRateLimitedSpike
+        expr: sum by (client) (increase(sunder_ratelimited_total{job="sunder"}[10m])) > 500
+        labels: {severity: warning}
+        annotations:
+          summary: "Client {{ $labels.client }} heavily rate-limited"
+          description: "Either a runaway integration or an abuse attempt; check with the owning team before raising the limit."
+
+      - alert: SunderAuthFailureSpike
+        expr: sum(increase(sunder_requests_total{job="sunder", code="401"}[10m])) > 200
+        labels: {severity: warning}
+        annotations:
+          summary: "Spike of unauthenticated requests"
+          description: "Possible credential stuffing against the API, or a client with a rotated-out credential still deployed."

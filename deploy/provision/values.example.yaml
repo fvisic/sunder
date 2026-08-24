@@ -1,0 +1,31 @@
+# Per-customer values for provision.sh. Copy per customer; never share a
+# database, keystore, or Vault path between customers.
+image:
+  repository: ghcr.io/fvisic/sunder
+  tag: v0.3.0
+  opsTag: v0.3.0-ops
+
+replicaCount: 2
+
+database:
+  existingSecret: sunder-db   # created by provision.sh --db-url
+
+keystore:
+  type: vault
+  vault:
+    addr: https://vault.internal:8200
+    mount: customer-CHANGEME  # dedicated KV v2 mount per customer
+    existingSecret: sunder-vault
+
+signer:
+  enabled: true               # key material isolated in the sidecar
+
+networkPolicy:
+  enabled: true
+  clientLabel: sunder-client
+  dbCIDR: ""                  # narrow to the customer's DB subnet
+
+tls:
+  enabled: true
+  secretName: sunder-tls
+  mtlsSecretName: sunder-mtls-ca

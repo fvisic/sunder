@@ -1,0 +1,115 @@
+image:
+  repository: ghcr.io/fvisic/sunder
+  tag: v0.3.0
+  # The ops image (anchor/verify-audit cron jobs) needs openssl:
+  opsTag: v0.3.0-ops
+
+replicaCount: 2
+
+# PostgreSQL connection string. Provide via an existing secret (key SUNDER_DB_URL);
+# never inline credentials in values files committed to git.
+database:
+  existingSecret: sunder-db
+
+keystore:
+  # vault is the right choice on Kubernetes: the file driver would need a
+  # ReadWriteMany volume shared across replicas.
+  type: vault
+  vault:
+    addr: https://vault.internal:8200
+    mount: secret
+    # token via existing secret (key SUNDER_VAULT_TOKEN)
+    existingSecret: sunder-vault
+
+# Shared rate-limit counters across replicas (strongly recommended when
+# replicaCount > 1). Leave addr empty for per-replica in-memory windows.
+redis:
+  addr: ""
+  existingSecret: ""   # optional, key SUNDER_REDIS_PASSWORD
+  failClosed: false
+
+tls:
+  # TLS between the ingress/mesh and sunder; keys via existing TLS secret.
+  enabled: false
+  secretName: sunder-tls
+  # Optional client-CA bundle secret (key ca.crt) to enforce mTLS.
+  mtlsSecretName: ""
+
+metrics:
+  # Optional bearer token protecting /metrics (key SUNDER_METRICS_TOKEN).
+  existingSecret: ""
+
+# P2.1 signer split: run all cryptography in a sidecar that is the only
+# holder of key material; the main container then never sees keys. The
+# sidecar shares an emptyDir socket volume and runs with no service ports.
+signer:
+  enabled: false
+
+# P2.2 network policies: default-deny posture for the Sunder pods. Requires
+# a CNI that enforces NetworkPolicy (Cilium, Calico, ...).
+networkPolicy:
+  enabled: false
+  # Only pods carrying <clientLabel>: "true" may call the API.
+  clientLabel: sunder-client
+  # Additional namespaces allowed to call the API (by name).
+  allowedNamespaces: []
+  dbPort: 5432
+  redisPort: 6379
+  # Narrow Redis egress (empty = any); required when redis.addr is set.
+  redisCIDR: ""
+  # Namespace allowed to scrape /metrics (e.g. "monitoring"); empty = none.
+  monitoringNamespace: ""
+  # Namespace the ingress controller runs in, allowed to reach the portal
+  # port; empty = any source may reach the portal port.
+  ingressNamespace: ""
+  # Narrow DB egress to the database subnet, e.g. 10.12.0.0/24.
+  dbCIDR: ""
+  # Narrow HTTPS/Vault egress (TSA, Vault, webhook receivers); empty = any.
+  egressCIDRs: []
+
+# Self-service privacy portal (docs/CONFIG.md). OFF by default. With mTLS on
+# the API, set listenPort so citizens reach the portal on its own listener -
+# browsers cannot present a client certificate (review N12/P8).
+portal:
+  enabled: false
+  listenPort: 8081          # 0 = mount on the API listener instead
+  baseUrl: ""               # e.g. https://privacy.acme.example (builds the magic link)
+  clientIpHeader: ""        # e.g. X-Forwarded-For; the RIGHT-most entry is used
+  trustedProxyHops: 0       # extra hops to skip from the right
+  cookieInsecure: false     # development only
+
+# Deployment tunables (docs/CONFIG.md). Empty = server default. These are
+# security trade-offs, not preferences - read the docs before changing.
+tunables:
+  otiTtl: ""             # SUNDER_OTI_TTL, e.g. "90s" (default 5m; bearer-token window!)
+  piiAlg: ""             # SUNDER_PII_ALG: aes256gcm (default) | xchacha20poly1305
+  webhookTimeout: ""     # SUNDER_WEBHOOK_TIMEOUT, e.g. "30s" (default 5s)
+  webhookMaxAttempts: "" # SUNDER_WEBHOOK_MAX_ATTEMPTS (default 10)
+  deliverInterval: ""    # SUNDER_DELIVER_INTERVAL, e.g. "30s" (default 1m)
+
+anchor:
+  enabled: true
+  schedule: "17 2 * * *"       # daily; only a 32-byte digest leaves the cluster
+  tsaUrl: https://freetsa.org/tsr
+  # CA bundle used to verify the TSA's tokens. The vendored default matches
+  # the FreeTSA URL above; point BOTH at your own TSA together, or anchoring
+  # hard-fails and silently stops producing evidence (review N19).
+  #
+  # For a custom TSA: put the bundle in a Secret, name it in caSecretName
+  # (mounted at /etc/sunder/tsa-ca) and set caPath to the file inside it,
+  # e.g. caSecretName: my-tsa-ca + caPath: /etc/sunder/tsa-ca/ca.pem
+  caPath: /etc/sunder/tsa-ca.pem
+  caSecretName: ""
+  # PVC where exported .tsr tokens land; sync it to write-once storage OFF
+  # the database host - anchors kept only in the database are circular.
+  pvc:
+    size: 1Gi
+    storageClassName: ""
+
+retention:
+  enabled: true
+  schedule: "43 3 * * *"
+
+resources:
+  requests: {cpu: 250m, memory: 256Mi}
+  limits: {memory: 512Mi}

@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Single target: net8.0. netstandard2.0 would preclude the System.Text.Json
+         defaults used here (it ships in-box only on modern .NET) and force a
+         package dependency; this SDK is deliberately zero-dependency. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>SunderId.Client</PackageId>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/fvisic/sunder</RepositoryUrl>
+    <Version>0.1.0</Version>
+    <Description>.NET SDK for Sunder, a pseudonymous identity provider. Thin client only: transport, auth, timeouts, retries and error mapping. Zero dependencies beyond the BCL. One package covers C#, F# and VB.NET.</Description>
+    <PackageTags>sunder;identity;pseudonymization;privacy;cid</PackageTags>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+</Project>
