@@ -173,3 +173,27 @@ func TestFuzzyNameWithNoPhoneticSignal(t *testing.T) {
 		t.Fatalf("symbol-only name must mint no phonetic tokens, got %d", n)
 	}
 }
+
+// TestDerivedTokenPathsFailClosedWithoutKeys: with the key table denied,
+// registration and fuzzy lookup must fail, not quietly skip the derived
+// tokens - a contact silently registered WITHOUT its phonetic/suffix keys
+// would be unfindable later and nobody would know why.
+func TestDerivedTokenPathsFailClosedWithoutKeys(t *testing.T) {
+	e := newFaultEnv(t, "keys")
+	e.svc.FuzzyName = true
+	e.svc.PhoneSuffix = true
+	ctx := context.Background()
+
+	if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+		Email: "x@example.com", Phone: "+385911234567", Name: "Ana Anić"}); err == nil {
+		t.Fatal("register must fail when key versions cannot be read")
+	}
+	if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+		Email: "x@example.com", Name: "Ana"}); err == nil || errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("fuzzy lookup without key access must error, not miss: %v", err)
+	}
+	if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+		PhoneSuffix: "0911234567"}); err == nil || errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("suffix lookup without key access must error, not miss: %v", err)
+	}
+}
