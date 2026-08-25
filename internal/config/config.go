@@ -74,6 +74,12 @@ type Config struct {
 	AuditSealDelay    time.Duration // SUNDER_AUDIT_SEAL_DELAY: how long a row must settle before it may be sealed, default "2s", range [100ms, 5m]
 	AuditSealBatch    int           // SUNDER_AUDIT_SEAL_BATCH: rows per sealing transaction, default 5000, min 100
 	AuditSealExternal bool          // SUNDER_AUDIT_SEAL_EXTERNAL=true: this process runs no sealer; a separate `sunder sealer` process does
+	// Audit read events (P4.2). "bucketed" (default) aggregates lookups and
+	// attribute reads into hourly buckets, chained once per hour via a
+	// digest; "chained" keeps every read as its own chained row. See
+	// docs/THREAT-MODEL.md - tamper evidence for reads drops to hour
+	// granularity under "bucketed".
+	AuditReads string // SUNDER_AUDIT_READS: "bucketed" (default) or "chained"
 }
 
 func getenv(key, def string) string {
@@ -199,6 +205,10 @@ func FromEnvNoDB() (Config, error) {
 		return c, fmt.Errorf("SUNDER_AUDIT_SEAL_BATCH: %q must be an integer >= 100", rawBatch)
 	}
 	c.AuditSealExternal = os.Getenv("SUNDER_AUDIT_SEAL_EXTERNAL") == "true"
+	c.AuditReads = getenv("SUNDER_AUDIT_READS", "bucketed")
+	if c.AuditReads != "bucketed" && c.AuditReads != "chained" {
+		return c, fmt.Errorf("SUNDER_AUDIT_READS must be \"bucketed\" or \"chained\", got %q", c.AuditReads)
+	}
 	if c.AuditSealExternal && c.AuditSealing == "sync" {
 		return c, fmt.Errorf("SUNDER_AUDIT_SEAL_EXTERNAL is meaningless with SUNDER_AUDIT_SEALING=sync (sync mode seals inline and runs no sealer)")
 	}

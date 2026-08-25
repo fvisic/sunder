@@ -15,7 +15,13 @@ jobs:
     # releases (P4.1).
     strategy:
       matrix:
-        audit_sealing: [async, sync]
+        # Pairwise over the two audit switches: the default posture and
+        # the strict posture. Each switch still sees both of its values.
+        include:
+          - audit_sealing: async
+            audit_reads: bucketed
+          - audit_sealing: sync
+            audit_reads: chained
     services:
       postgres:
         image: postgres:16
@@ -38,6 +44,7 @@ jobs:
       SUNDER_TEST_DB_URL: postgres://sunder:sunder@localhost:5432/sunder_test
       SUNDER_TEST_REDIS_ADDR: 127.0.0.1:6379
       SUNDER_AUDIT_SEALING: ${{ matrix.audit_sealing }}
+      SUNDER_AUDIT_READS: ${{ matrix.audit_reads }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

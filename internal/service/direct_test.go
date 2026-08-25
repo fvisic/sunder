@@ -445,3 +445,48 @@ func TestNameNarrowingUsesItsOwnIndex(t *testing.T) {
 		t.Fatalf("name lookup no longer uses its index:\n%s", plan)
 	}
 }
+
+// TestShareIntoScopeShortCircuits pins the two cheap-exit branches of the
+// attribute-share merge: sharing with yourself is a no-op (same CID on
+// both sides), and sharing FROM a scope whose blob is empty (a cid minted
+// by scopes.issue carries no attributes) shares nothing rather than
+// failing the verify.
+func TestShareIntoScopeShortCircuits(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	cid := e.register(t)
+
+	// Same scope on both ends: issuer CID == verifier CID.
+	tok, _, err := e.oti.Issue(ctx, e.crm, cid, "support", "crm", []string{"tier"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := e.oti.VerifyFull(ctx, e.crm, tok, "support", "crm")
+	if err != nil {
+		t.Fatalf("self-audience verify: %v", err)
+	}
+	if len(out.Shared) != 0 {
+		t.Fatalf("sharing with yourself must be a no-op, shared %v", out.Shared)
+	}
+
+	// Issue FROM the billing scope, whose CID was minted by scopes.issue
+	// and holds no blob: nothing to share, verify still succeeds.
+	billingCID, err := e.svc.IssueScopedCid(ctx, e.crm, cid, "billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	billing := &auth.Client{ID: "billing", Scope: "billing",
+		AllowedActions:  []string{auth.ActOTIIssue, auth.ActOTIVerify},
+		AllowedPurposes: []string{"support"}}
+	tok2, _, err := e.oti.Issue(ctx, billing, billingCID, "support", "crm", []string{"tier"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out2, err := e.oti.VerifyFull(ctx, e.crm, tok2, "support", "crm")
+	if err != nil {
+		t.Fatalf("verify with empty issuer blob: %v", err)
+	}
+	if len(out2.Shared) != 0 {
+		t.Fatalf("an empty issuer blob must share nothing, shared %v", out2.Shared)
+	}
+}

@@ -25,6 +25,11 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if in.UserID != "" && !userIDPattern.MatchString(in.UserID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "validation", "detail": "user_id must be an id: 1-64 of [A-Za-z0-9._@:-]"})
+		return
+	}
 	cid, err := s.Contacts.Lookup(r.Context(), client, in)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {

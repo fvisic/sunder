@@ -760,3 +760,87 @@ func TestVerifyAuditFlagsStrandedRowsUnderSync(t *testing.T) {
 		t.Fatalf("verify after drain must pass: %v", err)
 	}
 }
+
+// TestVerifyAuditCmdFlagsBrokenBuckets: the CLI must surface a bucket
+// digest mismatch, not just chain breaks.
+func TestVerifyAuditCmdFlagsBrokenBuckets(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	old := audit.ReadsMode()
+	audit.SetReadsMode(audit.ReadsBucketed)
+	t.Cleanup(func() { audit.SetReadsMode(old) })
+
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count)
+		VALUES ('crm','','CID-A','lookup', date_trunc('hour', now() - interval '1 hour'), 2)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := audit.CloseReadBuckets(ctx, st.Pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := audit.Drain(ctx, st.Pool, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyAuditCmd(ctx, config.Config{}, st, nil); err != nil {
+		t.Fatalf("intact buckets must verify: %v", err)
+	}
+	// Tamper under a disabled trigger; the CLI must fail loudly.
+	if _, err := st.Pool.Exec(ctx, `ALTER TABLE audit_read_buckets DISABLE TRIGGER audit_read_buckets_no_edit`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE audit_read_buckets SET count = 99`); err != nil {
+		t.Fatal(err)
+	}
+	err := verifyAuditCmd(ctx, config.Config{}, st, nil)
+	if err == nil || !strings.Contains(err.Error(), "read buckets BROKEN") {
+		t.Fatalf("bucket tamper must fail verify-audit, got %v", err)
+	}
+}
+
+func TestBootstrapCmdGuards(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	if err := bootstrapCmd(ctx, cfg, st, []string{"-unattended"}); err == nil {
+		t.Fatal("unattended without a credential file must be refused BEFORE creating anything")
+	}
+	if err := bootstrapCmd(ctx, cfg, st, []string{"-unattended", "-credential-file", "/dev/stdout"}); err == nil {
+		t.Fatal("a stream credential target must be refused - it lands in logs")
+	}
+	if err := bootstrapCmd(ctx, cfg, st, []string{"-ttl", "not-a-ttl"}); err == nil {
+		t.Fatal("an unparseable ttl must be refused")
+	}
+	if err := bootstrapCmd(ctx, cfg, st, []string{"-bogus"}); err == nil {
+		t.Fatal("unknown flag must error")
+	}
+	var n int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM clients`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("refused bootstraps must create no clients, found %d", n)
+	}
+}
+
+func TestSealerLoopSurvivesDeadPool(t *testing.T) {
+	st := testutil.NewDB(t)
+	cfg := testCfg(t)
+	cfg.AuditSealing = audit.ModeAsync
+	cfg.AuditSealBatch = 100
+	cfg.AuditSealInterval = 50 * time.Millisecond
+	cfg.AuditSealDelay = 100 * time.Millisecond
+	st.Close() // every SealOnce now errors: the loop must log and keep going
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- sealerCmd(ctx, cfg, st, nil) }()
+	time.Sleep(250 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("cancelled sealer must exit clean even after DB errors: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("sealer did not exit on cancel")
+	}
+}

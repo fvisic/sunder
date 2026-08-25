@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/service"
@@ -126,7 +127,9 @@ func (e *faultEnv) adminOTI() *service.OTI {
 }
 
 func TestAuditDeniedBlocksEveryFlow(t *testing.T) {
-	e := newFaultEnv(t, "audit")
+	// Both audit stores are denied: reads fail closed against the bucket
+	// table under the default mode and against the chain otherwise.
+	e := newFaultEnv(t, "audit", "audit_read_buckets")
 	ctx := context.Background()
 	cid := e.register(t)
 
@@ -421,5 +424,50 @@ func TestGDPRRemainingBranches(t *testing.T) {
 	e3 := newFaultEnv(t, "retention_policies")
 	if _, _, err := service.RunRetention(ctx, e3.gdpr.Pool); err == nil {
 		t.Fatal("retention must surface a policy-read failure")
+	}
+}
+
+// TestBucketPathsFailClosedUnderDeniedRole: the same restricted-role fault
+// injection, aimed at the P4.2 tables - the closer and the verifier must
+// surface permission failures, never report an hour closed or intact.
+func TestBucketPathsFailClosedUnderDeniedRole(t *testing.T) {
+	e := newFaultEnv(t, "audit_read_buckets")
+	ctx := context.Background()
+	if _, err := audit.CloseReadBuckets(ctx, e.svc.Pool); err == nil {
+		t.Fatal("closing buckets without table rights must error")
+	}
+	if _, _, _, err := audit.VerifyReadBuckets(ctx, e.svc.Pool); err == nil {
+		t.Fatal("verifying buckets without table rights must error")
+	}
+}
+
+// TestEraseFailsClosedWhenErasureTablesDenied: erasure is the operation a
+// regulator asks about; a permissions regression must fail it loudly, not
+// half-erase.
+func TestEraseFailsClosedWhenErasureTablesDenied(t *testing.T) {
+	e := newFaultEnv(t, "erasures")
+	ctx := context.Background()
+	cid := e.register(t)
+	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err == nil {
+		t.Fatal("erase must fail when the erasures table is denied")
+	}
+	// And nothing was tombstoned by the failed attempt.
+	var erased bool
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT erased_at IS NOT NULL FROM persons LIMIT 1`).Scan(&erased); err != nil {
+		t.Fatal(err)
+	}
+	if erased {
+		t.Fatal("a failed erase must not leave a tombstone")
+	}
+}
+
+func TestEraseFailsClosedWhenTokensDenied(t *testing.T) {
+	e := newFaultEnv(t, "person_tokens")
+	ctx := context.Background()
+	// register needs person_tokens too, so seed via the admin service.
+	cid := e.register(t)
+	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err == nil {
+		t.Fatal("erase must fail when search tokens cannot be deleted")
 	}
 }

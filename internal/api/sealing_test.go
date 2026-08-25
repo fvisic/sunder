@@ -285,3 +285,72 @@ func TestSealerLoopSurvivesTransientDBFailure(t *testing.T) {
 	cancel()
 	time.Sleep(60 * time.Millisecond)
 }
+
+// TestBucketCloserLoopClosesFinishedHours drives the in-process closer the
+// way serve runs it, including survival of a transient DB failure.
+func TestBucketCloserLoopClosesFinishedHours(t *testing.T) {
+	pinMode(t, audit.ModeAsync)
+	old := audit.ReadsMode()
+	audit.SetReadsMode(audit.ReadsBucketed)
+	t.Cleanup(func() { audit.SetReadsMode(old) })
+
+	st := testutil.NewDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count)
+		VALUES ('crm','agent-1','CID-A','lookup', date_trunc('hour', now() - interval '1 hour'), 4)`); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Listen: ":0", Keystore: "file", KeystorePath: t.TempDir(),
+		AuditSealing: audit.ModeAsync, AuditSealInterval: 50 * time.Millisecond,
+		AuditSealDelay: 100 * time.Millisecond, AuditSealBatch: 100}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.closerInterval = 50 * time.Millisecond // test seam: a minute is too slow for CI
+	if err := srv.startAuditSealing(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var n int64
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT count(*) FROM audit WHERE action='audit.reads_hourly'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("closer loop never closed the finished hour")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestBucketCloserSurvivesDBFailure mirrors the sealer-loop resilience
+// test for the closer: a DB blip must be logged, never fatal.
+func TestBucketCloserSurvivesDBFailure(t *testing.T) {
+	pinMode(t, audit.ModeAsync)
+	old := audit.ReadsMode()
+	audit.SetReadsMode(audit.ReadsBucketed)
+	t.Cleanup(func() { audit.SetReadsMode(old) })
+	st := testutil.NewDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv, err := New(config.Config{Listen: ":0", Keystore: "file", KeystorePath: t.TempDir(),
+		AuditSealing: audit.ModeAsync, AuditSealInterval: 50 * time.Millisecond,
+		AuditSealDelay: 100 * time.Millisecond, AuditSealBatch: 100}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.closerInterval = 50 * time.Millisecond
+	if err := srv.startAuditSealing(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	time.Sleep(60 * time.Millisecond)
+}

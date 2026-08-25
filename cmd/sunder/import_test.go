@@ -1,0 +1,233 @@
+package main
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/fvisic/sunder/internal/api"
+	"github.com/fvisic/sunder/internal/audit"
+	"github.com/fvisic/sunder/internal/auth"
+	"github.com/fvisic/sunder/internal/crypto"
+	"github.com/fvisic/sunder/internal/service"
+	"github.com/fvisic/sunder/internal/testutil"
+)
+
+// TestImportCmd drives the supported bulk path end to end: import, verify
+// the rows resolve through the SAME service code the API uses (the whole
+// point - imported contacts must be indistinguishable from registered
+// ones), prove idempotency, and check the batch audit record.
+func TestImportCmd(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+
+	f := filepath.Join(t.TempDir(), "contacts.jsonl")
+	if err := os.WriteFile(f, []byte(`
+{"email":"ana@example.com","name":"Ana Anic","attributes":{"tier":"gold"}}
+{"phone":"+385 91 111 2222","attributes":{"segment":"b2b"}}
+{"email":"ivo@example.com","phone":"+385 91 333 4444"}
+{"email":"ana@example.com","attributes":{"tier":"silver"}}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// First run: 3 imported (the 4th line is an in-file duplicate of ana).
+	if err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm", "-batch", "2"}); err != nil {
+		t.Fatal(err)
+	}
+	var persons, tokens, cids int64
+	if err := st.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM persons), (SELECT count(*) FROM person_tokens), (SELECT count(*) FROM cids)`,
+	).Scan(&persons, &tokens, &cids); err != nil {
+		t.Fatal(err)
+	}
+	// ana: email+name, phone-only: phone, ivo: email+phone -> 5 tokens.
+	if persons != 3 || cids != 3 || tokens != 5 {
+		t.Fatalf("want 3 persons / 3 cids / 5 tokens, got %d/%d/%d", persons, cids, tokens)
+	}
+
+	// Second run of the SAME file: nothing imported, everything skipped -
+	// re-running after an interruption must be safe.
+	if err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM persons`).Scan(&persons); err != nil {
+		t.Fatal(err)
+	}
+	if persons != 3 {
+		t.Fatalf("re-import must be idempotent, persons = %d", persons)
+	}
+
+	// The imported contact resolves through the SERVICE lookup path with
+	// the same keys the importer used.
+	eng := api.OpenEngine(cfg)
+	ring := &service.KeyRing{Pool: st.Pool}
+	contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: crypto.NewPIIBox(eng), Ring: ring}
+	client := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActLookup, auth.ActAttributesRead}, AllowedPurposes: []string{"support"}}
+	cid, err := contacts.Lookup(ctx, client, service.LookupInput{Email: "Ana@Example.com"})
+	if err != nil || cid == "" {
+		t.Fatalf("imported contact must resolve via the API path: %q %v", cid, err)
+	}
+	val, err := contacts.GetAttribute(ctx, client, cid, "tier", "support")
+	if err != nil || val != "gold" {
+		t.Fatalf("attribute of imported contact: %q %v (first line wins, in-file dup skipped)", val, err)
+	}
+
+	// Each batch left ONE chained audit record.
+	if _, err := audit.Drain(ctx, st.Pool, 100); err != nil {
+		t.Fatal(err)
+	}
+	var imports int64
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit WHERE action='contacts.import'`).Scan(&imports); err != nil {
+		t.Fatal(err)
+	}
+	// Run 1 with batch=2: two batches; run 2: one batch (3 rows < 5000).
+	if imports != 3 {
+		t.Fatalf("want 3 contacts.import audit records, got %d", imports)
+	}
+	if broken, reason, _, err := audit.Verify(ctx, st.Pool); err != nil || broken != 0 {
+		t.Fatalf("chain after import: broken=%d err=%v (%s)", broken, err, reason)
+	}
+}
+
+func TestImportCmdFailsClosedOnBadInput(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	write := func(content string) string {
+		t.Helper()
+		f := filepath.Join(t.TempDir(), "bad.jsonl")
+		if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+
+	if err := importCmd(ctx, cfg, st, []string{"-file", write(`{"email":}`), "-scope", "crm"}); err == nil {
+		t.Fatal("malformed JSON must abort with the line number")
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", write(`{"name":"No Identifier"}`), "-scope", "crm"}); err == nil {
+		t.Fatal("a line without email or phone must abort")
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", write(`{"email":"x@example.com","attributes":{"email":"forged"}}`), "-scope", "crm"}); err == nil {
+		t.Fatal("reserved attribute names must abort")
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-scope", "crm"}); err == nil {
+		t.Fatal("missing -file must abort")
+	}
+	// Nothing may have landed from any failed run.
+	var persons int64
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM persons`).Scan(&persons); err != nil {
+		t.Fatal(err)
+	}
+	if persons != 0 {
+		t.Fatalf("failed imports must import nothing, found %d persons", persons)
+	}
+}
+
+func TestImportCmdFlagGuards(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	if err := importCmd(ctx, cfg, st, []string{"-file", "/does/not/exist.jsonl", "-scope", "crm"}); err == nil {
+		t.Fatal("missing file must error")
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", "x", "-scope", "crm", "-batch", "0"}); err == nil {
+		t.Fatal("non-positive batch must error")
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-bogus"}); err == nil {
+		t.Fatal("unknown flag must error")
+	}
+}
+
+// TestImportBatchRetryOnUniqueRace: two rows with the SAME identifier
+// token inside one batch slip past the stage-level dedup (importCmd's
+// in-file dedup normally prevents this; the race with a concurrent writer
+// produces the same DB state). The unique index fires, the batch retries
+// once, and the persistent conflict surfaces as an error instead of a
+// partial import.
+func TestImportBatchRetryOnUniqueRace(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	rows := []importRow{
+		{pid: "6f000000-0000-4000-8000-000000000001", cid: "CID-AAAAAAAAAAAAAAAAAAAAAAAAA1",
+			emailTok: "tok-same", blob: []byte("b"), keyID: "v1", alg: "aes256gcm"},
+		{pid: "6f000000-0000-4000-8000-000000000002", cid: "CID-AAAAAAAAAAAAAAAAAAAAAAAAA2",
+			emailTok: "tok-same", blob: []byte("b"), keyID: "v1", alg: "aes256gcm"},
+	}
+	if _, _, err := importBatch(ctx, st, "crm", "v1", "v1", "v1", rows); err == nil {
+		t.Fatal("a persistent unique conflict must surface after the retry")
+	}
+	// The failed batch imported nothing (whole-batch transactionality).
+	var persons int64
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM persons`).Scan(&persons); err != nil {
+		t.Fatal(err)
+	}
+	if persons != 0 {
+		t.Fatalf("failed batch must land nothing, found %d", persons)
+	}
+}
+
+func TestImportBatchSurfacesCopyErrors(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	rows := []importRow{{pid: "not-a-uuid", cid: "CID-X", emailTok: "t", blob: []byte("b"), keyID: "v1", alg: "aes256gcm"}}
+	if _, _, err := importBatch(ctx, st, "crm", "v1", "v1", "v1", rows); err == nil {
+		t.Fatal("a malformed staged row must surface, not vanish")
+	}
+}
+
+func TestImportCmdRejectsBadIdentifiers(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	write := func(content string) string {
+		t.Helper()
+		f := filepath.Join(t.TempDir(), "bad.jsonl")
+		if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", write(`{"email":"not-an-email"}`), "-scope", "crm"}); err == nil {
+		t.Fatal("unnormalizable email must abort with the line number")
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", write(`{"phone":"abc"}`), "-scope", "crm"}); err == nil {
+		t.Fatal("unnormalizable phone must abort")
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", write(`{"email":"a@b.example","attributes":{"x@y":"1"}}`), "-scope", "crm"}); err == nil {
+		t.Fatal("attribute with '@' must abort")
+	}
+}
+
+func TestImportCmdReadsStdin(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	f := filepath.Join(t.TempDir(), "stdin.jsonl")
+	if err := os.WriteFile(f, []byte(`{"email":"pipe@example.com"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fh, err := os.Open(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fh.Close()
+	old := os.Stdin
+	os.Stdin = fh
+	t.Cleanup(func() { os.Stdin = old })
+	if err := importCmd(ctx, cfg, st, []string{"-file", "-", "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM persons`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("stdin import landed %d persons", n)
+	}
+}

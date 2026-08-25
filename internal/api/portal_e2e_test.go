@@ -597,3 +597,17 @@ func TestPortalDataSurfacesStorageFailure(t *testing.T) {
 		t.Fatal("failed response must not carry a scopes field at all")
 	}
 }
+
+func TestPortalRejectsMalformedBodies(t *testing.T) {
+	e := newPortalEnv(t)
+	e.register(t, "citizen@example.com")
+	session := e.login(t, "citizen@example.com")
+	// Garbage JSON on authenticated portal routes: 400, not a panic and
+	// not a silently ignored request.
+	if rec, _ := e.call(t, session, "POST", "/portal/api/consent", `{"granted":`); rec.Code != 400 {
+		t.Fatalf("consent with garbage body: %d", rec.Code)
+	}
+	if rec, _ := e.call(t, session, "POST", "/portal/api/erase/confirm", `{`); rec.Code != 400 {
+		t.Fatalf("erase/confirm with garbage body: %d", rec.Code)
+	}
+}
