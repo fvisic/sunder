@@ -39,3 +39,21 @@ func TestSplitSeries(t *testing.T) {
 		t.Fatalf("plain: %q %q", n, l)
 	}
 }
+
+func TestGaugeRendersCurrentValue(t *testing.T) {
+	r := New()
+	r.Set("sunder_audit_unsealed_rows", 42)
+	r.Set("sunder_audit_unsealed_rows", 7) // last write wins: a level, not a sum
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, nil)
+	body := rec.Body.String()
+	if !strings.Contains(body, "# TYPE sunder_audit_unsealed_rows gauge") {
+		t.Fatalf("missing gauge TYPE line:\n%s", body)
+	}
+	if !strings.Contains(body, "sunder_audit_unsealed_rows 7") {
+		t.Fatalf("gauge must render its latest value:\n%s", body)
+	}
+	if strings.Contains(body, "sunder_audit_unsealed_rows 42") {
+		t.Fatal("stale gauge value must not accumulate")
+	}
+}

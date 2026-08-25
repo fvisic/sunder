@@ -21,15 +21,17 @@ type histogram struct {
 	total  uint64
 }
 
-// Registry collects counters and latency histograms; safe for concurrent use.
+// Registry collects counters, gauges and latency histograms; safe for
+// concurrent use.
 type Registry struct {
 	mu       sync.Mutex
 	counters map[string]uint64
+	gauges   map[string]float64
 	hists    map[string]*histogram
 }
 
 func New() *Registry {
-	return &Registry{counters: map[string]uint64{}, hists: map[string]*histogram{}}
+	return &Registry{counters: map[string]uint64{}, gauges: map[string]float64{}, hists: map[string]*histogram{}}
 }
 
 // Inc increments a counter. series is the full name with labels,
@@ -57,6 +59,14 @@ func (r *Registry) Observe(base string, seconds float64) {
 	}
 	h.sum += seconds
 	h.total++
+	r.mu.Unlock()
+}
+
+// Set records the current value of a gauge - a level, not an accumulation
+// (e.g. `sunder_audit_unsealed_rows`). Last write wins.
+func (r *Registry) Set(series string, value float64) {
+	r.mu.Lock()
+	r.gauges[series] = value
 	r.mu.Unlock()
 }
 
@@ -91,6 +101,20 @@ func (r *Registry) ServeHTTP(hw http.ResponseWriter, _ *http.Request) {
 			seen[name] = true
 		}
 		fmt.Fprintf(w, "%s %d\n", series, r.counters[series])
+	}
+
+	gnames := make([]string, 0, len(r.gauges))
+	for k := range r.gauges {
+		gnames = append(gnames, k)
+	}
+	sort.Strings(gnames)
+	for _, series := range gnames {
+		name, _ := splitSeries(series)
+		if !seen[name] {
+			fmt.Fprintf(w, "# TYPE %s gauge\n", name)
+			seen[name] = true
+		}
+		fmt.Fprintf(w, "%s %g\n", series, r.gauges[series])
 	}
 
 	hnames := make([]string, 0, len(r.hists))

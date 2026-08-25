@@ -74,6 +74,7 @@ func TestVerifyAnchorsDetectsRewrittenHistory(t *testing.T) {
 	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "lookup"}); err != nil {
 		t.Fatal(err)
 	}
+	sealAll(t, s) // anchoring stamps the SEALED head; in async mode that needs a seal pass
 	// Simulate an anchor whose root no longer exists in the chain - exactly
 	// what a full-chain rewrite leaves behind.
 	orphan := "beef000000000000000000000000000000000000000000000000000000000000"
@@ -116,6 +117,7 @@ func TestAnchorAgainstRealTSA(t *testing.T) {
 	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "lookup"}); err != nil {
 		t.Fatal(err)
 	}
+	sealAll(t, s) // anchoring stamps the SEALED head; in async mode that needs a seal pass
 	if testing.Short() {
 		t.Skip("short mode")
 	}
@@ -150,6 +152,7 @@ func TestVerifyAnchorsExposesDeletedDBAnchors(t *testing.T) {
 	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "lookup"}); err != nil {
 		t.Fatal(err)
 	}
+	sealAll(t, s) // anchoring stamps the SEALED head; in async mode that needs a seal pass
 	head, err := Head(ctx, s.Pool)
 	if err != nil {
 		t.Fatal(err)

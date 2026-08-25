@@ -124,6 +124,11 @@ func TestAnchorAndVerifyAuditCmds(t *testing.T) {
 	if err := audit.Append(ctx, st.Pool, audit.Entry{ClientID: "test", Action: "seed"}); err != nil {
 		t.Fatal(err)
 	}
+	// Anchoring stamps the SEALED head; in async mode the fresh row must be
+	// sealed first or there is nothing to anchor.
+	if _, err := audit.Drain(ctx, st.Pool, 100); err != nil {
+		t.Fatal(err)
+	}
 	fixture, err := os.ReadFile("../../internal/audit/testdata/freetsa-sample.tsr")
 	if err != nil {
 		t.Fatal(err)
@@ -281,6 +286,9 @@ func TestVerifyAuditCmdFullSuccessWithStub(t *testing.T) {
 	st := testutil.NewDB(t)
 	ctx := context.Background()
 	if err := audit.Append(ctx, st.Pool, audit.Entry{ClientID: "test", Action: "seed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := audit.Drain(ctx, st.Pool, 100); err != nil { // anchor needs a sealed head
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
@@ -645,5 +653,82 @@ func TestWebhookURLValidation(t *testing.T) {
 		if err := validWebhookURL(bad); err == nil {
 			t.Errorf("%s must be rejected", bad)
 		}
+	}
+}
+
+func TestSealerCmd(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	cfg.AuditSealing = audit.ModeAsync
+	cfg.AuditSealBatch = 100
+	cfg.AuditSealInterval = 50 * time.Millisecond
+	cfg.AuditSealDelay = 100 * time.Millisecond
+
+	old := audit.Mode()
+	audit.SetMode(audit.ModeAsync)
+	t.Cleanup(func() { audit.SetMode(old) })
+
+	for i := 0; i < 3; i++ {
+		if err := audit.Append(ctx, st.Pool, audit.Entry{ClientID: "crm", Action: "lookup"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// -once drains the backlog and exits: the cron / pre-switch shape.
+	if err := sealerCmd(ctx, cfg, st, []string{"-once"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := audit.UnsealedCount(ctx, st.Pool); err != nil || n != 0 {
+		t.Fatalf("sealer -once left %d unsealed (err=%v)", n, err)
+	}
+
+	// A sealer under sync mode is a misconfiguration, not a silent no-op:
+	// someone believes sealing is delegated while sync seals inline.
+	cfg.AuditSealing = audit.ModeSync
+	if err := sealerCmd(ctx, cfg, st, []string{"-once"}); err == nil {
+		t.Fatal("sealer with SUNDER_AUDIT_SEALING=sync must refuse")
+	}
+
+	// The loop form: runs until cancelled, seals as rows appear.
+	cfg.AuditSealing = audit.ModeAsync
+	loopCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- sealerCmd(loopCtx, cfg, st, nil) }()
+	if err := audit.Append(ctx, st.Pool, audit.Entry{ClientID: "crm", Action: "lookup"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		n, err := audit.UnsealedCount(ctx, st.Pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("sealer loop did not seal: %d pending", n)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("cancelled sealer loop must exit clean: %v", err)
+	}
+}
+
+func TestSealerCmdGuards(t *testing.T) {
+	st := testutil.NewDB(t)
+	cfg := testCfg(t)
+	cfg.AuditSealing = audit.ModeAsync
+	cfg.AuditSealBatch = 100
+	if err := sealerCmd(context.Background(), cfg, st, []string{"-bogus"}); err == nil {
+		t.Fatal("unknown flag must error")
+	}
+	// A dead pool during -once must surface, not report success.
+	st.Close()
+	if err := sealerCmd(context.Background(), cfg, st, []string{"-once"}); err == nil {
+		t.Fatal("sealer -once on a dead pool must error")
 	}
 }
