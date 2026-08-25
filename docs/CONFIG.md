@@ -74,13 +74,34 @@ it in either direction.
 | `SUNDER_AUDIT_SEAL_BATCH` | `5000` | >= `100` | Rows per sealing transaction: one lock acquisition and one fsync per batch. |
 | `SUNDER_AUDIT_SEAL_EXTERNAL` | `false` | boolean | `true`: this process seals nothing; run `sunder sealer` separately. The point is privilege separation (same pattern as the P2.1 signer split): give the sealer a DB role that may UPDATE only `prev_hash`/`hash`/`chain_seq` on `audit`, and the API a role with INSERT but no UPDATE - a compromised API then cannot forge hashes over its own rows. Rejected together with `sync`. |
 
+**Why async is the default.** The advisory lock that sync mode takes on
+every audited operation was measured as the whole throughput ceiling of
+the system (benchmark/README.md): ~420 rps instance-wide regardless of
+data size, hardware or concurrency, with negative scaling at high client
+counts. Async sealing removes that ceiling (4.3x at c=32 on the same
+26.8M dataset, still climbing at c=64) while keeping every guarantee
+except one: a row's chain hash exists ~2s after the fact instead of at
+commit. What survives in the window: the row itself is written in the
+same transaction as the operation (fail closed - an operation that cannot
+be audited does not happen), and the append-only trigger blocks every
+edit. What is given up in the window: DELETING an unsealed row breaks no
+hash, so an attacker with DBA-level access (enough to defeat the trigger)
+has seconds instead of one row of deniability. Deployments where that
+window is unacceptable set `sync` and accept the measured ceiling - the
+mode exists precisely so this is the operator's choice, and both modes
+run the full test suite in CI.
+
 Mode changes are restart-only, deliberately: two modes live in one process
 would mean part of the traffic locking and part not, with no clean
 boundary. `sync -> async` needs nothing. `async -> sync` is handled by the
 server itself: startup drains every unsealed row **before** the listeners
 open, so no record is ever left outside the chain by the switch (covered
-by `TestModeSwitchRestartLosesNothing`). `sunder sealer -once` drains the
-backlog from a cron job or by hand; `sunder verify-audit` always prints
+by `TestModeSwitchRestartLosesNothing`). When switching a multi-replica
+deployment to sync, stop ALL replicas first: a lingering async replica
+whose transaction commits after the new instance's startup drain leaves
+that row outside the chain until the next drain (`sunder verify-audit`
+fails visibly on exactly this state under sync). `sunder sealer -once`
+drains the backlog from a cron job or by hand; `sunder verify-audit` always prints
 the active mode and the pending count; the `sunder_audit_unsealed_rows`
 gauge is the alarm for a stalled sealer.
 

@@ -345,6 +345,12 @@ func verifyAuditCmd(ctx context.Context, cfg config.Config, st *store.Store, arg
 	// append-only trigger and enter the chain on the sealer's next pass.
 	fmt.Printf("audit chain: intact (sealing mode %s, %d unsealed rows pending)\n",
 		audit.Mode(), pending)
+	// Under sync mode, though, pending rows cannot be in-flight work: sync
+	// seals at insert and the server drains before serving. A backlog here
+	// means rows stranded outside the chain - fail visibly, with the fix.
+	if audit.Mode() == audit.ModeSync && pending > 0 {
+		return fmt.Errorf("%d unsealed rows under sync sealing: these are outside the chain and will not seal on their own; run `sunder sealer -once` with SUNDER_AUDIT_SEALING=async to drain them", pending)
+	}
 
 	caFile := resolveCA(*caFlag, cfg)
 	if *anchorsDir == "" && cfg.AnchorDir != "" {

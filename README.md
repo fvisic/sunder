@@ -88,7 +88,15 @@ carries both runs, the measured lock contention, and the design options.
   consent-checked, audited *before* the value is released.
 - **Audit you can prove** - append-only hash chain, anchored to an
   RFC 3161 timestamp authority, exported off-host and cross-checked:
-  a privileged database attacker cannot silently rewrite history.
+  a privileged database attacker cannot silently rewrite history. Two
+  write modes: **async sealing** (default) keeps the chain off the
+  request path - measured on a 26.8M-contact dataset it takes lookup
+  from a flat ~420 rps ceiling to 1,959 rps and still climbing, at the
+  price of a ~2s window in which fresh rows are trigger-protected but
+  not yet hash-chained; **sync** seals every row at insert (zero window,
+  serialized throughput) for deployments that want the strictest
+  posture. The trade-off is measured and documented, not hidden:
+  `docs/THREAT-MODEL.md` ("Audit sealing window").
 - **Keys that actually rotate** - versioned HMAC/KEK/signing keys,
   dual-key lookup window, batch rekey, retirement; file, Vault and
   PKCS#11 keystore drivers.
@@ -102,7 +110,7 @@ carries both runs, the measured lock contention, and the design options.
 
 | Path | Contents |
 |---|---|
-| `cmd/sunder`, `internal/` | the service + CLI (`serve`, `signer`, `bootstrap`, `migrate`, `client create/rotate-secret`, `keys rotate/rekey/retire`, `anchor`, `verify-audit`, `webhook`, `retention`, `dsr`, `issuer`) |
+| `cmd/sunder`, `internal/` | the service + CLI (`serve`, `signer`, `bootstrap`, `migrate`, `client create/rotate-secret`, `keys rotate/rekey/retire`, `anchor`, `verify-audit`, `webhook`, `retention`, `dsr`, `issuer`, `sealer`) |
 | `api/` | OpenAPI 3.1 contract (also served at `/openapi.yaml`) + Postman collection |
 | `sdks/` | the six SDKs (Go, TypeScript, Python, PHP, Java, .NET), each with a mock-server test suite |
 | `demo/` | narrated demos: lookup + one-time handoff, escalation e-mail handoff |
