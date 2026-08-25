@@ -192,3 +192,71 @@ func TestPortalConfig(t *testing.T) {
 		t.Fatal("SUNDER_PORTAL_LISTEN without SUNDER_PORTAL_ENABLED must be rejected")
 	}
 }
+
+func TestAuditSealingDefaults(t *testing.T) {
+	t.Setenv("SUNDER_DB_URL", "postgres://localhost/sunder")
+	// The CI matrix exports SUNDER_AUDIT_SEALING for the whole process;
+	// this test is about the DEFAULT, so the variable must be absent.
+	t.Setenv("SUNDER_AUDIT_SEALING", "")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AuditSealing != "async" {
+		t.Fatalf("default sealing mode = %q, want async", c.AuditSealing)
+	}
+	if c.AuditSealInterval != 200*time.Millisecond {
+		t.Fatalf("default seal interval = %s", c.AuditSealInterval)
+	}
+	if c.AuditSealDelay != 2*time.Second {
+		t.Fatalf("default seal delay = %s", c.AuditSealDelay)
+	}
+	if c.AuditSealBatch != 5000 {
+		t.Fatalf("default seal batch = %d", c.AuditSealBatch)
+	}
+	if c.AuditSealExternal {
+		t.Fatal("external sealer must be opt-in")
+	}
+}
+
+func TestAuditSealingValidation(t *testing.T) {
+	t.Setenv("SUNDER_DB_URL", "postgres://localhost/sunder")
+
+	t.Setenv("SUNDER_AUDIT_SEALING", "eventually")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("unknown sealing mode must be rejected")
+	}
+	t.Setenv("SUNDER_AUDIT_SEALING", "sync")
+	if _, err := FromEnv(); err != nil {
+		t.Fatalf("sync mode must be accepted: %v", err)
+	}
+
+	// External sealer combined with sync is a contradiction: sync seals
+	// inline, so "someone else seals" would silently mean "nobody checks".
+	t.Setenv("SUNDER_AUDIT_SEAL_EXTERNAL", "true")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("external+sync must be rejected")
+	}
+	t.Setenv("SUNDER_AUDIT_SEALING", "async")
+	if _, err := FromEnv(); err != nil {
+		t.Fatalf("external+async must be accepted: %v", err)
+	}
+	t.Setenv("SUNDER_AUDIT_SEAL_EXTERNAL", "")
+
+	t.Setenv("SUNDER_AUDIT_SEAL_INTERVAL", "10ms") // below the 50ms floor
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("interval below range must be rejected")
+	}
+	t.Setenv("SUNDER_AUDIT_SEAL_INTERVAL", "")
+
+	t.Setenv("SUNDER_AUDIT_SEAL_DELAY", "10m") // above the 5m ceiling
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("delay above range must be rejected")
+	}
+	t.Setenv("SUNDER_AUDIT_SEAL_DELAY", "")
+
+	t.Setenv("SUNDER_AUDIT_SEAL_BATCH", "50") // below the 100 floor
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("batch below 100 must be rejected")
+	}
+}

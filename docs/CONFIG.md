@@ -59,6 +59,31 @@ notes before changing it.
 | `SUNDER_WEBHOOK_MAX_ATTEMPTS` | `10` | ≥ `1` | Failed deliveries before an erasure event is marked `FAILED` (audited). A higher cap tolerates flakier receivers but lets one dead endpoint occupy the retry queue longer. |
 | `SUNDER_DELIVER_INTERVAL` | `1m` | `5s`–`1h` | Cadence of the background webhook retry worker. `Erase` always attempts one inline delivery regardless. |
 
+## Audit sealing (P4.1)
+
+How audit records enter the hash chain. This is the one setting with a
+measured order-of-magnitude throughput effect, and it is a **security
+trade-off**: read `docs/THREAT-MODEL.md` ("Audit chain") before changing
+it in either direction.
+
+| Variable | Default | Range | Description |
+|---|---|---|---|
+| `SUNDER_AUDIT_SEALING` | `async` | `async` \| `sync` | `async`: audited operations INSERT unsealed rows with no lock; a sealer chains them within `interval + delay`. Removes the instance-wide serialization (298 -> 4,114 tps on the audit write path at c=32 in the 26.8M-contact scale test). Opens a sealing window: a row is tamper-evident against edits from birth (trigger), but its chain hash exists only after sealing. `sync`: pre-P4.1 behaviour - chain lock inside the business transaction, hash at insert, zero window, serialized throughput. |
+| `SUNDER_AUDIT_SEAL_INTERVAL` | `200ms` | `50ms`-`30s` | Sealer cadence. Shorter narrows the sealing window and spends more sealer transactions. |
+| `SUNDER_AUDIT_SEAL_DELAY` | `2s` | `100ms`-`5m` | How long a row must settle before sealing. Not a correctness knob (a late-committing row enters the chain late rather than being lost - `chain_seq` handles commit-order races); it only keeps chain order close to wall-clock order. |
+| `SUNDER_AUDIT_SEAL_BATCH` | `5000` | >= `100` | Rows per sealing transaction: one lock acquisition and one fsync per batch. |
+| `SUNDER_AUDIT_SEAL_EXTERNAL` | `false` | boolean | `true`: this process seals nothing; run `sunder sealer` separately. The point is privilege separation (same pattern as the P2.1 signer split): give the sealer a DB role that may UPDATE only `prev_hash`/`hash`/`chain_seq` on `audit`, and the API a role with INSERT but no UPDATE - a compromised API then cannot forge hashes over its own rows. Rejected together with `sync`. |
+
+Mode changes are restart-only, deliberately: two modes live in one process
+would mean part of the traffic locking and part not, with no clean
+boundary. `sync -> async` needs nothing. `async -> sync` is handled by the
+server itself: startup drains every unsealed row **before** the listeners
+open, so no record is ever left outside the chain by the switch (covered
+by `TestModeSwitchRestartLosesNothing`). `sunder sealer -once` drains the
+backlog from a cron job or by hand; `sunder verify-audit` always prints
+the active mode and the pending count; the `sunder_audit_unsealed_rows`
+gauge is the alarm for a stalled sealer.
+
 ## Privacy portal
 
 The self-service portal is **off by default**: an upgrade must never

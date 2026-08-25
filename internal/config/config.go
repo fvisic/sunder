@@ -62,6 +62,18 @@ type Config struct {
 	WebhookTimeout     time.Duration // SUNDER_WEBHOOK_TIMEOUT: per-delivery HTTP timeout, default "5s", range [1s, 5m]
 	WebhookMaxAttempts int           // SUNDER_WEBHOOK_MAX_ATTEMPTS: failed deliveries before FAILED, default 10, min 1
 	DeliverInterval    time.Duration // SUNDER_DELIVER_INTERVAL: background webhook retry cadence, default "1m", range [5s, 1h]
+
+	// Audit sealing (P4.1). "async" keeps the instance-wide chain lock off
+	// the request path: audited operations INSERT unsealed rows and a
+	// single sealer chains them shortly after. "sync" is the pre-P4.1
+	// behaviour - lock in the business transaction, hash immediate, zero
+	// sealing window. This is a security trade-off, not a preference: see
+	// docs/THREAT-MODEL.md ("Audit chain") before changing either way.
+	AuditSealing      string        // SUNDER_AUDIT_SEALING: "async" (default) or "sync"
+	AuditSealInterval time.Duration // SUNDER_AUDIT_SEAL_INTERVAL: sealer cadence, default "200ms", range [50ms, 30s]
+	AuditSealDelay    time.Duration // SUNDER_AUDIT_SEAL_DELAY: how long a row must settle before it may be sealed, default "2s", range [100ms, 5m]
+	AuditSealBatch    int           // SUNDER_AUDIT_SEAL_BATCH: rows per sealing transaction, default 5000, min 100
+	AuditSealExternal bool          // SUNDER_AUDIT_SEAL_EXTERNAL=true: this process runs no sealer; a separate `sunder sealer` process does
 }
 
 func getenv(key, def string) string {
@@ -170,6 +182,25 @@ func FromEnvNoDB() (Config, error) {
 	raw := getenv("SUNDER_WEBHOOK_MAX_ATTEMPTS", "10")
 	if c.WebhookMaxAttempts, err = strconv.Atoi(raw); err != nil || c.WebhookMaxAttempts < 1 {
 		return c, fmt.Errorf("SUNDER_WEBHOOK_MAX_ATTEMPTS: %q must be an integer >= 1", raw)
+	}
+
+	c.AuditSealing = getenv("SUNDER_AUDIT_SEALING", "async")
+	if c.AuditSealing != "async" && c.AuditSealing != "sync" {
+		return c, fmt.Errorf("SUNDER_AUDIT_SEALING must be \"async\" or \"sync\", got %q", c.AuditSealing)
+	}
+	if c.AuditSealInterval, err = getdur("SUNDER_AUDIT_SEAL_INTERVAL", "200ms", 50*time.Millisecond, 30*time.Second); err != nil {
+		return c, err
+	}
+	if c.AuditSealDelay, err = getdur("SUNDER_AUDIT_SEAL_DELAY", "2s", 100*time.Millisecond, 5*time.Minute); err != nil {
+		return c, err
+	}
+	rawBatch := getenv("SUNDER_AUDIT_SEAL_BATCH", "5000")
+	if c.AuditSealBatch, err = strconv.Atoi(rawBatch); err != nil || c.AuditSealBatch < 100 {
+		return c, fmt.Errorf("SUNDER_AUDIT_SEAL_BATCH: %q must be an integer >= 100", rawBatch)
+	}
+	c.AuditSealExternal = os.Getenv("SUNDER_AUDIT_SEAL_EXTERNAL") == "true"
+	if c.AuditSealExternal && c.AuditSealing == "sync" {
+		return c, fmt.Errorf("SUNDER_AUDIT_SEAL_EXTERNAL is meaningless with SUNDER_AUDIT_SEALING=sync (sync mode seals inline and runs no sealer)")
 	}
 	return c, nil
 }

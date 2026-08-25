@@ -48,10 +48,10 @@ func main() {
 
 func run(cmd string, args []string) error {
 	switch cmd {
-	case "serve", "migrate", "client", "keys", "anchor", "verify-audit", "webhook", "retention", "dsr", "signer", "issuer", "bootstrap":
+	case "serve", "migrate", "client", "keys", "anchor", "verify-audit", "webhook", "retention", "dsr", "signer", "issuer", "bootstrap", "sealer":
 	default:
 		// Fail on typos before requiring config or a live database.
-		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr, signer, issuer, bootstrap)", cmd)
+		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr, signer, issuer, bootstrap, sealer)", cmd)
 	}
 
 	ctx, stop := signalContext()
@@ -71,6 +71,9 @@ func run(cmd string, args []string) error {
 	if err != nil {
 		return err
 	}
+	// One authority for the write mode: the parsed (validated) config, not
+	// the raw environment the audit package fell back to at init.
+	audit.SetMode(cfg.AuditSealing)
 	st, err := store.New(ctx, cfg.DBURL)
 	if err != nil {
 		return err
@@ -89,6 +92,8 @@ func run(cmd string, args []string) error {
 		return srv.Run(ctx)
 	case "migrate":
 		return st.Migrate(ctx)
+	case "sealer":
+		return sealerCmd(ctx, cfg, st, args)
 	case "keys":
 		return keysCmd(ctx, cfg, st, args)
 	case "anchor":
@@ -327,14 +332,19 @@ func verifyAuditCmd(ctx context.Context, cfg config.Config, st *store.Store, arg
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
-	broken, reason, err := audit.Verify(ctx, st.Pool)
+	broken, reason, pending, err := audit.Verify(ctx, st.Pool)
 	if err != nil {
 		return err
 	}
 	if broken != 0 {
-		return fmt.Errorf("audit chain BROKEN at seq %d: %s", broken, reason)
+		return fmt.Errorf("audit chain BROKEN at chain position %d: %s", broken, reason)
 	}
-	fmt.Println("audit chain: intact")
+	// The sealing window must never be discoverable only by reading code:
+	// the mode and the pending count are printed on every verification.
+	// Pending rows are information, not a break - they are protected by the
+	// append-only trigger and enter the chain on the sealer's next pass.
+	fmt.Printf("audit chain: intact (sealing mode %s, %d unsealed rows pending)\n",
+		audit.Mode(), pending)
 
 	caFile := resolveCA(*caFlag, cfg)
 	if *anchorsDir == "" && cfg.AnchorDir != "" {
@@ -881,5 +891,54 @@ func validWebhookURL(raw string) error {
 		return fmt.Errorf("plain http webhook URLs are allowed for loopback only, got host %q", host)
 	default:
 		return fmt.Errorf("webhook URL must be https:// (http:// allowed for loopback only)")
+	}
+}
+
+// sealerCmd runs the audit sealer as its own process
+// (SUNDER_AUDIT_SEAL_EXTERNAL=true on the API side). The point of the
+// split is privilege separation, same pattern as the P2.1 signer: give
+// this process a DB role that may UPDATE only prev_hash/hash/chain_seq on
+// audit, and the API a role with INSERT but no UPDATE - then a
+// compromised API cannot forge hashes over its own rows.
+func sealerCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
+	fs := flag.NewFlagSet("sealer", flag.ContinueOnError)
+	once := fs.Bool("once", false, "drain the backlog and exit (for cron or a pre-switch drain)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if cfg.AuditSealing == audit.ModeSync {
+		return fmt.Errorf("SUNDER_AUDIT_SEALING=sync seals at insert; a sealer process has nothing to do")
+	}
+	// No Migrate here: the sealer's restricted role may lack DDL rights,
+	// and a sealer must never be the thing that alters the schema.
+
+	if *once {
+		n, err := audit.Drain(ctx, st.Pool, cfg.AuditSealBatch)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("sealed %d row(s)\n", n)
+		return nil
+	}
+
+	fmt.Printf("sealer: interval %s, delay %s, batch %d\n",
+		cfg.AuditSealInterval, cfg.AuditSealDelay, cfg.AuditSealBatch)
+	ticker := time.NewTicker(cfg.AuditSealInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if _, err := audit.SealOnce(ctx, st.Pool, cfg.AuditSealBatch, cfg.AuditSealDelay); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				// Log and keep going: a transient DB error must not kill
+				// the one process whose absence silently grows the
+				// unsealed window.
+				fmt.Fprintln(os.Stderr, "sealer:", err)
+			}
+		}
 	}
 }

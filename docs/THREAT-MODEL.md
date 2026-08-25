@@ -103,13 +103,53 @@ Scale is not a factor either: lookup throughput is flat from 1M to 20M
 contacts, and the index probe itself is 0.046 ms of a 4.99 ms request.
 
 This is a deliberate trade, not a defect: the linear chain is what makes
-silent tampering detectable, and a lock is what keeps it linear. It is
-recorded here because it is a capacity limit an operator must plan for,
-and because it is invisible on fast local storage - a laptop reaches
-roughly 2,700 ops/sec on the same path and never meets the plateau.
+silent tampering detectable, and a lock is what keeps it linear. What
+changed in P4.1 is WHEN the chain is built, not whether.
 
-Availability consequence: an instance fronting a high-volume public path
-needs faster storage, or one of the chain-design changes listed in
-`benchmark/README.md` (per-scope chains, batched appends, or an
-out-of-transaction append log), each of which gives up something the
-current design guarantees.
+## Audit sealing window (P4.1, default since this change)
+
+`SUNDER_AUDIT_SEALING=async` (the default) takes the chain lock off the
+request path: audited operations INSERT rows unsealed (no `hash`,
+`prev_hash`, `chain_seq`) and a single sealer chains them in batches,
+within roughly `SUNDER_AUDIT_SEAL_DELAY` + `SUNDER_AUDIT_SEAL_INTERVAL`
+(2.2s at defaults). The resulting chain is bit-identical to one built
+synchronously, and a chain built partly in each mode verifies as one.
+
+**What an attacker gains.** An unsealed row is protected against edits
+from birth - the append-only trigger allows exactly one transition,
+filling the three seal columns with all hashed content bit-identical, and
+nothing else, ever. What the window changes is DELETION: removing an
+unsealed row breaks no hash, because the row is not in the chain yet.
+
+- Before P4.1 this exposure existed for exactly one row (the newest;
+  deleting the chain tail is invisible to hash verification and is what
+  anchoring exists to catch).
+- After P4.1 it covers every row in the sealing window: at 4,000 rps and
+  default settings, up to roughly 8,000 rows.
+
+**Who can use it.** Deleting the row still requires defeating the
+append-only trigger - DBA-level access, the same actor who could already
+truncate the tail before anchoring. The fail-closed property is
+unchanged in both modes: an operation whose audit INSERT fails does not
+happen.
+
+**Mitigations, in order of strength:**
+
+- `SUNDER_AUDIT_SEALING=sync`: the zero-window mode, at the measured
+  serialized throughput (~300-460 rps instance-wide). Choose per
+  deployment; the switch is restart-only and the server drains the
+  backlog before serving when switched to sync (tested in both
+  directions).
+- `SUNDER_AUDIT_SEAL_EXTERNAL=true` + a split DB role: the API role gets
+  INSERT but no UPDATE on `audit`; the `sunder sealer` role gets UPDATE
+  on the three seal columns only. A compromised API can then insert lies
+  but can never seal them itself nor forge hashes over its own rows -
+  STRONGER than the pre-P4.1 single-role setup.
+- Shorter `SUNDER_AUDIT_SEAL_INTERVAL`/`DELAY` narrow the window at the
+  cost of more sealer transactions.
+- The `sunder_audit_unsealed_rows` gauge is the alarm: a stalled sealer
+  is an incident, because the window grows without bound while it is
+  down. `sunder verify-audit` prints the mode and the pending count on
+  every run; pending rows are reported as pending, never as a break.
+- Anchoring (M5) stamps only the sealed head, so an anchor never
+  vouches for rows the chain cannot yet prove.

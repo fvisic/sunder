@@ -15,6 +15,7 @@ import (
 	"time"
 
 	apispec "github.com/fvisic/sunder/api"
+	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/crypto"
@@ -232,6 +233,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 // TLS is enabled when a cert/key pair is configured; a configured client CA
 // enforces full mTLS (connections without a valid client cert are refused).
 func (s *Server) Run(ctx context.Context) error {
+	if err := s.startAuditSealing(ctx); err != nil {
+		return err
+	}
 	srv := &http.Server{
 		Addr:              s.Cfg.Listen,
 		Handler:           s.Handler(),
@@ -371,4 +375,97 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = shutdown()
 		return err
 	}
+}
+
+// startAuditSealing applies the configured sealing mode (P4.1). The mode
+// and whether this process seals are logged unconditionally: the sealing
+// window is a security property and must never be discoverable only by
+// reading code.
+func (s *Server) startAuditSealing(ctx context.Context) error {
+	// An unset mode (Config literal built in tests, not via FromEnv) must
+	// not override the process mode the environment selected - the CI
+	// matrix runs the whole suite under SUNDER_AUDIT_SEALING=async|sync.
+	if s.Cfg.AuditSealing != "" {
+		audit.SetMode(s.Cfg.AuditSealing)
+	}
+	if s.Store == nil {
+		// A server can be built without a store (config-validation tests);
+		// nothing to seal and nothing to drain against.
+		return nil
+	}
+
+	if audit.Mode() == audit.ModeSync {
+		// The async -> sync switch: unsealed rows left by a previous async
+		// run must be drained BEFORE serving, or the first synchronous
+		// append would chain onto the sealed head and strand them above it.
+		n, err := audit.Drain(ctx, s.Store.Pool, s.sealBatch())
+		if err != nil {
+			return fmt.Errorf("audit drain before sync serving: %w", err)
+		}
+		if n > 0 {
+			s.Log.Info("audit backlog drained for sync mode", "sealed", n)
+		}
+		s.Log.Info("audit sealing", "mode", "sync", "window", "none (sealed at insert)")
+		if s.Metrics != nil {
+			s.Metrics.Set("sunder_audit_unsealed_rows", 0)
+		}
+		return nil
+	}
+
+	sealsHere := !s.Cfg.AuditSealExternal
+	s.Log.Info("audit sealing", "mode", "async",
+		"interval", s.sealInterval().String(), "delay", s.sealDelay().String(),
+		"batch", s.sealBatch(), "seals_in_this_process", sealsHere)
+	if !sealsHere {
+		return nil // `sunder sealer` owns the loop; we only run in async write mode
+	}
+
+	go func() {
+		ticker := time.NewTicker(s.sealInterval())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := audit.SealOnce(ctx, s.Store.Pool, s.sealBatch(), s.sealDelay()); err != nil {
+					if ctx.Err() == nil {
+						s.Log.Error("audit sealing", "err", err.Error())
+					}
+					continue
+				}
+				if s.Metrics != nil {
+					if n, err := audit.UnsealedCount(ctx, s.Store.Pool); err == nil {
+						// The operational alarm for a stalled sealer: this
+						// gauge growing without bound IS the incident.
+						s.Metrics.Set("sunder_audit_unsealed_rows", float64(n))
+					}
+				}
+			}
+		}
+	}()
+	return nil
+}
+
+// Config defaults are re-applied here because tests construct Config
+// literals without going through FromEnv.
+func (s *Server) sealInterval() time.Duration {
+	if s.Cfg.AuditSealInterval <= 0 {
+		return 200 * time.Millisecond
+	}
+	return s.Cfg.AuditSealInterval
+}
+
+func (s *Server) sealDelay() time.Duration {
+	if s.Cfg.AuditSealDelay <= 0 {
+		return 2 * time.Second
+	}
+	return s.Cfg.AuditSealDelay
+}
+
+func (s *Server) sealBatch() int {
+	if s.Cfg.AuditSealBatch <= 0 {
+		return 5000
+	}
+	return s.Cfg.AuditSealBatch
 }

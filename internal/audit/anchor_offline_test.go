@@ -90,6 +90,7 @@ func TestAnchorFullFlowWithFakeTSA(t *testing.T) {
 	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "lookup"}); err != nil {
 		t.Fatal(err)
 	}
+	sealAll(t, s) // anchoring stamps the SEALED head; in async mode that needs a seal pass
 	srv := fakeTSA(t, 200, fixture(t))
 	outDir := t.TempDir()
 
@@ -136,6 +137,7 @@ func TestAnchorErrorBranches(t *testing.T) {
 	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "seed"}); err != nil {
 		t.Fatal(err)
 	}
+	sealAll(t, s) // anchoring stamps the SEALED head; in async mode that needs a seal pass
 	// TSA returns garbage: TokenTime fails, nothing is stored.
 	garbage := fakeTSA(t, 200, []byte("this is not a DER token"))
 	if _, _, err := Anchor(ctx, s.Pool, garbage.URL, "", t.TempDir()); err == nil {
@@ -187,7 +189,7 @@ func TestAppendOnDeadPool(t *testing.T) {
 	if err := Append(context.Background(), s.Pool, Entry{ClientID: "x", Action: "y"}); err == nil {
 		t.Fatal("append on dead pool must error")
 	}
-	if _, _, err := Verify(context.Background(), s.Pool); err == nil {
+	if _, _, _, err := Verify(context.Background(), s.Pool); err == nil {
 		t.Fatal("verify on dead pool must error")
 	}
 	if _, err := Head(context.Background(), s.Pool); err == nil {
@@ -207,6 +209,7 @@ func TestVerifyAnchorsFileStates(t *testing.T) {
 	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "seed"}); err != nil {
 		t.Fatal(err)
 	}
+	sealAll(t, s) // anchoring stamps the SEALED head; in async mode that needs a seal pass
 	head, err := Head(ctx, s.Pool)
 	if err != nil {
 		t.Fatal(err)
@@ -302,6 +305,7 @@ func TestAnchorSuccessWithCA(t *testing.T) {
 	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "seed"}); err != nil {
 		t.Fatal(err)
 	}
+	sealAll(t, s) // anchoring stamps the SEALED head; in async mode that needs a seal pass
 	stubOpenSSL(t, `case "$*" in
 *-query*) printf 'QUERYBYTES' ;;
 *-reply*) echo 'Time stamp: Aug 22 10:00:00 2026 GMT' ;;
@@ -353,6 +357,7 @@ func TestAnchorEnvironmentErrors(t *testing.T) {
 	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "seed"}); err != nil {
 		t.Fatal(err)
 	}
+	sealAll(t, s) // anchoring stamps the SEALED head; in async mode that needs a seal pass
 	srv := fakeTSA(t, 200, fixture(t))
 
 	// A CA path that does not exist is an ENVIRONMENT error, never a
