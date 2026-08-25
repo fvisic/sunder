@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/service"
 )
 
@@ -195,5 +196,39 @@ func TestDerivedTokenPathsFailClosedWithoutKeys(t *testing.T) {
 	if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
 		PhoneSuffix: "0911234567"}); err == nil || errors.Is(err, service.ErrNotFound) {
 		t.Fatalf("suffix lookup without key access must error, not miss: %v", err)
+	}
+}
+
+// TestPhoneSuffixAmbiguityIsScopedToCaller is the review regression: a
+// person visible only to ANOTHER scope must not turn the caller's
+// unambiguous suffix hit into a miss - and must not be detectable through
+// that blocking either.
+func TestPhoneSuffixAmbiguityIsScopedToCaller(t *testing.T) {
+	e := searchEnv(t)
+	ctx := context.Background()
+
+	// The caller's contact.
+	cid, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+		Phone: "+385911234567", Name: "Ana Anić"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A colliding-suffix person who exists ONLY in the erp scope.
+	erp := &auth.Client{ID: "erp", Scope: "erp",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActLookup},
+		AllowedPurposes: []string{"support"}}
+	if _, err := e.svc.Register(ctx, erp, service.RegisterInput{
+		Phone: "+38111234567", Name: "Marko Babić"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// From the CRM the suffix is unambiguous and must hit.
+	got, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{PhoneSuffix: "11234567"})
+	if err != nil || got != cid {
+		t.Fatalf("foreign-scope collision must not block the caller's hit: %q %v", got, err)
+	}
+	// From the ERP likewise: its own single match resolves.
+	if got, err := e.svc.Lookup(ctx, erp, service.LookupInput{PhoneSuffix: "11234567"}); err != nil || got == "" || got == cid {
+		t.Fatalf("erp must resolve its own contact, not crm's: %q %v", got, err)
 	}
 }
