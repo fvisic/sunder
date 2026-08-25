@@ -21,5 +21,8 @@ DROP INDEX IF EXISTS person_tokens_person_idx;
 -- by many people and only ever narrow), so without a name index the name
 -- path collapses to a scan of every name row with the token as a filter.
 DROP INDEX IF EXISTS person_tokens_lookup_idx;
-CREATE INDEX person_tokens_name_idx ON person_tokens (kind, token)
+-- IF NOT EXISTS mirrors the IF EXISTS drops above: this migration was
+-- validated by applying it out-of-band during the 26.8M scale test, and a
+-- database in that state must converge, not fail.
+CREATE INDEX IF NOT EXISTS person_tokens_name_idx ON person_tokens (kind, token)
     WHERE kind = 'name';
