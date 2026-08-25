@@ -51,6 +51,20 @@ func (t *Tokenizer) NameToken(ctx context.Context, v, normalized string) (string
 	return t.token(ctx, KeyHMACName, v, normalized)
 }
 
+// NamePhoneticToken tokenizes one ph1 phonetic word code (F1). The "ph1"
+// domain prefix keeps phonetic tokens unlinkable to exact name tokens even
+// under the same key, and versions the reduction: a future ph2 gets its
+// own domain and coexists during a rollover.
+func (t *Tokenizer) NamePhoneticToken(ctx context.Context, v, code string) (string, error) {
+	return t.token(ctx, KeyHMACName, v, "ph1\x00"+code)
+}
+
+// PhoneSuffixToken tokenizes the last-8-digits key of a phone (F2), domain
+// separated from full-number tokens for the same reason.
+func (t *Tokenizer) PhoneSuffixToken(ctx context.Context, v, suffix string) (string, error) {
+	return t.token(ctx, KeyHMACPhone, v, "sfx1\x00"+suffix)
+}
+
 // NewCID returns a fresh pseudonym: "CID-" + 26 base32 chars of 16 random
 // bytes. Random, never derived from PII - nothing to reverse (docs/DESIGN.md).
 func NewCID() (string, error) {

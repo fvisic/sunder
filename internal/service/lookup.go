@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -19,6 +20,11 @@ type LookupInput struct {
 	Email string `json:"email"`
 	Phone string `json:"phone"`
 	Name  string `json:"name"`
+	// PhoneSuffix looks a contact up by the last digits of a phone number
+	// (>= 8 digits supplied; the last 8 are used). It answers ONLY when it
+	// narrows to exactly one person - a multi-hit is a miss, so partial
+	// lookup cannot enumerate. Requires SUNDER_SEARCH_PHONE_SUFFIX.
+	PhoneSuffix string `json:"phone_suffix"`
 	// UserID is the operator inside the calling system (client-asserted,
 	// see audit.Entry.UserID). Body field on this POST route; GET routes
 	// use the X-Sunder-User-Id header. When both are present, the body
@@ -33,7 +39,15 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 	if !client.Can(auth.ActLookup) {
 		return "", ErrForbidden
 	}
-	if in.Email == "" && in.Phone == "" {
+	if in.PhoneSuffix != "" {
+		if !c.PhoneSuffix {
+			return "", fmt.Errorf("%w: phone_suffix lookup is not enabled on this instance (SUNDER_SEARCH_PHONE_SUFFIX)", ErrValidation)
+		}
+		if in.Email != "" || in.Phone != "" {
+			return "", fmt.Errorf("%w: phone_suffix cannot be combined with email or phone - use the full identifier", ErrValidation)
+		}
+	}
+	if in.Email == "" && in.Phone == "" && in.PhoneSuffix == "" {
 		if in.Name != "" {
 			return "", fmt.Errorf("%w: name alone is not a lookup key; add email or phone", ErrValidation)
 		}
@@ -60,12 +74,38 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 			return "", err
 		}
 	}
+	var phoneticToks, suffixToks []string
 	if in.Name != "" {
 		norm, err := crypto.NormalizeName(in.Name)
 		if err != nil {
 			return "", fmt.Errorf("%w: %v", ErrValidation, err)
 		}
 		if nameToks, err = c.tokensAllVersions(ctx, crypto.KeyHMACName, norm, c.Tok.NameToken); err != nil {
+			return "", err
+		}
+		if c.FuzzyName {
+			for _, code := range crypto.PhoneticNameCodes(norm) {
+				toks, err := c.tokensAllVersions(ctx, crypto.KeyHMACName, code, c.Tok.NamePhoneticToken)
+				if err != nil {
+					return "", err
+				}
+				phoneticToks = append(phoneticToks, toks...)
+			}
+		}
+	}
+	if in.PhoneSuffix != "" {
+		digits := strings.Map(func(r rune) rune {
+			if r >= '0' && r <= '9' {
+				return r
+			}
+			return -1
+		}, in.PhoneSuffix)
+		if len(digits) < 8 {
+			return "", fmt.Errorf("%w: phone_suffix needs at least 8 digits", ErrValidation)
+		}
+		var err error
+		if suffixToks, err = c.tokensAllVersions(ctx, crypto.KeyHMACPhone,
+			crypto.PhoneSuffix("+"+digits), c.Tok.PhoneSuffixToken); err != nil {
 			return "", err
 		}
 	}
@@ -80,7 +120,10 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 	if in.Email == "" {
 		by, primary = "phone", phoneToks
 	}
-	q := `SELECT pt.person_id FROM person_tokens pt WHERE pt.kind = $1 AND pt.token = ANY($2)`
+	if in.PhoneSuffix != "" {
+		by, primary = "phone_suffix", suffixToks
+	}
+	q := `SELECT DISTINCT pt.person_id FROM person_tokens pt WHERE pt.kind = $1 AND pt.token = ANY($2)`
 	args := []any{by, primary}
 	narrow := func(kind string, toks []string) {
 		q += fmt.Sprintf(` AND (
@@ -95,14 +138,56 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 	}
 	if in.Name != "" {
 		by += "+name"
-		narrow("name", nameToks)
+		if len(phoneticToks) > 0 {
+			// Fuzzy narrowing: a person with name tokens passes on an
+			// exact OR a phonetic match; a person with none is not
+			// excluded (same soft semantics as exact narrowing).
+			q += fmt.Sprintf(` AND (
+				NOT EXISTS (SELECT 1 FROM person_tokens n WHERE n.person_id = pt.person_id AND n.kind IN ('name','name_phonetic'))
+				OR EXISTS (SELECT 1 FROM person_tokens n WHERE n.person_id = pt.person_id AND n.kind = 'name' AND n.token = ANY($%d))
+				OR EXISTS (SELECT 1 FROM person_tokens n WHERE n.person_id = pt.person_id AND n.kind = 'name_phonetic' AND n.token = ANY($%d)))`,
+				len(args)+1, len(args)+2)
+			args = append(args, nameToks, phoneticToks)
+		} else {
+			narrow("name", nameToks)
+		}
 	}
 
 	var personID string
-	err := c.Pool.QueryRow(ctx, q+" ORDER BY pt.person_id LIMIT 1", args...).Scan(&personID)
-	matched := err == nil
-	if err != nil && err != pgx.ErrNoRows {
-		return "", err
+	var matched, ambiguous bool
+	if in.PhoneSuffix != "" {
+		// Partial lookup answers only when unambiguous: two persons
+		// sharing the suffix (after narrowing) is a MISS, never a list
+		// and never a count - bulk-deny holds for partial search too.
+		rows, err := c.Pool.Query(ctx, q+" ORDER BY pt.person_id LIMIT 2", args...)
+		if err != nil {
+			return "", err
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return "", err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+		switch len(ids) {
+		case 1:
+			personID, matched = ids[0], true
+		case 2:
+			ambiguous = true
+		}
+	} else {
+		err := c.Pool.QueryRow(ctx, q+" ORDER BY pt.person_id LIMIT 1", args...).Scan(&personID)
+		matched = err == nil
+		if err != nil && err != pgx.ErrNoRows {
+			return "", err
+		}
 	}
 
 	// The scope query always runs (with an impossible person id on a miss) so
@@ -112,7 +197,7 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 		personID = "00000000-0000-0000-0000-000000000000"
 	}
 	cid := ""
-	err = c.Pool.QueryRow(ctx,
+	err := c.Pool.QueryRow(ctx,
 		`SELECT cid FROM cids WHERE person_id=$1 AND scope=$2`, personID, client.Scope).Scan(&cid)
 	if err == pgx.ErrNoRows {
 		matched, cid = false, ""
@@ -124,7 +209,7 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 	// falls back to a chained row otherwise (or when so configured).
 	if err := audit.ReadEvent(ctx, c.Pool, audit.Entry{
 		ClientID: client.ID, Action: "lookup", CID: cid, UserID: in.UserID,
-		Detail: map[string]any{"by": by, "matched": matched},
+		Detail: map[string]any{"by": by, "matched": matched, "ambiguous": ambiguous},
 	}); err != nil {
 		return "", fmt.Errorf("audit append: %w", err)
 	}

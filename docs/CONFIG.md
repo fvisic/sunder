@@ -165,6 +165,23 @@ with two differences in Sunder's favour: the record is tamper-evident and
 carries no raw values. The data subject is always the CID; `user_id` is
 never the person being looked up.
 
+## Derived search indexes (Phase 3, F1/F2)
+
+Both OFF by default: each widens the search surface and adds token rows
+per contact, and an upgrade must never do that silently. Enabling either
+on an existing dataset is "flip the variable, run `sunder keys rekey`" -
+the rekey sweep backfills the derived tokens from the encrypted blobs.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SUNDER_SEARCH_FUZZY_NAME` | `false` | Phonetic name narrowing: each word of a name is reduced to a versioned phonetic code ("ph1", built for Croatian: diacritics, dj/đ/d spellings, ije/je/e, vowel typos) and the CODE is HMAC-tokenized. A lookup's `name` then narrows on exact OR phonetic match. Names remain narrowing-only - never a primary key. |
+| `SUNDER_SEARCH_PHONE_SUFFIX` | `false` | Partial phone lookup: the last 8 digits of each number are HMAC-tokenized (domain-separated), and `POST /v1/lookup` accepts `phone_suffix` (>= 8 digits; national or international spelling both work). It answers ONLY when exactly one person matches after narrowing - a multi-hit is a miss, never a list and never a count, so bulk-deny holds for partial search too. Combine with `name` to disambiguate. |
+
+Cost when enabled: one extra HMAC and one extra index row per name word
+(max 4) and per phone at registration; the exact email/phone lookup path
+is untouched. The database stores only keyed HMACs of the derived values,
+never the values themselves.
+
 ## PostgreSQL sizing (P4.5)
 
 Stock Postgres defaults (128 MB `shared_buffers`) measure the defaults,

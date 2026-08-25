@@ -112,3 +112,43 @@ func TestUserIDAttributionEndToEnd(t *testing.T) {
 		t.Fatalf("Article 15 trail must include the bucketed lookup by agent-7, got %+v", trail)
 	}
 }
+
+// TestPhoneSuffixLookupOverHTTP: the F2 path end to end through the API,
+// with the config flags threaded from Config into the service.
+func TestPhoneSuffixLookupOverHTTP(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActLookup},
+		AllowedPurposes: []string{"support"}, RateLimit: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+		SearchFuzzyName: true, SearchPhoneSuffix: true}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+
+	rec, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{
+		"phone": "+385 91 123 4567", "name": "Ana Anić"})
+	if rec.Code != 201 && rec.Code != 200 {
+		t.Fatalf("register: %d %s", rec.Code, rec.Body.String())
+	}
+	cid := out["cid"]
+
+	// Caller-ID shape: national number in the body, fuzzy name beside it.
+	rec, out = e.do(t, cred, "POST", "/v1/lookup",
+		map[string]string{"phone_suffix": "0911234567", "name": "anic"})
+	if rec.Code != 200 || out["cid"] != cid {
+		t.Fatalf("suffix lookup over HTTP: %d %s", rec.Code, rec.Body.String())
+	}
+	// Validation surfaces as 400, not 404.
+	rec, _ = e.do(t, cred, "POST", "/v1/lookup", map[string]string{"phone_suffix": "123"})
+	if rec.Code != 400 {
+		t.Fatalf("short suffix must 400, got %d", rec.Code)
+	}
+}

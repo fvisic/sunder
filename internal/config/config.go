@@ -80,6 +80,13 @@ type Config struct {
 	// docs/THREAT-MODEL.md - tamper evidence for reads drops to hour
 	// granularity under "bucketed".
 	AuditReads string // SUNDER_AUDIT_READS: "bucketed" (default) or "chained"
+
+	// Derived search indexes (Phase 3, F1/F2). OFF by default: each one
+	// widens the search surface and adds token rows per contact, and an
+	// upgrade must never do that silently. Enabling later backfills
+	// existing contacts via `sunder keys rekey`.
+	SearchFuzzyName   bool // SUNDER_SEARCH_FUZZY_NAME=true: phonetic name narrowing (ph1)
+	SearchPhoneSuffix bool // SUNDER_SEARCH_PHONE_SUFFIX=true: last-8-digits phone lookup, single-hit
 }
 
 func getenv(key, def string) string {
@@ -205,6 +212,8 @@ func FromEnvNoDB() (Config, error) {
 		return c, fmt.Errorf("SUNDER_AUDIT_SEAL_BATCH: %q must be an integer >= 100", rawBatch)
 	}
 	c.AuditSealExternal = os.Getenv("SUNDER_AUDIT_SEAL_EXTERNAL") == "true"
+	c.SearchFuzzyName = os.Getenv("SUNDER_SEARCH_FUZZY_NAME") == "true"
+	c.SearchPhoneSuffix = os.Getenv("SUNDER_SEARCH_PHONE_SUFFIX") == "true"
 	c.AuditReads = getenv("SUNDER_AUDIT_READS", "bucketed")
 	if c.AuditReads != "bucketed" && c.AuditReads != "chained" {
 		return c, fmt.Errorf("SUNDER_AUDIT_READS must be \"bucketed\" or \"chained\", got %q", c.AuditReads)

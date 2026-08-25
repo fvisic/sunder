@@ -441,7 +441,7 @@ func TestNameNarrowingUsesItsOwnIndex(t *testing.T) {
 		}
 		plan += line + "\n"
 	}
-	if !strings.Contains(plan, "person_tokens_name_idx") {
+	if !strings.Contains(plan, "person_tokens_search_idx") {
 		t.Fatalf("name lookup no longer uses its index:\n%s", plan)
 	}
 }

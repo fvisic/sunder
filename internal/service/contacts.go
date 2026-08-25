@@ -33,6 +33,41 @@ type Contacts struct {
 	Tok  *crypto.Tokenizer
 	PII  *crypto.PIIBox
 	Ring *KeyRing
+	// Derived search indexes (Phase 3 F1/F2), off by default: each widens
+	// the search surface, so enabling is a per-deployment decision
+	// (SUNDER_SEARCH_FUZZY_NAME / SUNDER_SEARCH_PHONE_SUFFIX). Turning
+	// them on later backfills existing contacts via `sunder keys rekey`.
+	FuzzyName   bool
+	PhoneSuffix bool
+}
+
+// mintDerived tokenizes pre-derived values (phonetic codes, suffixes)
+// under the newest version of kind - derived kinds are write-and-match by
+// exact token, so no per-version match set is needed at registration.
+func (c *Contacts) mintDerived(ctx context.Context, kind string, values []string,
+	tokFn func(ctx context.Context, version, value string) (string, error)) (identSet, error) {
+	var set identSet
+	if len(values) == 0 {
+		return set, nil
+	}
+	newest, err := c.Ring.Newest(ctx, kind)
+	if err != nil {
+		return set, err
+	}
+	set.writeVer = newest
+	seen := map[string]bool{}
+	for _, v := range values {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		tok, err := tokFn(ctx, newest, v)
+		if err != nil {
+			return set, err
+		}
+		set.writeToks = append(set.writeToks, tok)
+	}
+	return set, nil
 }
 
 // tokensAllVersions computes the token under every live version of kind,
@@ -165,12 +200,28 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 	if err != nil {
 		return "", err
 	}
-	var nameSet identSet
+	var nameSet, phoneticSet, suffixSet identSet
 	if in.Name != "" {
-		if nameSet, _, err = c.buildIdents(ctx, crypto.KeyHMACName, []string{in.Name}, crypto.NormalizeName, c.Tok.NameToken); err != nil {
+		var nameNorm []string
+		if nameSet, nameNorm, err = c.buildIdents(ctx, crypto.KeyHMACName, []string{in.Name}, crypto.NormalizeName, c.Tok.NameToken); err != nil {
 			return "", err
 		}
 		attrs["name"] = in.Name
+		if c.FuzzyName && len(nameNorm) > 0 {
+			if phoneticSet, err = c.mintDerived(ctx, crypto.KeyHMACName,
+				crypto.PhoneticNameCodes(nameNorm[0]), c.Tok.NamePhoneticToken); err != nil {
+				return "", err
+			}
+		}
+	}
+	if c.PhoneSuffix && len(phoneNorm) > 0 {
+		suffixes := make([]string, 0, len(phoneNorm))
+		for _, ph := range phoneNorm {
+			suffixes = append(suffixes, crypto.PhoneSuffix(ph))
+		}
+		if suffixSet, err = c.mintDerived(ctx, crypto.KeyHMACPhone, suffixes, c.Tok.PhoneSuffixToken); err != nil {
+			return "", err
+		}
 	}
 	storeIndexed(attrs, "email", emailNorm)
 	storeIndexed(attrs, "phone", phoneNorm)
@@ -178,7 +229,7 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 	// Retry once: a concurrent identical registration can win the unique-
 	// index race; the second attempt then finds and reuses that person.
 	for attempt := 0; ; attempt++ {
-		cid, err = c.registerTx(ctx, client, emailSet, phoneSet, nameSet, attrs)
+		cid, err = c.registerTx(ctx, client, emailSet, phoneSet, nameSet, phoneticSet, suffixSet, attrs)
 		if err == nil {
 			break
 		}
@@ -217,7 +268,7 @@ func storeIndexed(attrs map[string]string, base string, values []string) {
 	}
 }
 
-func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet, phoneSet, nameSet identSet, attrs map[string]string) (string, error) {
+func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet, phoneSet, nameSet, phoneticSet, suffixSet identSet, attrs map[string]string) (string, error) {
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return "", err
@@ -256,7 +307,8 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet
 	for _, ins := range []struct {
 		kind string
 		set  identSet
-	}{{"email", emailSet}, {"phone", phoneSet}, {"name", nameSet}} {
+	}{{"email", emailSet}, {"phone", phoneSet}, {"name", nameSet},
+		{"name_phonetic", phoneticSet}, {"phone_suffix", suffixSet}} {
 		for _, tok := range ins.set.writeToks {
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO person_tokens (person_id, kind, token, key_version)
