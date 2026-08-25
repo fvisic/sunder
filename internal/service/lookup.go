@@ -125,6 +125,17 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 	}
 	q := `SELECT DISTINCT pt.person_id FROM person_tokens pt WHERE pt.kind = $1 AND pt.token = ANY($2)`
 	args := []any{by, primary}
+	if in.PhoneSuffix != "" {
+		// Single-hit is decided WITHIN the caller's scope: suffixes
+		// collide legitimately, and a person visible only to some other
+		// scope must neither block a hit that is unambiguous here (the
+		// CRM+ERP coexistence case) nor leak, via that blocking, that a
+		// colliding number exists somewhere else. The clause is part of
+		// the query on every outcome, so no timing split is introduced,
+		// and the always-run scope query below stays as the second check.
+		q += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM cids sc WHERE sc.person_id = pt.person_id AND sc.scope = $%d)`, len(args)+1)
+		args = append(args, client.Scope)
+	}
 	narrow := func(kind string, toks []string) {
 		q += fmt.Sprintf(` AND (
 			NOT EXISTS (SELECT 1 FROM person_tokens n WHERE n.person_id = pt.person_id AND n.kind = '%s')
