@@ -14,7 +14,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"strings"
 
 	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/crypto"
@@ -175,7 +174,7 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 		}
 	}
 
-	insert := func(kind string, values map[string]bool,
+	insert := func(rowKind string, values map[string]bool,
 		tokFn func(ctx context.Context, version, normalized string) (string, error), version string) error {
 		for v := range values {
 			tok, err := tokFn(ctx, version, v)
@@ -185,7 +184,7 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 			tag, err := c.Pool.Exec(ctx,
 				`INSERT INTO person_tokens (person_id, kind, token, key_version)
 				 VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
-				personID, strings.TrimPrefix(kind, "hmac-"), tok, version)
+				personID, rowKind, tok, version)
 			if err != nil {
 				return err
 			}
@@ -193,11 +192,37 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 		}
 		return nil
 	}
-	if err := insert(crypto.KeyHMACEmail, emails, c.Tok.EmailToken, newest[crypto.KeyHMACEmail]); err != nil {
+	if err := insert("email", emails, c.Tok.EmailToken, newest[crypto.KeyHMACEmail]); err != nil {
 		return err
 	}
-	if err := insert(crypto.KeyHMACPhone, phones, c.Tok.PhoneToken, newest[crypto.KeyHMACPhone]); err != nil {
+	if err := insert("phone", phones, c.Tok.PhoneToken, newest[crypto.KeyHMACPhone]); err != nil {
 		return err
 	}
-	return insert(crypto.KeyHMACName, names, c.Tok.NameToken, newest[crypto.KeyHMACName])
+	if err := insert("name", names, c.Tok.NameToken, newest[crypto.KeyHMACName]); err != nil {
+		return err
+	}
+	// Derived search tokens (F1/F2): the rekey sweep doubles as the
+	// BACKFILL path - enabling either feature on an existing dataset is
+	// "flip the config, run `sunder keys rekey`".
+	if c.FuzzyName {
+		codes := map[string]bool{}
+		for n := range names {
+			for _, code := range crypto.PhoneticNameCodes(n) {
+				codes[code] = true
+			}
+		}
+		if err := insert("name_phonetic", codes, c.Tok.NamePhoneticToken, newest[crypto.KeyHMACName]); err != nil {
+			return err
+		}
+	}
+	if c.PhoneSuffix {
+		suffixes := map[string]bool{}
+		for ph := range phones {
+			suffixes[crypto.PhoneSuffix(ph)] = true
+		}
+		if err := insert("phone_suffix", suffixes, c.Tok.PhoneSuffixToken, newest[crypto.KeyHMACPhone]); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -55,6 +55,8 @@ type importLine struct {
 type importRow struct {
 	pid, cid                    string
 	emailTok, phoneTok, nameTok any // nil when the identifier is absent
+	phoneticToks                []string
+	suffixTok                   any
 	blob                        []byte
 	keyID, alg                  string
 }
@@ -208,6 +210,22 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 				return err
 			}
 			row.nameTok, attrs["name"] = t, l.Name
+			if cfg.SearchFuzzyName {
+				for _, code := range crypto.PhoneticNameCodes(norm) {
+					pt, err := tok.NamePhoneticToken(ctx, nameV, code)
+					if err != nil {
+						return err
+					}
+					row.phoneticToks = append(row.phoneticToks, pt)
+				}
+			}
+		}
+		if cfg.SearchPhoneSuffix && row.phoneTok != nil {
+			st2, err := tok.PhoneSuffixToken(ctx, phoneV, crypto.PhoneSuffix(attrs["phone"]))
+			if err != nil {
+				return err
+			}
+			row.suffixTok = st2
 		}
 
 		// In-file duplicates: EITHER identifier repeating within the batch
@@ -285,19 +303,36 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 	if _, err := tx.Exec(ctx, `
 		CREATE TEMP TABLE import_stage (
 			pid uuid, cid text, email_tok text, phone_tok text, name_tok text,
-			blob bytea, key_id text, alg text
+			suffix_tok text, blob bytea, key_id text, alg text
 		) ON COMMIT DROP`); err != nil {
 		return 0, 0, err
 	}
+	// Phonetic word codes fan out per contact, so they stage in their own
+	// table and land via a JOIN on the surviving rows - a contact dropped
+	// by the dedup DELETE must not leave tokens behind.
+	if _, err := tx.Exec(ctx, `
+		CREATE TEMP TABLE import_stage_ph (pid uuid, tok text) ON COMMIT DROP`); err != nil {
+		return 0, 0, err
+	}
 	src := make([][]any, len(rows))
+	var phSrc [][]any
 	for i, r := range rows {
-		src[i] = []any{r.pid, r.cid, r.emailTok, r.phoneTok, r.nameTok, r.blob, r.keyID, r.alg}
+		src[i] = []any{r.pid, r.cid, r.emailTok, r.phoneTok, r.nameTok, r.suffixTok, r.blob, r.keyID, r.alg}
+		for _, pt := range r.phoneticToks {
+			phSrc = append(phSrc, []any{r.pid, pt})
+		}
 	}
 	staged, err := tx.CopyFrom(ctx, pgx.Identifier{"import_stage"},
-		[]string{"pid", "cid", "email_tok", "phone_tok", "name_tok", "blob", "key_id", "alg"},
+		[]string{"pid", "cid", "email_tok", "phone_tok", "name_tok", "suffix_tok", "blob", "key_id", "alg"},
 		pgx.CopyFromRows(src))
 	if err != nil {
 		return 0, 0, err
+	}
+	if len(phSrc) > 0 {
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"import_stage_ph"},
+			[]string{"pid", "tok"}, pgx.CopyFromRows(phSrc)); err != nil {
+			return 0, 0, err
+		}
 	}
 
 	// The dedup invariant: an email or phone identifies exactly one person.
@@ -319,7 +354,8 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 		return 0, 0, err
 	}
 	for _, ident := range []struct{ kind, col, ver string }{
-		{"email", "email_tok", emailV}, {"phone", "phone_tok", phoneV}, {"name", "name_tok", nameV},
+		{"email", "email_tok", emailV}, {"phone", "phone_tok", phoneV},
+		{"name", "name_tok", nameV}, {"phone_suffix", "suffix_tok", phoneV},
 	} {
 		if _, err := tx.Exec(ctx, fmt.Sprintf(`
 			INSERT INTO person_tokens (person_id, kind, token, key_version)
@@ -327,6 +363,13 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 			ident.kind, ident.col, ident.col), ident.ver); err != nil {
 			return 0, 0, err
 		}
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO person_tokens (person_id, kind, token, key_version)
+		SELECT p.pid, 'name_phonetic', p.tok, $1
+		  FROM import_stage_ph p JOIN import_stage s ON s.pid = p.pid
+		ON CONFLICT DO NOTHING`, nameV); err != nil {
+		return 0, 0, err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO cids (cid, person_id, scope, pii_encrypted, pii_key_id, pii_alg)

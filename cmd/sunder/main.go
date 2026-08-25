@@ -478,7 +478,8 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		}
 		pii := crypto.NewPIIBox(eng)
 		pii.Alg = cfg.PIIAlg
-		contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: pii, Ring: ring}
+		contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: pii, Ring: ring,
+			FuzzyName: cfg.SearchFuzzyName, PhoneSuffix: cfg.SearchPhoneSuffix}
 		stats, err := contacts.Rekey(ctx, *reenc, *batch)
 		if err != nil {
 			return err

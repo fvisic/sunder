@@ -9,6 +9,7 @@ import (
 	"github.com/fvisic/sunder/internal/api"
 	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
+	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/service"
 	"github.com/fvisic/sunder/internal/testutil"
@@ -261,5 +262,110 @@ func TestImportDedupsPerIdentifier(t *testing.T) {
 	// nothing. Two persons total, and no unique-index abort.
 	if persons != 2 {
 		t.Fatalf("want 2 persons (line 2 skipped whole by email), got %d", persons)
+	}
+}
+
+// TestImportMintsDerivedTokens: with F1/F2 enabled the importer mints
+// phonetic and suffix tokens, and skipped duplicate lines leave none.
+func TestImportMintsDerivedTokens(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	cfg.SearchFuzzyName = true
+	cfg.SearchPhoneSuffix = true
+	f := filepath.Join(t.TempDir(), "c.jsonl")
+	if err := os.WriteFile(f, []byte(
+		`{"email":"ana@example.com","phone":"+385911234567","name":"Ana Anić"}
+{"email":"ana@example.com","name":"Ana Anić Duplikat"}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+	var phonetic, suffix int64
+	if err := st.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM person_tokens WHERE kind='name_phonetic'),
+		(SELECT count(*) FROM person_tokens WHERE kind='phone_suffix')`).Scan(&phonetic, &suffix); err != nil {
+		t.Fatal(err)
+	}
+	// "Ana Anić" = 2 word codes; the duplicate line's tokens must NOT land.
+	if phonetic != 2 || suffix != 1 {
+		t.Fatalf("want 2 phonetic + 1 suffix token, got %d/%d", phonetic, suffix)
+	}
+
+	// The imported contact is findable through the fuzzy/partial paths of
+	// the same service the API uses.
+	eng := api.OpenEngine(cfg)
+	ring := &service.KeyRing{Pool: st.Pool}
+	contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: crypto.NewPIIBox(eng), Ring: ring,
+		FuzzyName: true, PhoneSuffix: true}
+	client := &auth.Client{ID: "crm", Scope: "crm", AllowedActions: []string{auth.ActLookup}}
+	if cid, err := contacts.Lookup(ctx, client, service.LookupInput{PhoneSuffix: "0911234567", Name: "anic"}); err != nil || cid == "" {
+		t.Fatalf("imported contact must resolve via suffix+fuzzy name: %q %v", cid, err)
+	}
+}
+
+// TestRekeyBackfillsDerivedTokens: enabling F1/F2 on an existing dataset
+// is "flip the config, run `sunder keys rekey`" - prove it.
+func TestRekeyBackfillsDerivedTokens(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t) // features OFF at import time
+	f := filepath.Join(t.TempDir(), "c.jsonl")
+	if err := os.WriteFile(f, []byte(`{"email":"ana@example.com","phone":"+385911234567","name":"Ana Anić"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM person_tokens WHERE kind IN ('name_phonetic','phone_suffix')`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("features off: no derived tokens expected, got %d", n)
+	}
+
+	// Flip the switches, run the rekey sweep: tokens appear.
+	cfg.SearchFuzzyName = true
+	cfg.SearchPhoneSuffix = true
+	if err := keysCmd(ctx, cfg, st, []string{"rekey", "-batch", "100"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM person_tokens WHERE kind IN ('name_phonetic','phone_suffix')`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 { // 2 phonetic word codes + 1 suffix
+		t.Fatalf("rekey must backfill derived tokens, got %d of 3", n)
+	}
+}
+
+func TestImportFailsClosedOnBrokenKeystore(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	// A keystore the importer cannot write to: key bootstrap must abort
+	// the import before a single row is read.
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	cfg := config.Config{Keystore: "file", KeystorePath: dir}
+	f := filepath.Join(t.TempDir(), "c.jsonl")
+	if err := os.WriteFile(f, []byte(`{"email":"x@example.com"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm"}); err == nil {
+		t.Fatal("a broken keystore must abort the import")
+	}
+	var n int64
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM persons`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("nothing may land after a keystore failure, found %d", n)
 	}
 }
