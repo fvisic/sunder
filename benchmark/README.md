@@ -135,6 +135,40 @@ storage and cache headroom for when P4.1 removes the plateau.
 
 Phase 4 in `PLAN.md` specifies the rest of the work these numbers imply.
 
+## P4.1 applied (2026-08-25): the ceiling is gone
+
+Same server, same 26.8M dataset, the only change being
+`SUNDER_AUDIT_SEALING=async` (the new default): audited operations INSERT
+unsealed audit rows with no lock and a batched sealer chains them within
+~2.2s. Lookup, before and after, side by side:
+
+| concurrency | before (rps) | after (rps) | after p50 | after p95 |
+|------------:|-------------:|------------:|----------:|----------:|
+| 1           | 160.4        | 110.6       |  7.99 ms  | 11.98 ms  |
+| 4           | 380.0        | 559.2       |  6.81 ms  | 11.55 ms  |
+| 8           | 423.6        | **1,183.0** |  5.74 ms  | 12.13 ms  |
+| 16          | 415.7        | **1,452.3** |  9.00 ms  | 20.87 ms  |
+| 32          | 449.2        | **1,773.0** | 14.93 ms  | 35.42 ms  |
+| 64          | (plateaued)  | **1,959.4** | 25.70 ms  | 64.01 ms  |
+
+The plateau is gone: throughput now scales with concurrency instead of
+flattening at ~420 rps, reaching **4.3x at c=32** and still climbing at
+c=64. Latency IMPROVED under load (p50 at c=8: 15.32 -> 5.74 ms) because
+requests queue on the pool, not on one advisory lock. Writes (full
+registration: person + tokens + blob + consents) went from the shared
+~460 rps ceiling to 750 rps at c=32, still scaling.
+
+Chain integrity under that load, measured, not assumed: 374,504 audit
+rows written during the sweeps, backlog of 1,303 unsealed rows drained to
+0 within 4 s of load stopping, `chain_seq` dense from 1 to 374,504, and
+`sunder verify-audit` reports the chain intact with 0 pending.
+
+The single-client number (110.6 vs 160.4 rps) is the one honest
+regression: p50 rose ~3 ms because the lookup's audit INSERT is a second
+statement on a connection that previously did its work under an
+already-held lock's shadow. It disappears into queueing gains from c=4
+up, and c=1 is not a deployment shape anyone runs.
+
 ## Result summary (2026-08-23, review pass 4 build, quieter machine)
 
 Re-measured on the pass-4 build with the machine largely free (load average
