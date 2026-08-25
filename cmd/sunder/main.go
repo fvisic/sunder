@@ -33,17 +33,21 @@ var signalContext = func() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 }
 
-func main() {
+func main() { os.Exit(cli(os.Args)) }
+
+// cli is main minus os.Exit, so the argv handling is testable.
+func cli(argv []string) int {
 	cmd := "serve"
 	var rest []string
-	if len(os.Args) > 1 {
-		cmd = os.Args[1]
-		rest = os.Args[2:]
+	if len(argv) > 1 {
+		cmd = argv[1]
+		rest = argv[2:]
 	}
 	if err := run(cmd, rest); err != nil {
 		fmt.Fprintln(os.Stderr, "sunder:", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func run(cmd string, args []string) error {

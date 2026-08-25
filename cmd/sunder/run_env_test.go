@@ -194,3 +194,15 @@ func TestGetenvDefaultFallsBackOnEmpty(t *testing.T) {
 		t.Fatalf("set env must win, got %q", got)
 	}
 }
+
+func TestCLIExitCodes(t *testing.T) {
+	if code := cli([]string{"sunder", "definitely-not-a-command"}); code != 1 {
+		t.Fatalf("unknown command must exit 1, got %d", code)
+	}
+	// No args defaults to serve, which without SUNDER_DB_URL fails config
+	// validation - exit 1, never a panic.
+	t.Setenv("SUNDER_DB_URL", "")
+	if code := cli([]string{"sunder"}); code != 1 {
+		t.Fatalf("serve without a database must exit 1, got %d", code)
+	}
+}
