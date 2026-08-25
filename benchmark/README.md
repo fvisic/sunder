@@ -296,3 +296,29 @@ done
 
 Laptop numbers are indicative; contractual targets run on the reference
 deployment (docs/DESIGN.md, performance targets).
+
+## Head-to-head re-run on the P4.1 build (2026-08-25)
+
+Same server, interleaved, zero errors both sides. Deliberately tilted
+AGAINST Sunder: Sunder answers over 20M contacts (dense id range of the
+scale dataset), Databunker over its own ~10k set, and Sunder does more
+per request (hash-chained audit, purpose and consent checks).
+
+| operation | Sunder | Databunker | delta |
+|---|---:|---:|---:|
+| lookup c=8  |   840.0 rps | 472.1 rps | +78% |
+| lookup c=32 | 1,134.8 rps | 772.5 rps | +47% |
+| lookup c=64 | 1,386.7 rps | 698.1 rps | +99% |
+| read  c=16  | 1,040.1 rps | 526.6 rps | +98% |
+| write c=8   |   382.6 rps | 290.9 rps | +32% |
+| write c=32  |   518.7 rps | 432.2 rps | +20% |
+
+p99 is 1.5-2.6x lower on every operation (read: 57.2 vs 149.9 ms). The
+pre-P4.1 server picture - Databunker overtaking Sunder past c=32 - is
+inverted: Sunder now scales past it at every point and the gap WIDENS
+with concurrency (Databunker declines from c=32 to c=64, Sunder climbs).
+
+Honesty note on the earlier 1,959 rps figure: that sweep drew from a
+26.8M keyspace whose top stripe had holes left by the interrupted bulk
+load, so ~8% of probes were misses - audited, full-cost lookups, but
+misses. The dense-keyspace numbers above are the ones to quote.
