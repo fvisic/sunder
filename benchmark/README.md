@@ -352,3 +352,26 @@ average ~1, zero errors both sides:
 |---|---:|---:|---:|
 | write c=8  |   377.7 rps | 277.8 rps | **+36%** |
 | write c=32 | 1,014.3 rps | 503.3 rps | **2.0x** |
+
+## F1+F2 enabled: the cost of fuzzy and partial search (2026-08-26)
+
+Same server, same 20M+ dataset, `SUNDER_SEARCH_FUZZY_NAME` and
+`SUNDER_SEARCH_PHONE_SUFFIX` both ON (they default off):
+
+| operation | measured | note |
+|---|---:|---|
+| lookup by exact email, c=8  | 2,196.2 rps | the path F1/F2 does not touch - fastest run yet |
+| lookup by exact email, c=32 | 3,362.7 rps | ditto |
+| write c=8  | 434.5 rps | inside the 378-1,014 band this host shows run to run |
+| write c=32 | 629.4 rps | ditto - the 2 extra HMACs + 2 index rows per contact are lost in host noise |
+
+Functional smoke on the same instance: a fresh contact registered as
+"Ivana Đurđević" / +385957779999 resolves over HTTP by
+`phone_suffix: "0957779999"` (national spelling) plus fuzzy
+`name: "ivana djurdjevic"` (dj spelling) to the same CID - the vCard
+caller-ID case end to end.
+
+Migration note for large datasets: applying 0023 revalidates the
+person_tokens kind constraint and rebuilds one partial index; on 53.6M
+token rows that took a few minutes of `sunder serve` startup. Plan the
+first deploy after this migration as a maintenance window at scale.
