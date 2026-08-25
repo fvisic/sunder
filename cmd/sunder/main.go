@@ -48,10 +48,10 @@ func main() {
 
 func run(cmd string, args []string) error {
 	switch cmd {
-	case "serve", "migrate", "client", "keys", "anchor", "verify-audit", "webhook", "retention", "dsr", "signer", "issuer", "bootstrap", "sealer":
+	case "serve", "migrate", "client", "keys", "anchor", "verify-audit", "webhook", "retention", "dsr", "signer", "issuer", "bootstrap", "sealer", "import":
 	default:
 		// Fail on typos before requiring config or a live database.
-		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr, signer, issuer, bootstrap, sealer)", cmd)
+		return fmt.Errorf("unknown command %q (available: serve, migrate, client, keys, anchor, verify-audit, webhook, retention, dsr, signer, issuer, bootstrap, sealer, import)", cmd)
 	}
 
 	ctx, stop := signalContext()
@@ -71,9 +71,10 @@ func run(cmd string, args []string) error {
 	if err != nil {
 		return err
 	}
-	// One authority for the write mode: the parsed (validated) config, not
+	// One authority for the write modes: the parsed (validated) config, not
 	// the raw environment the audit package fell back to at init.
 	audit.SetMode(cfg.AuditSealing)
+	audit.SetReadsMode(cfg.AuditReads)
 	st, err := store.New(ctx, cfg.DBURL)
 	if err != nil {
 		return err
@@ -94,6 +95,8 @@ func run(cmd string, args []string) error {
 		return st.Migrate(ctx)
 	case "sealer":
 		return sealerCmd(ctx, cfg, st, args)
+	case "import":
+		return importCmd(ctx, cfg, st, args)
 	case "keys":
 		return keysCmd(ctx, cfg, st, args)
 	case "anchor":
@@ -345,6 +348,17 @@ func verifyAuditCmd(ctx context.Context, cfg config.Config, st *store.Store, arg
 	// append-only trigger and enter the chain on the sealer's next pass.
 	fmt.Printf("audit chain: intact (sealing mode %s, %d unsealed rows pending)\n",
 		audit.Mode(), pending)
+	// Read buckets (P4.2): every sealed hour's digest is recomputed from
+	// the stored buckets and checked against its chained hourly row.
+	badHour, bucketReason, pendingHours, err := audit.VerifyReadBuckets(ctx, st.Pool)
+	if err != nil {
+		return err
+	}
+	if badHour != "" {
+		return fmt.Errorf("read buckets BROKEN for hour %s: %s", badHour, bucketReason)
+	}
+	fmt.Printf("read buckets: intact (read mode %s, %d finished hours awaiting close)\n",
+		audit.ReadsMode(), pendingHours)
 	// Under sync mode, though, pending rows cannot be in-flight work: sync
 	// seals at insert and the server drains before serving. A backlog here
 	// means rows stranded outside the chain - fail visibly, with the fix.
@@ -923,12 +937,16 @@ func sealerCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 		if err != nil {
 			return err
 		}
-		fmt.Printf("sealed %d row(s)\n", n)
+		hours, err := audit.CloseReadBuckets(ctx, st.Pool)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("sealed %d row(s), closed %d finished bucket hour(s)\n", n, hours)
 		return nil
 	}
 
-	fmt.Printf("sealer: interval %s, delay %s, batch %d\n",
-		cfg.AuditSealInterval, cfg.AuditSealDelay, cfg.AuditSealBatch)
+	fmt.Printf("sealer: interval %s, delay %s, batch %d, reads %s\n",
+		cfg.AuditSealInterval, cfg.AuditSealDelay, cfg.AuditSealBatch, audit.ReadsMode())
 	ticker := time.NewTicker(cfg.AuditSealInterval)
 	defer ticker.Stop()
 	for {
@@ -944,6 +962,14 @@ func sealerCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 				// the one process whose absence silently grows the
 				// unsealed window.
 				fmt.Fprintln(os.Stderr, "sealer:", err)
+				continue
+			}
+			// The external sealer owns bucket closing too (with
+			// SUNDER_AUDIT_SEAL_EXTERNAL=true the server runs neither
+			// loop). Closing an already-closed backlog is a cheap
+			// try-locked no-op, so sharing the sealing cadence is fine.
+			if _, err := audit.CloseReadBuckets(ctx, st.Pool); err != nil && ctx.Err() == nil {
+				fmt.Fprintln(os.Stderr, "sealer (bucket close):", err)
 			}
 		}
 	}

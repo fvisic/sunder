@@ -135,3 +135,51 @@ mail-bomb a chosen victim. On the portal surface the limiter always fails
 Invalid values (unparseable durations, out-of-range numbers, unknown
 algorithm names) fail startup with a specific error - a typo can never
 silently fall back to a default.
+
+## Audit read events (P4.2)
+
+Lookups and attribute reads are the highest-volume audited events; the
+audit log is never pruned. How they are recorded is a runtime choice:
+
+| Variable | Default | Range | Description |
+|---|---|---|---|
+| `SUNDER_AUDIT_READS` | `bucketed` | `bucketed` \| `chained` | `bucketed`: reads UPSERT into hourly buckets keyed `(client_id, user_id, cid, action, hour)`; a closer turns each finished hour into ONE chained audit row carrying a digest over the hour's buckets, and sealed buckets are immutable (trigger) and digest-checked by `verify-audit`. Cuts audit growth by the repeat-access factor and stores less about operator behaviour. `chained`: every read is its own chained row - per-event tamper evidence, pre-P4.2 behaviour. |
+
+Trade-off in one line: under `bucketed`, tamper evidence for READS holds
+at hour granularity (an open bucket of the current hour can be altered by
+a DBA-level attacker without breaking a digest); mutations - register,
+erase, consent, OTI - are always chained per event in both modes. The
+hourly close runs in the server, or in `sunder sealer` when
+`SUNDER_AUDIT_SEAL_EXTERNAL=true`; `sunder sealer -once` closes finished
+hours too, and `verify-audit` recomputes every sealed hour's digest.
+
+**Operator attribution (`user_id`).** A client system may attribute each
+read to the operator inside it: the `user_id` body field on `POST
+/v1/lookup`, or the `X-Sunder-User-Id` header on GET routes (body wins if
+both are sent). It is an opaque ID - `[A-Za-z0-9._@:-]`, max 64, never a
+name - validated with a 400 on anything else, stored as a queryable
+`user_id` column on chained rows and as a bucket key, and returned in the
+Article 15 access trail. It is CLIENT-ASSERTED: Sunder records it, it
+does not verify it - the same trust model as Databunker's `who` field,
+with two differences in Sunder's favour: the record is tamper-evident and
+carries no raw values. The data subject is always the CID; `user_id` is
+never the person being looked up.
+
+## PostgreSQL sizing (P4.5)
+
+Stock Postgres defaults (128 MB `shared_buffers`) measure the defaults,
+not the system - the shipped compose file and the values below come from
+the 26.8M-contact scale test in `benchmark/README.md`. Sunder itself
+holds no state; give the memory to Postgres.
+
+| Setting | Small (4 GB host) | Large (48 GB host) | Why |
+|---|---|---|---|
+| `shared_buffers` | `512MB` | `12GB` | ~25% of the RAM given to Postgres; the token indexes live here |
+| `effective_cache_size` | `1536MB` | `32GB` | ~75%; planner hint, allocates nothing |
+| `max_wal_size` | `4GB` | `16GB` | bulk ingest (`sunder import`) checkpoints less often |
+| `random_page_cost` | `1.1` | `1.1` | NVMe/SSD assumption; keep 4.0 only on spinning disks |
+| `maintenance_work_mem` | default | `2GB` | index builds during migrations at scale |
+
+Keyed-HMAC search tokens are uniformly random, so index access has no
+locality: cache residency is the whole game, which is why
+`shared_buffers` matters more here than for a typical CRUD schema.

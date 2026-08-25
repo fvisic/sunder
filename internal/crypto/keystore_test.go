@@ -257,3 +257,47 @@ func TestWriteKeyUnwritableDir(t *testing.T) {
 		t.Fatal("unwritable keystore dir must error")
 	}
 }
+
+func TestFileKeystoreEnsureFailsOnReadOnlyDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	ks := &FileKeystore{Dir: dir}
+	if err := ks.Ensure(context.Background(), "hmac-email/v1"); err == nil {
+		t.Fatal("a read-only keystore dir must fail Ensure, not silently mint nothing")
+	}
+}
+
+func TestMustHexGuardsItsLiterals(t *testing.T) {
+	// The small-order table is compiled-in data; a corrupted literal must
+	// stop the process at init rather than weaken verification silently.
+	defer func() {
+		if recover() == nil {
+			t.Fatal("bad literal must panic")
+		}
+	}()
+	mustHex("zz")
+}
+
+func TestFileKeystoreKeyRejectsBadName(t *testing.T) {
+	ks := &FileKeystore{Dir: t.TempDir()}
+	if _, err := ks.Key(context.Background(), "../escape/v1"); err == nil {
+		t.Fatal("path-traversal key names must be rejected")
+	}
+	if err := ks.Ensure(context.Background(), "../escape/v1"); err == nil {
+		t.Fatal("path-traversal names must be rejected by Ensure too")
+	}
+}
+
+func TestVaultKeystoreUnreachable(t *testing.T) {
+	v := &VaultKeystore{Addr: "http://127.0.0.1:1", Token: "t", Mount: "secret"}
+	ctx := context.Background()
+	if err := v.Ensure(ctx, "hmac-email/v1"); err == nil {
+		t.Fatal("an unreachable Vault must fail Ensure, never mint a local key")
+	}
+	if _, err := v.Key(ctx, "hmac-email/v1"); err == nil {
+		t.Fatal("an unreachable Vault must fail Key")
+	}
+}

@@ -601,3 +601,25 @@ func TestPortalThrottleNotBurnedByRollback(t *testing.T) {
 		t.Fatalf("a rolled-back Start must not burn a send, found %d throttle rows", rows)
 	}
 }
+
+func TestPortalDataForPersonWithoutScopes(t *testing.T) {
+	e := newFaultEnv(t) // fully privileged role
+	ctx := context.Background()
+	p := &service.Portal{GDPR: e.gdpr, Contacts: e.svc}
+	// A person row with no cids: possible transiently (registration is
+	// multi-statement) and after data damage - the portal must answer
+	// with an empty scope list, and the access audit entry must carry an
+	// empty pseudonym rather than invent one.
+	var personID string
+	if err := e.admin.Pool.QueryRow(ctx, `INSERT INTO persons (id) VALUES (gen_random_uuid()) RETURNING id`).Scan(&personID); err != nil {
+		t.Fatal(err)
+	}
+	out, err := p.Data(ctx, personID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopes, _ := out["scopes"].([]service.ScopeData)
+	if len(scopes) != 0 {
+		t.Fatalf("want no scopes, got %d", len(scopes))
+	}
+}

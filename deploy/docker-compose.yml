@@ -1,6 +1,21 @@
 services:
   postgres:
     image: postgres:16
+    # Stock Postgres ships with 128 MB shared_buffers - a footgun the 26.8M
+    # scale test paid for (P4.5). These values suit a small host (2-4 GB
+    # for the database); size shared_buffers to ~25% of the RAM you give
+    # Postgres and effective_cache_size to ~75%. The sizing table lives in
+    # docs/CONFIG.md ("PostgreSQL sizing").
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - random_page_cost=1.1
     environment:
       POSTGRES_DB: sunder
       POSTGRES_USER: sunder

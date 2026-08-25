@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/testutil"
@@ -162,13 +163,25 @@ func TestE2EAuditTrailWritten(t *testing.T) {
 	_, out := e.do(t, e.credCRM, "POST", "/v1/contacts", map[string]string{"email": "a@example.com"})
 	e.do(t, e.credCRM, "GET", "/v1/contacts/"+out["cid"]+"/attributes/email?purpose=newsletter", nil)
 
+	// Register is a mutation: chained per event in every mode.
 	var n int
 	err := e.srv.Store.Pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM audit WHERE action IN ('contacts.register','attributes.read')`).Scan(&n)
+		`SELECT count(*) FROM audit WHERE action = 'contacts.register'`).Scan(&n)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n < 2 {
-		t.Fatalf("expected register+read audit records, got %d", n)
+	if n < 1 {
+		t.Fatalf("expected a register audit record, got %d", n)
+	}
+	// The read lands where the active read-audit mode puts it.
+	readsQuery := `SELECT count(*) FROM audit WHERE action = 'attributes.read'`
+	if audit.ReadsMode() == audit.ReadsBucketed {
+		readsQuery = `SELECT count(*) FROM audit_read_buckets WHERE action = 'attributes.read'`
+	}
+	if err := e.srv.Store.Pool.QueryRow(context.Background(), readsQuery).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Fatalf("expected the attribute read recorded under mode %s, got %d", audit.ReadsMode(), n)
 	}
 }

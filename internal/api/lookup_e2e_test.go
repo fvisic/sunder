@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
 )
 
@@ -120,13 +121,20 @@ func TestLookupAudited(t *testing.T) {
 	e.do(t, e.credCRM, "POST", "/v1/lookup", map[string]string{"email": "nobody@example.com"})
 
 	var hits, misses int
-	if err := e.srv.Store.Pool.QueryRow(ctx,
-		`SELECT count(*) FILTER (WHERE detail LIKE '%"matched":true%'),
-		        count(*) FILTER (WHERE detail LIKE '%"matched":false%')
-		 FROM audit WHERE action='lookup'`).Scan(&hits, &misses); err != nil {
+	q := `SELECT count(*) FILTER (WHERE detail LIKE '%"matched":true%'),
+	             count(*) FILTER (WHERE detail LIKE '%"matched":false%')
+	      FROM audit WHERE action='lookup'`
+	if audit.ReadsMode() == audit.ReadsBucketed {
+		// Aggregation drops per-event detail; hit vs miss survives as a
+		// bucket with the CID set vs a bucket with it empty.
+		q = `SELECT count(*) FILTER (WHERE cid <> ''),
+		            count(*) FILTER (WHERE cid = '')
+		     FROM audit_read_buckets WHERE action='lookup'`
+	}
+	if err := e.srv.Store.Pool.QueryRow(ctx, q).Scan(&hits, &misses); err != nil {
 		t.Fatal(err)
 	}
 	if hits != 1 || misses != 1 {
-		t.Fatalf("expected 1 hit + 1 miss audited, got %d/%d", hits, misses)
+		t.Fatalf("expected 1 hit + 1 miss audited under mode %s, got %d/%d", audit.ReadsMode(), hits, misses)
 	}
 }

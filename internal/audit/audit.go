@@ -83,6 +83,24 @@ type Entry struct {
 	Action   string
 	CID      string
 	Detail   map[string]any
+	// UserID identifies the OPERATOR inside the client system (the CRM
+	// agent, the ERP user) - NEVER the data subject, who is always the
+	// CID. An opaque ID, not a name, so the never-pruned log carries the
+	// minimum about employees. It arrives as the "user_id" body field
+	// (POST routes) or the X-Sunder-User-Id header (GET routes) and is
+	// CLIENT-ASSERTED - Sunder cannot verify it. Stored as a real,
+	// queryable column on audit rows and as a bucket key column;
+	// deliberately NOT part of canonical() - every pre-existing chain must
+	// keep verifying - so the append-only trigger, not the hash, pins it.
+	UserID string
+}
+
+// userCol renders UserID as its nullable column value.
+func userCol(e Entry) any {
+	if e.UserID == "" {
+		return nil
+	}
+	return e.UserID
 }
 
 // canonical is an unambiguous encoding of the hashed tuple: JSON array, so a
@@ -135,8 +153,8 @@ func AppendTx(ctx context.Context, tx pgx.Tx, e Entry) error {
 	if !syncMode.Load() {
 		// Async: one INSERT, no lock, no head read. The sealer chains it.
 		_, err = tx.Exec(ctx,
-			`INSERT INTO audit (ts, client_id, action, cid, detail) VALUES ($1, $2, $3, $4, $5)`,
-			ts, e.ClientID, e.Action, cidCol, detailJSON)
+			`INSERT INTO audit (ts, client_id, action, cid, detail, user_id) VALUES ($1, $2, $3, $4, $5, $6)`,
+			ts, e.ClientID, e.Action, cidCol, detailJSON, userCol(e))
 		return err
 	}
 
@@ -155,9 +173,9 @@ func AppendTx(ctx context.Context, tx pgx.Tx, e Entry) error {
 		prevCol = prev
 	}
 	_, err = tx.Exec(ctx,
-		`INSERT INTO audit (ts, client_id, action, cid, detail, prev_hash, hash, chain_seq)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		ts, e.ClientID, e.Action, cidCol, detailJSON, prevCol, hash, headSeq+1)
+		`INSERT INTO audit (ts, client_id, action, cid, detail, prev_hash, hash, chain_seq, user_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		ts, e.ClientID, e.Action, cidCol, detailJSON, prevCol, hash, headSeq+1, userCol(e))
 	return err
 }
 
@@ -176,8 +194,8 @@ func Append(ctx context.Context, pool *pgxpool.Pool, e Entry) error {
 			cidCol = e.CID
 		}
 		_, err = pool.Exec(ctx,
-			`INSERT INTO audit (ts, client_id, action, cid, detail) VALUES ($1, $2, $3, $4, $5)`,
-			time.Now().UTC().Truncate(time.Microsecond), e.ClientID, e.Action, cidCol, detailJSON)
+			`INSERT INTO audit (ts, client_id, action, cid, detail, user_id) VALUES ($1, $2, $3, $4, $5, $6)`,
+			time.Now().UTC().Truncate(time.Microsecond), e.ClientID, e.Action, cidCol, detailJSON, userCol(e))
 		return err
 	}
 	tx, err := pool.Begin(ctx)

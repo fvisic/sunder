@@ -153,3 +153,33 @@ happen.
   every run; pending rows are reported as pending, never as a break.
 - Anchoring (M5) stamps only the sealed head, so an anchor never
   vouches for rows the chain cannot yet prove.
+
+## Read-event aggregation window (P4.2, default since this change)
+
+`SUNDER_AUDIT_READS=bucketed` (the default) records lookups and attribute
+reads as hourly buckets instead of per-event chained rows; a closer turns
+each finished hour into one chained row carrying a digest over the hour's
+buckets. What this changes for an attacker with DB write access:
+
+- An OPEN bucket (the current hour) can be inflated, or its `last_seen`
+  moved, without breaking any digest - the trigger still refuses count
+  decreases, key changes and deletes, so removing evidence of an access
+  requires DBA-level trigger bypass, same as before.
+- A SEALED bucket is covered by its hour's chained digest: any edit,
+  addition or removal is detected by `verify-audit`, which recomputes
+  every sealed hour.
+- Mutations are untouched: register, erase, consent, OTI verify all stay
+  chained per event in both modes.
+
+What is gained: audit growth drops by the repeat-access factor, and the
+log stores less about operator behaviour (aggregates instead of every
+click - the access log is itself personal data about employees).
+Deployments that want per-event evidence for reads set
+`SUNDER_AUDIT_READS=chained`.
+
+The optional `user_id` attribution (body field on lookup, header on GET)
+is CLIENT-ASSERTED and unverifiable by design: it improves the Article 15
+answer from "which system" to "which operator the system claims", and a
+lying client system was always capable of lying in its own logs too. It
+is an opaque bounded ID, not a name, and is not part of the chain hash -
+the append-only trigger is what pins it.

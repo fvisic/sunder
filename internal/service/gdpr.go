@@ -161,6 +161,14 @@ type AuditTrailEntry struct {
 	ClientID string    `json:"client_id"`
 	Action   string    `json:"action"`
 	CID      string    `json:"cid"`
+	// UserID is the operator inside the client system, when the client
+	// asserted one (P4.2). Empty otherwise.
+	UserID string `json:"user_id,omitempty"`
+	// Bucketed read events (P4.2 default) arrive aggregated: Count > 1
+	// with TS = first access in the hour and LastTS = the last. Count 0
+	// means a plain per-event chained row.
+	Count  int64      `json:"count,omitempty"`
+	LastTS *time.Time `json:"last_ts,omitempty"`
 }
 
 const accessTrailLimit = 10000
@@ -226,7 +234,7 @@ func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, 
 	}
 
 	trailRows, err := g.Pool.Query(ctx,
-		`SELECT seq, ts, COALESCE(client_id,''), action, COALESCE(cid,'')
+		`SELECT seq, ts, COALESCE(client_id,''), action, COALESCE(cid,''), COALESCE(user_id,'')
 		 FROM audit WHERE cid = ANY($1) ORDER BY seq LIMIT $2`, cidList, accessTrailLimit)
 	if err != nil {
 		return nil, nil, err
@@ -235,12 +243,37 @@ func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, 
 	trail := []AuditTrailEntry{}
 	for trailRows.Next() {
 		var e AuditTrailEntry
-		if err := trailRows.Scan(&e.Seq, &e.TS, &e.ClientID, &e.Action, &e.CID); err != nil {
+		if err := trailRows.Scan(&e.Seq, &e.TS, &e.ClientID, &e.Action, &e.CID, &e.UserID); err != nil {
 			return nil, nil, err
 		}
 		trail = append(trail, e)
 	}
 	if err := trailRows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	// Bucketed read events (P4.2): the Article 15 answer must include them
+	// or "who accessed my data" silently loses every lookup and read made
+	// under the default mode. Reported as aggregates: who, how many times,
+	// first and last time in the hour.
+	bRows, err := g.Pool.Query(ctx,
+		`SELECT client_id, user_id, cid, action, count, first_seen, last_seen
+		 FROM audit_read_buckets WHERE cid = ANY($1) ORDER BY first_seen LIMIT $2`,
+		cidList, accessTrailLimit)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer bRows.Close()
+	for bRows.Next() {
+		var e AuditTrailEntry
+		var last time.Time
+		if err := bRows.Scan(&e.ClientID, &e.UserID, &e.CID, &e.Action, &e.Count, &e.TS, &last); err != nil {
+			return nil, nil, err
+		}
+		e.LastTS = &last
+		trail = append(trail, e)
+	}
+	if err := bRows.Err(); err != nil {
 		return nil, nil, err
 	}
 	return scopes, trail, nil

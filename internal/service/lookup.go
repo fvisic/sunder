@@ -19,6 +19,11 @@ type LookupInput struct {
 	Email string `json:"email"`
 	Phone string `json:"phone"`
 	Name  string `json:"name"`
+	// UserID is the operator inside the calling system (client-asserted,
+	// see audit.Entry.UserID). Body field on this POST route; GET routes
+	// use the X-Sunder-User-Id header. When both are present, the body
+	// wins - it is the more deliberate act.
+	UserID string `json:"user_id"`
 }
 
 // Lookup resolves identifiers to the caller-scope CID. Misses and hits are
@@ -115,8 +120,10 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 		return "", err
 	}
 	// Fail closed: a lookup that cannot be audited must not answer.
-	if err := audit.Append(ctx, c.Pool, audit.Entry{
-		ClientID: client.ID, Action: "lookup", CID: cid,
+	// ReadEvent buckets hourly under the default read-audit mode and
+	// falls back to a chained row otherwise (or when so configured).
+	if err := audit.ReadEvent(ctx, c.Pool, audit.Entry{
+		ClientID: client.ID, Action: "lookup", CID: cid, UserID: in.UserID,
 		Detail: map[string]any{"by": by, "matched": matched},
 	}); err != nil {
 		return "", fmt.Errorf("audit append: %w", err)

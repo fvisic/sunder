@@ -436,7 +436,7 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 	} else if denied {
 		return "", ErrConsentDenied
 	}
-	if err := audit.Append(ctx, c.Pool, audit.Entry{
+	if err := audit.ReadEvent(ctx, c.Pool, audit.Entry{
 		ClientID: client.ID, Action: "attributes.read", CID: cid,
 		Detail: map[string]any{"attribute": name, "purpose": purpose},
 	}); err != nil {

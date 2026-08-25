@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
 	"sync"
 	"time"
 
@@ -40,6 +41,9 @@ type Server struct {
 	Detector   ratelimit.MissCounter
 	enumWarned sync.Map // client id -> last enumeration warning (F3 latch)
 	mux        *http.ServeMux
+	// closerInterval overrides the bucket-closer cadence in tests; zero
+	// means the production minute.
+	closerInterval time.Duration
 }
 
 // OpenKeystore builds the configured keystore driver, wrapped
@@ -148,7 +152,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("POST /v1/dsr/erase", s.handleDSRErase)
 		v1.HandleFunc("GET /v1/dsr/export", s.handleDSRExport)
 		s.Auth.Limiter = s.Limiter
-		s.mux.Handle("/v1/", s.Auth.Middleware(capturePattern(v1)))
+		s.mux.Handle("/v1/", s.Auth.Middleware(userIDMiddleware(capturePattern(v1))))
 		// The portal is only mounted on the main listener when it has no
 		// dedicated one: with mTLS on the API, citizens could never present
 		// a client certificate.
@@ -388,6 +392,9 @@ func (s *Server) startAuditSealing(ctx context.Context) error {
 	if s.Cfg.AuditSealing != "" {
 		audit.SetMode(s.Cfg.AuditSealing)
 	}
+	if s.Cfg.AuditReads != "" {
+		audit.SetReadsMode(s.Cfg.AuditReads)
+	}
 	if s.Store == nil {
 		// A server can be built without a store (config-validation tests);
 		// nothing to seal and nothing to drain against.
@@ -405,9 +412,12 @@ func (s *Server) startAuditSealing(ctx context.Context) error {
 		if n > 0 {
 			s.Log.Info("audit backlog drained for sync mode", "sealed", n)
 		}
-		s.Log.Info("audit sealing", "mode", "sync", "window", "none (sealed at insert)")
+		s.Log.Info("audit sealing", "mode", "sync", "window", "none (sealed at insert)", "reads", audit.ReadsMode())
 		if s.Metrics != nil {
 			s.Metrics.Set("sunder_audit_unsealed_rows", 0)
+		}
+		if !s.Cfg.AuditSealExternal {
+			s.startBucketCloser(ctx)
 		}
 		return nil
 	}
@@ -415,11 +425,12 @@ func (s *Server) startAuditSealing(ctx context.Context) error {
 	sealsHere := !s.Cfg.AuditSealExternal
 	s.Log.Info("audit sealing", "mode", "async",
 		"interval", s.sealInterval().String(), "delay", s.sealDelay().String(),
-		"batch", s.sealBatch(), "seals_in_this_process", sealsHere)
+		"batch", s.sealBatch(), "seals_in_this_process", sealsHere, "reads", audit.ReadsMode())
 	if !sealsHere {
-		return nil // `sunder sealer` owns the loop; we only run in async write mode
+		return nil // `sunder sealer` owns sealing AND bucket closing
 	}
 
+	s.startBucketCloser(ctx)
 	go func() {
 		ticker := time.NewTicker(s.sealInterval())
 		defer ticker.Stop()
@@ -468,4 +479,64 @@ func (s *Server) sealBatch() int {
 		return 5000
 	}
 	return s.Cfg.AuditSealBatch
+}
+
+// userIDPattern keeps the client-asserted operator id an opaque ID: no
+// spaces, no free text, bounded length. It lands in a log that is never
+// pruned, so it must stay an identifier, not a name.
+var userIDPattern = regexp.MustCompile(`^[A-Za-z0-9._@:-]{1,64}$`)
+
+// userIDMiddleware extracts X-Sunder-User-Id, the optional CLIENT-ASSERTED
+// operator id (P4.2): with it, the audit trail and the hourly read buckets
+// answer "which operator behind this credential" instead of only "which
+// system". A malformed value is a 400, not a silent drop - silently
+// discarding attribution would corrupt the very record it exists for.
+func userIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Sunder-User-Id")
+		if id != "" {
+			if !userIDPattern.MatchString(id) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"validation","detail":"X-Sunder-User-Id must be an id: 1-64 of [A-Za-z0-9._@:-]"}`))
+				return
+			}
+			r = r.WithContext(audit.WithUserID(r.Context(), id))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// startBucketCloser turns each finished hour of read buckets into one
+// chained audit row (P4.2). Independent of the sealing mode: bucketed
+// reads exist under sync sealing too, and the closer's chained row goes
+// through the normal write path of whichever mode is active. A minute
+// cadence bounds how long a finished hour stays unsummarized; the try-lock
+// inside CloseReadBuckets makes N replicas cheap.
+func (s *Server) startBucketCloser(ctx context.Context) {
+	if audit.ReadsMode() != audit.ReadsBucketed {
+		return
+	}
+	interval := s.closerInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if n, err := audit.CloseReadBuckets(ctx, s.Store.Pool); err != nil {
+					if ctx.Err() == nil {
+						s.Log.Error("read-bucket close", "err", err.Error())
+					}
+				} else if n > 0 {
+					s.Log.Info("read buckets closed", "hours", n)
+				}
+			}
+		}
+	}()
 }
