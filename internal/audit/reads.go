@@ -83,14 +83,19 @@ func ReadEvent(ctx context.Context, pool *pgxpool.Pool, e Entry) error {
 	if readsChained.Load() {
 		return Append(ctx, pool, e)
 	}
-	ts := time.Now().UTC().Truncate(time.Microsecond)
+	// The bucket hour comes from the DATABASE clock, deliberately: the
+	// closer also decides "finished" by the database clock, and mixing an
+	// application timestamp in here reopens a closed hour whenever an app
+	// clock trails the database across an hour boundary - the closer then
+	// summarizes that hour twice and verification reports a false break
+	// forever after.
 	tag, err := pool.Exec(ctx, `
 		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count, first_seen, last_seen)
-		VALUES ($1, $2, $3, $4, date_trunc('hour', $5::timestamptz), 1, $5, $5)
+		VALUES ($1, $2, $3, $4, date_trunc('hour', now()), 1, now(), now())
 		ON CONFLICT (client_id, user_id, cid, action, bucket_start)
-		DO UPDATE SET count = audit_read_buckets.count + 1, last_seen = $5
+		DO UPDATE SET count = audit_read_buckets.count + 1, last_seen = now()
 		WHERE audit_read_buckets.sealed_at IS NULL`,
-		e.ClientID, e.UserID, e.CID, e.Action, ts)
+		e.ClientID, e.UserID, e.CID, e.Action)
 	if err != nil {
 		return err
 	}
