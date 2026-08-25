@@ -414,3 +414,84 @@ func TestVerifyDetectsForgedHashOnSealedRow(t *testing.T) {
 		t.Fatalf("forged hash must break at position 2, got %d", broken)
 	}
 }
+
+// TestDrainBlocksUntilCompetitorReleases is the F1 regression: while a
+// competing session holds the chain lock (a lingering replica's sealer, an
+// external `sunder sealer`), Drain must WAIT and finish the job - never
+// conclude "done" with rows still unsealed, because a sync server starting
+// on that conclusion strands them outside the chain.
+func TestDrainBlocksUntilCompetitorReleases(t *testing.T) {
+	setMode(t, ModeAsync)
+	s := testPool(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "lookup"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	holder, err := s.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, appendLockKey); err != nil {
+		t.Fatal(err)
+	}
+
+	type res struct {
+		n   int
+		err error
+	}
+	done := make(chan res, 1)
+	go func() {
+		n, err := Drain(ctx, s.Pool, 100)
+		done <- res{n, err}
+	}()
+
+	select {
+	case r := <-done:
+		t.Fatalf("drain returned (%d, %v) while a competitor held the chain lock - this is how rows get stranded", r.n, r.err)
+	case <-time.After(500 * time.Millisecond):
+		// Correct: still waiting on the lock.
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-done:
+		if r.err != nil || r.n != 3 {
+			t.Fatalf("drain after release: n=%d err=%v, want 3", r.n, r.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("drain never finished after the lock was released")
+	}
+	if pending, err := UnsealedCount(ctx, s.Pool); err != nil || pending != 0 {
+		t.Fatalf("pending after contended drain: %d err=%v", pending, err)
+	}
+}
+
+// TestDrainIgnoresClockSkew is the F2 regression: ts is stamped by the
+// application clock, now() by the database clock. A row from an app host
+// running ahead must still be drained - the age filter belongs to the
+// steady-state sealer only, never to a drain.
+func TestDrainIgnoresClockSkew(t *testing.T) {
+	setMode(t, ModeAsync)
+	s := testPool(t)
+	ctx := context.Background()
+	// The app clock is an hour ahead of the database clock.
+	if _, err := s.Pool.Exec(ctx,
+		`INSERT INTO audit (ts, client_id, action, detail) VALUES (now() + interval '1 hour', 'crm', 'skewed', 'null')`); err != nil {
+		t.Fatal(err)
+	}
+	n, err := Drain(ctx, s.Pool, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("drain missed the future-ts row: sealed %d, want 1", n)
+	}
+	broken, reason, pending, err := Verify(ctx, s.Pool)
+	if err != nil || broken != 0 || pending != 0 {
+		t.Fatalf("after skewed drain: broken=%d pending=%d err=%v (%s)", broken, pending, err, reason)
+	}
+}

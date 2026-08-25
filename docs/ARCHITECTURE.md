@@ -35,6 +35,18 @@ attributes), `internal/crypto` (search tokens, PASETO v4.public, PII
 encryption, keystore drivers), `internal/audit` (hash chain, RFC 3161
 anchoring), `internal/ratelimit`.
 
+Since P4.1 the audit chain has two write modes. In `async` (default),
+audited operations INSERT unsealed rows with no lock and a single sealer
+(in-process goroutine, or the separate `sunder sealer` binary for
+privilege separation) chains them in batches under one advisory lock -
+the chain position is a dense `chain_seq` assigned at sealing time, so
+BIGSERIAL commit-order races cannot strand a row. In `sync`, the
+pre-P4.1 path, every row is chained inside the business transaction.
+Both modes share the head query and the canonical hash, so a chain built
+partly in each mode verifies as one. Rationale, measurements and the
+threat trade-off: `docs/CONFIG.md` ("Audit sealing") and
+`docs/THREAT-MODEL.md` ("Audit sealing window").
+
 ## Ground rules
 
 - **No PII in logs or metrics** - the logging middleware records method,

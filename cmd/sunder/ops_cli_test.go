@@ -732,3 +732,31 @@ func TestSealerCmdGuards(t *testing.T) {
 		t.Fatal("sealer -once on a dead pool must error")
 	}
 }
+
+// TestVerifyAuditFlagsStrandedRowsUnderSync: pending rows under sync mode
+// cannot be in-flight work (sync seals at insert, the server drains before
+// serving) - they are rows outside the chain, and verify-audit must fail
+// visibly rather than mention them in passing.
+func TestVerifyAuditFlagsStrandedRowsUnderSync(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	old := audit.Mode()
+	t.Cleanup(func() { audit.SetMode(old) })
+
+	audit.SetMode(audit.ModeAsync)
+	if err := audit.Append(ctx, st.Pool, audit.Entry{ClientID: "crm", Action: "lookup"}); err != nil {
+		t.Fatal(err)
+	}
+	audit.SetMode(audit.ModeSync)
+	err := verifyAuditCmd(ctx, config.Config{}, st, nil)
+	if err == nil || !strings.Contains(err.Error(), "unsealed rows under sync sealing") {
+		t.Fatalf("stranded rows under sync must fail verify-audit, got %v", err)
+	}
+	// Drained, the same verification succeeds.
+	if _, err := audit.Drain(ctx, st.Pool, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyAuditCmd(ctx, config.Config{}, st, nil); err != nil {
+		t.Fatalf("verify after drain must pass: %v", err)
+	}
+}

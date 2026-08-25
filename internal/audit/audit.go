@@ -203,6 +203,18 @@ func Append(ctx context.Context, pool *pgxpool.Pool, e Entry) error {
 // a sealer degrade to "one seals, the rest skip the cycle" with no leader
 // election and no queueing.
 func SealOnce(ctx context.Context, pool *pgxpool.Pool, batch int, delay time.Duration) (int, error) {
+	return sealBatch(ctx, pool, batch, delay, false)
+}
+
+// sealBatch is the one sealing implementation. blocking selects the lock
+// discipline: the steady-state sealer tries and politely skips a held
+// chain (a replica losing the race is normal), while Drain MUST hold the
+// lock inside this same transaction - taking it in a separate transaction
+// and re-trying here would open a window in which a competing sealer wins
+// the lock, this call returns 0, and Drain concludes "done" with rows
+// still unsealed. On the async -> sync switch those rows would then be
+// stranded outside the chain forever.
+func sealBatch(ctx context.Context, pool *pgxpool.Pool, batch int, delay time.Duration, blocking bool) (int, error) {
 	if batch <= 0 {
 		return 0, fmt.Errorf("seal batch must be positive")
 	}
@@ -212,12 +224,18 @@ func SealOnce(ctx context.Context, pool *pgxpool.Pool, batch int, delay time.Dur
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var got bool
-	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, appendLockKey).Scan(&got); err != nil {
-		return 0, err
-	}
-	if !got {
-		return 0, nil // another sealer (or a sync append) holds the chain
+	if blocking {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, appendLockKey); err != nil {
+			return 0, err
+		}
+	} else {
+		var got bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, appendLockKey).Scan(&got); err != nil {
+			return 0, err
+		}
+		if !got {
+			return 0, nil // another sealer (or a sync append) holds the chain
+		}
 	}
 
 	prev, chainSeq, err := sealedHead(ctx, tx)
@@ -225,13 +243,22 @@ func SealOnce(ctx context.Context, pool *pgxpool.Pool, batch int, delay time.Dur
 		return 0, err
 	}
 
+	// delay <= 0 must mean "no age filter", not "ts < now()": ts is stamped
+	// by the APPLICATION clock and now() by the DATABASE clock, so with an
+	// app clock running ahead the youngest rows would silently escape a
+	// drain - and a drain that misses rows strands them (see Drain).
+	where := `hash IS NULL AND ts < now() - $1::interval`
+	args := []any{delay.String(), batch}
+	if delay <= 0 {
+		where, args = `hash IS NULL`, []any{batch}
+	}
 	rows, err := tx.Query(ctx,
 		`SELECT seq, ts, COALESCE(client_id,''), action, COALESCE(cid,''), COALESCE(detail,'null')
 		   FROM audit
-		  WHERE hash IS NULL AND ts < now() - $1::interval
+		  WHERE `+where+`
 		  ORDER BY seq
-		  LIMIT $2`,
-		delay.String(), batch)
+		  LIMIT $`+fmt.Sprint(len(args)),
+		args...)
 	if err != nil {
 		return 0, err
 	}
@@ -292,34 +319,18 @@ func SealOnce(ctx context.Context, pool *pgxpool.Pool, batch int, delay time.Dur
 func Drain(ctx context.Context, pool *pgxpool.Pool, batch int) (int, error) {
 	total := 0
 	for {
-		n, err := drainBatch(ctx, pool, batch)
+		n, err := sealBatch(ctx, pool, batch, 0, true)
 		if err != nil {
 			return total, err
 		}
 		total += n
 		if n < batch {
+			// The lock was HELD while this last batch found fewer rows
+			// than the limit, so nothing was hiding behind a competing
+			// lock holder - the backlog is genuinely empty.
 			return total, nil
 		}
 	}
-}
-
-func drainBatch(ctx context.Context, pool *pgxpool.Pool, batch int) (int, error) {
-	// Reuse SealOnce's logic by momentarily behaving like it, but with a
-	// blocking lock and no settle delay. Implemented as its own
-	// transaction rather than a SealOnce flag so the try-lock semantics of
-	// the steady-state path stay unconditional.
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, appendLockKey); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(ctx); err != nil { // lock released; SealOnce re-takes it
-		return 0, err
-	}
-	return SealOnce(ctx, pool, batch, 0)
 }
 
 // UnsealedCount reports rows not yet in the chain - the operational gauge
