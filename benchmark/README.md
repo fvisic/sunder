@@ -322,3 +322,33 @@ Honesty note on the earlier 1,959 rps figure: that sweep drew from a
 26.8M keyspace whose top stripe had holes left by the interrupted bulk
 load, so ~8% of probes were misses - audited, full-cost lookups, but
 misses. The dense-keyspace numbers above are the ones to quote.
+
+## Head-to-head on the completed Phase 4 build (2026-08-26)
+
+Same server and dataset as above, now with `SUNDER_AUDIT_READS=bucketed`
+(P4.2 default: hourly read buckets instead of a chained row per lookup).
+Zero errors both sides on lookups and reads:
+
+| operation | Sunder | Databunker | delta |
+|---|---:|---:|---:|
+| lookup c=8  | 1,589.1 rps | 716.5 rps | **2.2x** |
+| lookup c=32 | 2,746.7 rps | 884.5 rps | **3.1x** |
+| lookup c=64 | 2,466.9 rps | 599.7 rps | **4.1x** |
+| read  c=16  | 1,568.9 rps | 723.4 rps | **2.2x** |
+
+p99 is 2-4x lower throughout (lookup c=32: 29.0 vs 107.6 ms), and the gap
+WIDENS with concurrency. Relative to the pre-P4.2 run, bucketed read
+auditing lifted Sunder's lookup another ~1.5x (1,135 -> 2,747 rps at
+c=32): the per-lookup chained INSERT became an UPSERT into a hot bucket
+row.
+
+Writes needed a third attempt to measure honestly: the first reused
+seeds (turning Databunker's writes into duplicate rejections and Sunder's
+into cheap reuse hits) and the second ran into an unrelated host I/O
+stall that froze every in-flight request for 30 s. The clean run, load
+average ~1, zero errors both sides:
+
+| operation | Sunder | Databunker | delta |
+|---|---:|---:|---:|
+| write c=8  |   377.7 rps | 277.8 rps | **+36%** |
+| write c=32 | 1,014.3 rps | 503.3 rps | **2.0x** |

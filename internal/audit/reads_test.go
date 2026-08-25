@@ -325,3 +325,28 @@ func TestUserIDContextHelpers(t *testing.T) {
 		t.Fatal("mode must read back as bucketed")
 	}
 }
+
+// TestReadEventBucketsByDatabaseClock pins the F-fix from the P4.2 review:
+// the bucket hour must come from the database clock, because the closer
+// decides "finished" by the database clock. An application timestamp here
+// reopens closed hours across app/DB clock skew at hour boundaries, and a
+// reopened hour gets summarized twice - a permanent false verify failure.
+func TestReadEventBucketsByDatabaseClock(t *testing.T) {
+	setReads(t, ReadsBucketed)
+	s := testPool(t)
+	ctx := context.Background()
+	if err := ReadEvent(ctx, s.Pool, Entry{ClientID: "crm", Action: "lookup", CID: "CID-A"}); err != nil {
+		t.Fatal(err)
+	}
+	var matches bool
+	if err := s.Pool.QueryRow(ctx, `
+		SELECT bucket_start = date_trunc('hour', now())
+		   AND first_seen  >= now() - interval '1 minute'
+		   AND last_seen   >= now() - interval '1 minute'
+		  FROM audit_read_buckets LIMIT 1`).Scan(&matches); err != nil {
+		t.Fatal(err)
+	}
+	if !matches {
+		t.Fatal("bucket timestamps must come from the database clock, not the application clock")
+	}
+}

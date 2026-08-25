@@ -231,3 +231,35 @@ func TestImportCmdReadsStdin(t *testing.T) {
 		t.Fatalf("stdin import landed %d persons", n)
 	}
 }
+
+// TestImportDedupsPerIdentifier is the review regression: two lines that
+// share an email but differ in phone are one person under the dedup
+// invariant. Pair-keyed dedup let both into the batch and the unique index
+// killed the whole import with an opaque error.
+func TestImportDedupsPerIdentifier(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	f := filepath.Join(t.TempDir(), "dup.jsonl")
+	if err := os.WriteFile(f, []byte(
+		`{"email":"same@example.com","phone":"+385 91 111 1111"}
+{"email":"same@example.com","phone":"+385 91 222 2222"}
+{"email":"other@example.com","phone":"+385 91 222 2222"}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm"}); err != nil {
+		t.Fatalf("a file with repeated identifiers must import cleanly, not die on a unique index: %v", err)
+	}
+	var persons int64
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM persons`).Scan(&persons); err != nil {
+		t.Fatal(err)
+	}
+	// Line 2 repeats line 1's email, so it is skipped WHOLE - including
+	// its phone, which therefore never lands. Line 3 then owns that phone
+	// as a fresh person: first occurrence wins, skipped lines contribute
+	// nothing. Two persons total, and no unique-index abort.
+	if persons != 2 {
+		t.Fatalf("want 2 persons (line 2 skipped whole by email), got %d", persons)
+	}
+}

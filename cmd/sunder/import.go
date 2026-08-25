@@ -120,10 +120,13 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 		lineNo                   int
 		rows                     []importRow
 		inserted, skipped, dupes int64
-		seenBatch                map[string]bool // in-batch identifier dedup
 		start                    = time.Now()
 	)
-	seenBatch = map[string]bool{}
+	// In-batch identifier dedup, PER IDENTIFIER: two lines sharing an
+	// email but differing in phone are still the same person under the
+	// dedup invariant, and pair-keyed dedup would let both into the batch
+	// only to die on the unique index with an opaque error.
+	seenEmail, seenPhone := map[string]bool{}, map[string]bool{}
 
 	flush := func() error {
 		if len(rows) == 0 {
@@ -136,7 +139,7 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 		inserted += ins
 		skipped += skip
 		rows = rows[:0]
-		seenBatch = map[string]bool{}
+		seenEmail, seenPhone = map[string]bool{}, map[string]bool{}
 		fmt.Printf("  line %d: %d imported, %d skipped as existing, %d in-file duplicates (%.0f rows/s)\n",
 			lineNo, inserted, skipped, dupes, float64(inserted+skipped+dupes)/time.Since(start).Seconds())
 		return nil
@@ -207,14 +210,21 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 			row.nameTok, attrs["name"] = t, l.Name
 		}
 
-		// In-file duplicates (the same identifier twice in one batch would
-		// break the staging inserts before the DB dedup can see it).
-		dupKey := fmt.Sprint(row.emailTok) + "|" + fmt.Sprint(row.phoneTok)
-		if seenBatch[dupKey] {
+		// In-file duplicates: EITHER identifier repeating within the batch
+		// marks the line a duplicate (an email or phone identifies exactly
+		// one person), before the unique index would kill the whole batch.
+		et, _ := row.emailTok.(string)
+		pt, _ := row.phoneTok.(string)
+		if (et != "" && seenEmail[et]) || (pt != "" && seenPhone[pt]) {
 			dupes++
 			continue
 		}
-		seenBatch[dupKey] = true
+		if et != "" {
+			seenEmail[et] = true
+		}
+		if pt != "" {
+			seenPhone[pt] = true
+		}
 
 		if row.pid, err = newUUIDStr(); err != nil {
 			return err
