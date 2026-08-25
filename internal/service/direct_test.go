@@ -8,6 +8,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/fvisic/sunder/internal/auth"
@@ -391,5 +392,56 @@ func TestErasePersonWithoutBlobs(t *testing.T) {
 	}
 	if events != 2 {
 		t.Fatalf("one event per scope expected, got %d", events)
+	}
+}
+
+// TestNameNarrowingUsesItsOwnIndex covers the access path that migration
+// 0020 moved. Names are deliberately excluded from person_tokens_ident_uq
+// (a name is shared by many people and only ever narrows), so when the
+// redundant catch-all index went away the name path had to keep an index
+// of its own. Without one it degrades to scanning every name row with the
+// token as a filter, which stays correct and therefore stays invisible to
+// every other test in this suite.
+func TestNameNarrowingUsesItsOwnIndex(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	cid := e.register(t) // fault@example.com / "Fault Case"
+
+	// Name plus the matching e-mail resolves to the same person.
+	got, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+		Email: "fault@example.com", Name: "Fault Case"})
+	if err != nil {
+		t.Fatalf("name narrowing must resolve: %v", err)
+	}
+	if got != cid {
+		t.Fatalf("name narrowing returned %q, want %q", got, cid)
+	}
+
+	// A name that does not belong to that person must NOT resolve: the
+	// narrowing has to actually narrow, not be silently ignored.
+	if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+		Email: "fault@example.com", Name: "Someone Else"}); err != service.ErrNotFound {
+		t.Fatalf("non-matching name must narrow to nothing, got %v", err)
+	}
+
+	// And the query the new partial index serves must be planned through
+	// an index, not a filter over every name row.
+	var plan string
+	rows, err := e.admin.Pool.Query(ctx,
+		`EXPLAIN SELECT person_id FROM person_tokens WHERE kind='name' AND token = ANY($1)`,
+		[]string{"probe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan += line + "\n"
+	}
+	if !strings.Contains(plan, "person_tokens_name_idx") {
+		t.Fatalf("name lookup no longer uses its index:\n%s", plan)
 	}
 }

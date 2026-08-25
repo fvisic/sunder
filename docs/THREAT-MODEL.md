@@ -89,8 +89,18 @@ way. That lock is instance-wide, so audited operations serialize.
 Measured on a 12-core server: throughput flattens at roughly 460 audited
 operations per second and does not improve past four concurrent clients.
 Sampling `pg_locks` under load shows one session inside the append and
-every other active session waiting. The ceiling tracks storage commit
-latency (`fdatasync` at 2,003 ops/sec on that machine), not core count.
+every other active session waiting.
+
+**Corrected 2026-08-25.** This section previously attributed the ceiling to
+storage commit latency (`fdatasync` at 2,003 ops/sec on that machine). A
+scale test at 26.8M contacts disproved that. Group commit amortizes
+`fsync` across concurrent committers, and the same storage sustains 4,914
+commits/sec once the advisory lock is taken out of an otherwise identical
+transaction - a 13.8x difference at 32 concurrent clients. The lock is the
+ceiling on its own; storage never was. During that run 117 of 124
+active-backend samples sat in `Lock/advisory` against 3 in `IO/WALSync`.
+Scale is not a factor either: lookup throughput is flat from 1M to 20M
+contacts, and the index probe itself is 0.046 ms of a 4.99 ms request.
 
 This is a deliberate trade, not a defect: the linear chain is what makes
 silent tampering detectable, and a lock is what keeps it linear. It is

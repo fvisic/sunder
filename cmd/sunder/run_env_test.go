@@ -182,3 +182,15 @@ func TestRunSignerWithoutDB(t *testing.T) {
 		t.Fatalf("signer shutdown must be clean: %v", err)
 	}
 }
+
+func TestGetenvDefaultFallsBackOnEmpty(t *testing.T) {
+	const key = "SUNDER_TEST_GETENV_DEFAULT"
+	t.Setenv(key, "")
+	if got := getenvDefault(key, "fallback"); got != "fallback" {
+		t.Fatalf("empty env must fall back, got %q", got)
+	}
+	t.Setenv(key, "set")
+	if got := getenvDefault(key, "fallback"); got != "set" {
+		t.Fatalf("set env must win, got %q", got)
+	}
+}

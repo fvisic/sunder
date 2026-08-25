@@ -33,30 +33,107 @@ ceiling is therefore roughly one audited operation per serialized commit.
 
 This machine's storage does `fdatasync` at 2,003 ops/sec (499 us/op).
 A laptop NVMe is an order of magnitude faster at the same call, which is
-why the laptop runs below never reached the plateau: the serialization was
-always there, it was just cheap enough to stay invisible.
+why the laptop runs below never reached the plateau.
+
+> **Correction (2026-08-25).** The paragraph that used to follow blamed
+> that `fdatasync` figure for the ceiling: "bounded by storage commit
+> latency, not by cores". The 26.8M-contact scale test disproved it. Group
+> commit amortizes `fsync` across concurrent committers, and the same
+> storage sustains **4,914 commits/sec** when the advisory lock is removed
+> from an otherwise identical transaction. Storage was never the bound.
+> The lock is, on its own. See the scale-test section below and Phase 4 in
+> `PLAN.md`.
 
 **What this means honestly.**
 
 - The throughput advantage in the laptop numbers below is real but
-  conditional: it holds where storage `fsync` is fast and concurrency is
-  moderate. It is not a general claim about throughput under load.
-- Sunder's maximum audited-operation rate is bounded by storage commit
-  latency, not by cores. More CPU does not raise it.
+  conditional: it holds at moderate concurrency, below the plateau. It is
+  not a general claim about throughput under load.
+- Sunder's maximum audited-operation rate is bounded by one serialized
+  critical section, not by cores and not by storage. Neither more CPU nor
+  faster disks raise it; removing the serialization does.
 - ~460 audited operations per second is still ample for the internal
   identity traffic of most organisations, and the per-request latency
   advantage is unaffected. But an instance fronting a high-volume public
-  path needs either faster storage or a change to the chain design.
+  path needs a change to the chain design.
 - Nothing here is a correctness problem. The linear chain is what makes
   the audit log tamper-evident; the lock is what keeps it linear.
 
-**Options if this ceiling matters for a deployment** (none implemented, all
-trade something away): a chain per scope instead of one per instance
-(parallel writers, but "which scope touched this person" needs a join
-across chains); batching several records under one lock acquisition
-(higher throughput, coarser ordering); or moving the chain to an append
-log outside the transaction (much faster, but loses the same-transaction
-guarantee that an operation and its audit record commit together).
+## Scale test (2026-08-25): 26.8M contacts, and where the ceiling really is
+
+Same server, Postgres tuned off its 128 MB defaults first (`shared_buffers`
+12GB, `effective_cache_size` 32GB, `max_wal_size` 16GB,
+`random_page_cost` 1.1). Loaded with `benchmark/bulkload`, which COPYs
+rows carrying real keyed-HMAC tokens and real AEAD blobs computed through
+the server's own engine - a bulk-loaded contact resolves through the API
+exactly like a registered one, verified before measuring.
+
+**Dataset size barely moves lookup throughput**, even as the token index
+grows past what the buffer cache holds:
+
+| contacts | DB size | person_tokens index | buffer hit | lookup c=16 | lookup c=1 |
+|---------:|--------:|--------------------:|-----------:|------------:|-----------:|
+|  1M      | 1.6 GB  |   858 MB            | 100.00%    | 423.6 rps   | 241.8 rps  |
+|  5M      | 8.0 GB  |  4289 MB            | 100.00%    | 398.9 rps   | 222.5 rps  |
+| 10M      |  16 GB  |  8581 MB            |  99.52%    | 269.7 rps   | 183.4 rps  |
+| 20M      |  31 GB  |    17 GB            |  98.77%    | 366.2 rps   | 253.2 rps  |
+
+**Concurrency does not move it either.** At 26.8M contacts, throughput
+flattens at ~420 rps from c=8 while p50 doubles with every doubling of
+concurrency - added clients buy queueing delay and nothing else:
+
+| concurrency | rps   | p50      | p95       |
+|------------:|------:|---------:|----------:|
+| 1           | 160.4 |  4.99 ms |  12.12 ms |
+| 4           | 380.0 |  8.75 ms |  16.67 ms |
+| 8           | 423.6 | 15.32 ms |  31.27 ms |
+| 16          | 415.7 | 31.89 ms |  61.61 ms |
+| 32          | 449.2 | 60.06 ms | 103.89 ms |
+
+**Where the backends are.** Sampling `pg_stat_activity` during the c=32
+run: 117 of 124 active-backend samples sat in `Lock/advisory`, against 3
+in `IO/WALSync`.
+
+**Apportioning the cost.** pgbench against a clone of the audit table,
+each variant stripping one mechanism:
+
+| variant                                         | c=1 | c=8  | c=32     |
+|-------------------------------------------------|----:|-----:|---------:|
+| V1 lock + head SELECT + INSERT + COMMIT (today) | 492 |  342 | **298**  |
+| V2 head SELECT + INSERT + COMMIT (no lock)      | 379 | 1821 | **4114** |
+| V3 INSERT + COMMIT only                         | 618 | 2609 | **4914** |
+
+V1 scales negatively. Removing the advisory lock alone is **13.8x** at
+c=32, on the same hardware and the same durability settings.
+
+**Not the index.** `EXPLAIN (ANALYZE, BUFFERS)` on the production lookup
+query at 26.8M contacts: Index Scan, 6 shared buffers, 0.046 ms warm /
+0.144 ms cold - about 1% of a 4.99 ms request.
+
+**Two real scale effects, neither on the request path.** COPY ingest falls
+from 28,319 rows/s at 1M to ~2,700 rows/s past 25M, because HMAC output is
+uniformly random and index inserts have no locality. And indexes dominate
+storage: `person_tokens` carried 6.9 GB of heap under 23 GB of indexes,
+14 GB of which `pg_stat_user_indexes` showed was never once read - those
+two indexes exist only to enforce uniqueness.
+
+**Index diet, applied and measured.** Migration 0020 dropped
+`person_tokens_person_idx` (a strict prefix of the primary key, which the
+planner already preferred) and narrowed `person_tokens_lookup_idx` to
+`WHERE kind='name'`, letting email and phone fall through to the
+`ident_uq` index the dedup invariant already pays for:
+
+| | before | after |
+|---|---|---|
+| `person_tokens` indexes | 23 GB | **14 GB** |
+| database | 42 GB | **33 GB** |
+| migration runtime | | 15.7 s |
+
+Throughput did not change (171.6 / 363.7 / 343.6 rps at c=1/8/32), and was
+not expected to: the plateau is the lock, not the index. What this buys is
+storage and cache headroom for when P4.1 removes the plateau.
+
+Phase 4 in `PLAN.md` specifies the rest of the work these numbers imply.
 
 ## Result summary (2026-08-23, review pass 4 build, quieter machine)
 
