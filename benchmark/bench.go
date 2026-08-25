@@ -46,6 +46,7 @@ func main() {
 	c := flag.Int("c", 16, "concurrent workers")
 	seed := flag.String("seed", "bench", "identity namespace (ties read/lookup to a write run)")
 	purpose := flag.String("purpose", "benchmark", "Sunder purpose for attribute reads")
+	keyspace := flag.Int("keyspace", 0, "if >0, spread the N requests over a loaded set this large instead of hitting indices 0..N-1")
 	flag.Parse()
 	if *target == "" || *base == "" || *cred == "" {
 		fmt.Fprintln(os.Stderr, "need -target, -base, -cred")
@@ -72,7 +73,7 @@ func main() {
 			sem <- struct{}{}
 			go func(i int) {
 				defer func() { wg.Done(); <-sem }()
-				h, err := resolveHandle(client, *target, *base, *cred, email(*seed, i))
+				h, err := resolveHandle(client, *target, *base, *cred, email(*seed, scatter(i, *keyspace)))
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "resolve %d: %v\n", i, err)
 					os.Exit(1)
@@ -97,7 +98,7 @@ func main() {
 					return
 				}
 				t0 := time.Now()
-				err := doOne(client, *target, *base, *cred, *op, *seed, *purpose, i, handles)
+				err := doOne(client, *target, *base, *cred, *op, *seed, *purpose, i, *keyspace, handles)
 				results[i] = result{lat: time.Since(t0), err: err != nil}
 				if err != nil && i < 5 {
 					fmt.Fprintf(os.Stderr, "req %d: %v\n", i, err)
@@ -156,6 +157,20 @@ func mean(l []time.Duration) time.Duration {
 
 func email(seed string, i int) string { return fmt.Sprintf("%s-%d@bench.example", seed, i) }
 
+// scatter maps a sequential request counter onto a large loaded keyspace.
+// Without it a lookup run walks indices 0..n-1, which on a set far larger
+// than RAM measures the buffer cache rather than the index: those few pages
+// stay resident for the whole run. Multiplying by an odd constant coprime
+// with any power of two and taking it mod the keyspace spreads the probes
+// uniformly while staying deterministic, so two runs are comparable.
+func scatter(i, keyspace int) int {
+	if keyspace <= 0 {
+		return i
+	}
+	const knuth = 2654435761 // Knuth's multiplicative hash constant, odd
+	return int((uint64(i) * knuth) % uint64(keyspace))
+}
+
 // phone is namespaced by the seed (FNV offset) so consecutive benchmark runs
 // never collide on the unique phone index of either system.
 func phone(seed string, i int) string {
@@ -166,7 +181,7 @@ func phone(seed string, i int) string {
 	return fmt.Sprintf("+385%09d", (h%900+100)*1000000+uint64(i)%1000000)
 }
 
-func doOne(client *http.Client, target, base, cred, op, seed, purpose string, i int, handles []string) error {
+func doOne(client *http.Client, target, base, cred, op, seed, purpose string, i, keyspace int, handles []string) error {
 	switch target + "/" + op {
 	case "sunder/write":
 		return call(client, "POST", base+"/v1/contacts", sunderAuth(cred), map[string]any{
@@ -186,9 +201,10 @@ func doOne(client *http.Client, target, base, cred, op, seed, purpose string, i 
 		return call(client, "GET", base+"/v1/user/token/"+handles[i], bunkerAuth(cred), nil, 200)
 	case "sunder/lookup":
 		return call(client, "POST", base+"/v1/lookup", sunderAuth(cred),
-			map[string]any{"email": email(seed, i)}, 200)
+			map[string]any{"email": email(seed, scatter(i, keyspace))}, 200)
 	case "databunker/lookup":
-		return call(client, "GET", base+"/v1/user/email/"+email(seed, i), bunkerAuth(cred), nil, 200)
+		return call(client, "GET", base+"/v1/user/email/"+email(seed, scatter(i, keyspace)),
+			bunkerAuth(cred), nil, 200)
 	default:
 		return fmt.Errorf("unknown target/op %s/%s", target, op)
 	}

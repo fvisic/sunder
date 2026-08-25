@@ -246,3 +246,16 @@ func TestPredicateResultsAreNotAudited(t *testing.T) {
 		}
 	}
 }
+
+func TestThresholdGuardsAgainstAbsentValue(t *testing.T) {
+	// Threshold dereferences Value, and `exists` predicates legitimately
+	// carry none. The nil guard is the only thing between a well-formed
+	// request and a panic in the issue path.
+	if got := (service.Predicate{Attr: "email", Op: "exists"}).Threshold(); got != 0 {
+		t.Fatalf("absent value must read as 0, got %d", got)
+	}
+	v := 18
+	if got := (service.Predicate{Attr: "birthdate", Op: "age_gte", Value: &v}).Threshold(); got != 18 {
+		t.Fatalf("threshold %d, want 18", got)
+	}
+}

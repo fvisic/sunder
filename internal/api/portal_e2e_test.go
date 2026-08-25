@@ -17,11 +17,13 @@ import (
 
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
+	"github.com/fvisic/sunder/internal/store"
 	"github.com/fvisic/sunder/internal/testutil"
 )
 
 type portalEnv struct {
 	srv         *Server
+	st          *store.Store
 	credCRM     string
 	mailer      *httptest.Server
 	mu          sync.Mutex
@@ -33,7 +35,7 @@ func newPortalEnv(t *testing.T) *portalEnv {
 	t.Helper()
 	ctx := context.Background()
 	st := testutil.NewDB(t)
-	e := &portalEnv{}
+	e := &portalEnv{st: st}
 	e.mailer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Event string `json:"event"`
@@ -561,5 +563,37 @@ func TestExternalClaimsIsRateLimited(t *testing.T) {
 	}
 	if !got429 {
 		t.Fatal("claims.external must be rate-limited: each call appends to the audit chain")
+	}
+}
+
+// TestPortalDataSurfacesStorageFailure covers the error arm of
+// handlePortalData. It matters more than its size suggests: if a storage
+// failure fell through to a 200 with an empty payload, the portal would
+// tell a citizen exercising Article 15 that no data about them exists.
+// A wrong answer to that question is worse than no answer.
+func TestPortalDataSurfacesStorageFailure(t *testing.T) {
+	e := newPortalEnv(t)
+	e.register(t, "citizen@example.com")
+	session := e.login(t, "citizen@example.com")
+
+	// Sanity: the happy path answers before anything is broken.
+	if rec, _ := e.call(t, session, "GET", "/portal/api/me", ""); rec.Code != http.StatusOK {
+		t.Fatalf("baseline /me: %d", rec.Code)
+	}
+
+	// Break the read underneath the handler. Each test owns its own
+	// database (testutil.NewDB), so this cannot leak into another test.
+	if _, err := e.st.Pool.Exec(context.Background(),
+		`ALTER TABLE cids RENAME TO cids_gone`); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, out := e.call(t, session, "GET", "/portal/api/me", "")
+	if rec.Code < 500 {
+		t.Fatalf("storage failure must not read as a valid empty answer: %d %s",
+			rec.Code, rec.Body.String())
+	}
+	if _, ok := out["scopes"]; ok {
+		t.Fatal("failed response must not carry a scopes field at all")
 	}
 }
