@@ -183,3 +183,102 @@ answer from "which system" to "which operator the system claims", and a
 lying client system was always capable of lying in its own logs too. It
 is an opaque bounded ID, not a name, and is not part of the chain hash -
 the append-only trigger is what pins it.
+
+## Phase 3 features: the privacy line (F1, F2, F4, F5, F6, F8)
+
+Phase 3 adds capabilities that genuinely enlarge the surface - fuzzy and
+partial search, a value vault, a file vault, attribute history, and
+partner-facing shared records. That enlargement is *why* comparable
+products gate them behind a paid tier. The consistent line here: every one
+is **off by default** (or a separately permissioned action), audited, and
+its residual risk stated below, not buried. None widens what a stolen
+Sunder DB without keys yields - it is still keyed HMAC tokens and AEAD
+ciphertext.
+
+### F1 phonetic name / F2 phone suffix (search)
+
+- **Surface opened:** a many-to-one narrowing key. A caller who knows only
+  a name spelling or the last 8 phone digits can find a person, and a
+  stolen Sunder DB gains two more keyed-HMAC columns (`name_phonetic`,
+  `phone_suffix`).
+- **Mitigation:** off by default (`SUNDER_SEARCH_FUZZY_NAME`,
+  `SUNDER_SEARCH_PHONE_SUFFIX`); still keyed HMAC only, so a DB thief still
+  faces a keyed dictionary, not plaintext; narrowing-only and **bulk-deny
+  on ambiguity** - a suffix or phonetic code that matches 2+ people in the
+  caller's scope returns a miss, never a list, so it cannot enumerate;
+  every lookup audited; candidates are scope-filtered before the ambiguity
+  decision, so a foreign-scope collision can neither block nor leak.
+- **Residual risk:** an attacker with a *valid credential* can confirm
+  whether a guessed name/suffix belongs to exactly one person in that
+  scope. That is a single-record oracle, rate-limited and audited, not a
+  bulk channel. The strict posture (`SUNDER_SEARCH_UNLOCK=true`) adds a
+  60-second single-use unlock token in front of it for deployments that
+  want the extra friction.
+
+### F4 value tokenization
+
+- **Surface opened:** a new `value_tokens` store of sealed values and a
+  redeem endpoint.
+- **Mitigation:** ciphertext is AEAD-bound to the token AND the creating
+  scope, so a stolen row cannot be replayed in another tenant or
+  re-pointed at another token; redeem is scope-checked and audited; a
+  miss (absent/foreign/expired) is indistinguishable; card tokens drop the
+  BIN; `unique` dedup is a keyed HMAC bound to scope+type, no cross-tenant
+  probe. **Bulk create/read always require an unlock token** regardless of
+  configuration - bulk is where quiet exfiltration lives.
+- **Residual risk:** a stolen credential with `tokens.read` can redeem
+  tokens it knows the handles for, at rate, audited. Bulk is gated behind
+  the unlock token and one chained intent record.
+
+### F5 file vault
+
+- **Surface opened:** encrypted blobs in an object store (local or S3) and
+  upload/download endpoints - a new data class.
+- **Mitigation:** off unless a storage driver is configured; the driver
+  only ever sees AEAD ciphertext (4 MiB chunks, chunk index and file id in
+  the AAD - no reorder/transplant); the per-file DEK is wrapped by a
+  per-person **record key**, so erasure destroys one row and every file is
+  unrecoverable at commit (crypto-shredding), with no storage round trip on
+  the erasure path; downloads are purpose- and consent-checked and audited
+  before the first byte; uploads are size-capped and authorized before any
+  bytes are spooled.
+- **Residual risk:** object-storage operational surface (bucket policy, S3
+  credentials) is now in scope for the operator; a compromised bucket still
+  yields only ciphertext. A retired KEK is only cured for files once
+  `keys rekey -reencrypt-pii` has re-wrapped the record keys.
+
+### F6 attribute versioning
+
+- **Surface opened:** superseded attribute values are retained in
+  `cid_blob_versions` - directly in tension with storage limitation.
+- **Mitigation:** off by default (`SUNDER_VERSIONS_KEEP=0`); count-capped
+  and TTL-pruned; history is deleted with the person on erasure in the same
+  transaction; reading a version is purpose-, consent- and
+  allowlist-checked and audited exactly like a live read.
+- **Residual risk:** while enabled, the retention clock for that scope's
+  attributes effectively extends by the version window. This is a
+  deliberate operator choice; the guide states it in the first paragraph.
+
+### F8 shared records
+
+- **Surface opened:** an unguessable UUID that exposes a few named
+  attributes to an external partner, optionally credential-less.
+- **Mitigation:** the F3 attribute allowlist applies at creation (a share
+  cannot leak what its creator may not read); the fetch returns strictly
+  the listed fields; default consumption requires a valid client credential
+  (stronger than a bare-UUID bearer), `SUNDER_SHARES_PUBLIC` opts into the
+  credential-less mode explicitly and only for GET; erasure AND consent
+  withdrawal auto-revoke standing shares, so a UUID never outlives the data;
+  every fetch is audited with the partner label.
+- **Residual risk:** in public mode the UUID is the bearer - anyone who
+  obtains it can fetch the named fields until it expires or is revoked.
+  That is the intended cross-org trade-off; the label makes each fetch
+  attributable, and revoke/erasure/consent kill it immediately.
+
+### F9 recovery shares (custody, not disclosure)
+
+F9 does not widen the data surface - it protects against *losing* the file
+keystore. The recovery key never touches disk, `recovery.bundle` is
+ciphertext, and the threshold only holds if custodians keep their shares
+apart. The one operational risk it introduces is custodian concentration
+("five shares in one vault is 1-of-1 in a costume"), stated in the guide.
