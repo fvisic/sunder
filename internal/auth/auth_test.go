@@ -1,6 +1,9 @@
 package auth
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestPresetsExcludeExplicitGrantActions (review medium): scopes.issue
 // (linkage-capable) and, on the service preset, tokens.delete (destroys the
@@ -29,5 +32,21 @@ func TestPresetsExcludeExplicitGrantActions(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("the admin preset keeps tokens.delete by design")
+	}
+}
+
+func TestValidateUnlockGrant(t *testing.T) {
+	// admin.unlock on a non-expiring credential is refused.
+	if err := ValidateUnlockGrant([]string{ActAdminUnlock, ActLookup}, nil); err == nil {
+		t.Fatal("admin.unlock without an expiry must be refused")
+	}
+	// With an expiry it is allowed.
+	future := time.Now().Add(time.Hour)
+	if err := ValidateUnlockGrant([]string{ActAdminUnlock}, &future); err != nil {
+		t.Fatalf("admin.unlock with an expiry must be allowed: %v", err)
+	}
+	// A credential WITHOUT admin.unlock is unaffected by the expiry rule.
+	if err := ValidateUnlockGrant([]string{ActLookup, ActTokensCreate}, nil); err != nil {
+		t.Fatalf("no unlock action: %v", err)
 	}
 }

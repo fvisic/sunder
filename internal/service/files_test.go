@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/service"
 	"github.com/fvisic/sunder/internal/storage"
@@ -842,5 +843,66 @@ func TestGCRedactsMetadata(t *testing.T) {
 		`SELECT name, sha256 FROM files WHERE id=$1`, meta.ID).Scan(&name, &sum)
 	if err == nil && (name != "" || sum != "") {
 		t.Fatalf("gc-marked row must carry no plaintext metadata: name=%q sha256=%q", name, sum)
+	}
+}
+
+// TestDownloadDoesNotMintRecordKey (review L13): a read path must never mint
+// key material. A download for a person with no record key (hence no files)
+// is a clean miss, and no person_record_keys row appears.
+func TestDownloadDoesNotMintRecordKey(t *testing.T) {
+	e, f, client, cid := filesEnv(t)
+	ctx := context.Background()
+	// No upload yet -> no record key. A download attempt must miss without
+	// creating one.
+	if _, err := f.Peek(ctx, client, "00000000-0000-0000-0000-000000000000", "support"); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("download of an absent file must miss: %v", err)
+	}
+	var n int64
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM person_record_keys prk JOIN cids c ON c.person_id=prk.person_id WHERE c.cid=$1`, cid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("a read path must not mint a record key, found %d", n)
+	}
+}
+
+// TestListAndVersionsAudit (review L5): metadata reads leave a trail.
+func TestVersionsAndLinksListAudit(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	client := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActAttributesHistory, auth.ActLinksManage}}
+	cid, err := e.svc.Register(ctx, client, service.RegisterInput{Email: "l5@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.ListVersions(ctx, client, cid); err != nil {
+		t.Fatal(err)
+	}
+	links := &service.Links{Pool: e.admin.Pool, Contacts: e.svc}
+	if _, err := links.List(ctx, client, cid); err != nil {
+		t.Fatal(err)
+	}
+	// Drain so bucketed reads are chained, then look for the two actions.
+	if _, err := audit.Drain(ctx, e.admin.Pool, 100); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"versions.list", "links.list"} {
+		var n int64
+		if err := e.admin.Pool.QueryRow(ctx,
+			`SELECT count(*) FROM audit WHERE action=$1 AND cid=$2`, action, cid).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			// bucketed mode: check the bucket table instead
+			if err := e.admin.Pool.QueryRow(ctx,
+				`SELECT count(*) FROM audit_read_buckets WHERE action=$1 AND cid=$2`, action, cid).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n == 0 {
+			t.Fatalf("%s must leave an audit trail", action)
+		}
 	}
 }

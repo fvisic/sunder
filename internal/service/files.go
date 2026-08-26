@@ -102,6 +102,25 @@ type FileMeta struct {
 // recordKey loads (or on first use mints) the person's record key. The
 // caller must already hold a legitimate path to the person - this is a
 // key-management helper, not an access check.
+// recordKeyForRead loads a person's record key WITHOUT minting one: a read
+// path (download) must never create key material. Absence means the person
+// has no files, which is an indistinguishable miss (L13).
+func (f *Files) recordKeyForRead(ctx context.Context, personID string) ([]byte, error) {
+	var wrapped []byte
+	var keyID, alg string
+	err := f.Pool.QueryRow(ctx,
+		`SELECT wrapped, key_id, alg FROM person_record_keys WHERE person_id=$1`, personID).
+		Scan(&wrapped, &keyID, &alg)
+	if err == pgx.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return f.Eng.Open(ctx, crypto.KeyPIIKEK+"/"+keyID, alg, recordKeyAAD(personID), wrapped)
+}
+
+// recordKey loads or, on the WRITE path only, mints the person's record key.
 func (f *Files) recordKey(ctx context.Context, personID string) ([]byte, error) {
 	kek, err := f.Ring.Newest(ctx, crypto.KeyPIIKEK)
 	if err != nil {
@@ -307,7 +326,7 @@ func (f *Files) Download(ctx context.Context, client *auth.Client, fileID, purpo
 	} else if denied {
 		return nil, ErrConsentDenied
 	}
-	recordKey, err := f.recordKey(ctx, personID)
+	recordKey, err := f.recordKeyForRead(ctx, personID)
 	if err != nil {
 		return nil, err
 	}

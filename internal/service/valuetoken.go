@@ -516,32 +516,63 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 
 // validateAndHash performs the pure validation and the unique-hash
 // computation shared by the single and bulk paths.
-func (v *ValueTokens) validateAndHash(ctx context.Context, client *auth.Client, keyID string, in TokenizeInput) (tokenType string, expiresFinal *time.Time, uniqueHash []byte, err error) {
+// validateShape does the PURE (no-crypto, no-DB) validation of one item and
+// returns the resolved token type and parsed expiry. Exposed via
+// ValidateInputs so the bulk path can reject a bad batch BEFORE spending the
+// single-use unlock token (L9): a request that can never tokenize must not
+// burn the token nor write an intent-spent audit row.
+func validateShape(in TokenizeInput) (tokenType string, expiresFinal *time.Time, err error) {
 	if in.Value == "" {
-		return "", nil, nil, fmt.Errorf("%w: value required", ErrValidation)
+		return "", nil, fmt.Errorf("%w: value required", ErrValidation)
 	}
 	if len(in.Value) > maxTokenValueBytes {
-		return "", nil, nil, fmt.Errorf("%w: value exceeds %d bytes (the file vault is for blobs)", ErrValidation, maxTokenValueBytes)
+		return "", nil, fmt.Errorf("%w: value exceeds %d bytes (the file vault is for blobs)", ErrValidation, maxTokenValueBytes)
 	}
 	tokenType = in.Type
 	if tokenType == "" {
 		tokenType = "string"
 	}
 	if tokenType != "string" && tokenType != "card" {
-		return "", nil, nil, fmt.Errorf("%w: type must be \"string\" or \"card\"", ErrValidation)
+		return "", nil, fmt.Errorf("%w: type must be \"string\" or \"card\"", ErrValidation)
 	}
 	if tokenType == "card" && !luhnValid(digitsOf(in.Value)) {
-		return "", nil, nil, fmt.Errorf("%w: card value fails the Luhn check", ErrValidation)
+		return "", nil, fmt.Errorf("%w: card value fails the Luhn check", ErrValidation)
 	}
 	if in.ExpiresFinal != "" {
 		t, perr := time.Parse(time.RFC3339, in.ExpiresFinal)
 		if perr != nil {
-			return "", nil, nil, fmt.Errorf("%w: expires_final must be RFC3339", ErrValidation)
+			return "", nil, fmt.Errorf("%w: expires_final must be RFC3339", ErrValidation)
 		}
 		expiresFinal = &t
 	}
 	if in.SlidingSeconds < 0 {
-		return "", nil, nil, fmt.Errorf("%w: sliding_seconds must be >= 0", ErrValidation)
+		return "", nil, fmt.Errorf("%w: sliding_seconds must be >= 0", ErrValidation)
+	}
+	return tokenType, expiresFinal, nil
+}
+
+// ValidateInputs shape-checks a whole batch (pure, no side effects). The bulk
+// handler calls it before consuming the unlock token so a malformed item
+// cannot burn a single-use token (L9).
+func (v *ValueTokens) ValidateInputs(items []TokenizeInput) error {
+	if len(items) == 0 {
+		return fmt.Errorf("%w: items required", ErrValidation)
+	}
+	if len(items) > bulkTokenLimit {
+		return fmt.Errorf("%w: at most %d items per bulk call", ErrValidation, bulkTokenLimit)
+	}
+	for i, in := range items {
+		if _, _, err := validateShape(in); err != nil {
+			return fmt.Errorf("item %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func (v *ValueTokens) validateAndHash(ctx context.Context, client *auth.Client, keyID string, in TokenizeInput) (tokenType string, expiresFinal *time.Time, uniqueHash []byte, err error) {
+	tokenType, expiresFinal, err = validateShape(in)
+	if err != nil {
+		return "", nil, nil, err
 	}
 	if in.Unique {
 		hmacV, herr := v.Ring.Newest(ctx, crypto.KeyHMACEmail)

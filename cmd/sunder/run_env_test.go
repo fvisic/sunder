@@ -145,7 +145,7 @@ func TestRunDispatchesOpsCommands(t *testing.T) {
 	} else if err := run("sealer", []string{"-once"}); err == nil {
 		t.Fatal("sealer must refuse under sync sealing")
 	}
-	if err := run("client", []string{"create", "-id", "grantme", "-name", "G", "-scope", "crm", "-actions", "lookup", "-purposes", "support"}); err != nil {
+	if err := run("client", []string{"create", "-id", "grantme", "-name", "G", "-scope", "crm", "-actions", "lookup", "-purposes", "support", "-ttl", "90d"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := run("client", []string{"grant", "-id", "grantme", "-add-actions", "admin.unlock"}); err != nil {

@@ -16,6 +16,7 @@ import (
 	neturl "net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -189,12 +190,30 @@ func webhookCmd(ctx context.Context, st *store.Store, args []string) error {
 // clientGrantCmd adjusts an existing client's actions, attribute allowlist
 // or role - the supported path to enable strict search posture (grant
 // admin.unlock) or F3 narrowing on a live client without editing SQL.
+// checkUnlockAgainstExpiry refuses to put admin.unlock on a credential that
+// has no expiry (L10). It reads the client's CURRENT expiry, so it is the
+// single guard every grant path funnels through.
+func checkUnlockAgainstExpiry(ctx context.Context, st *store.Store, id string, actions []string) error {
+	if !slices.Contains(actions, auth.ActAdminUnlock) {
+		return nil
+	}
+	var hasExpiry bool
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT credential_expires_at IS NOT NULL FROM clients WHERE client_id=$1`, id).Scan(&hasExpiry); err != nil {
+		return err
+	}
+	if !hasExpiry {
+		return fmt.Errorf("admin.unlock must not be granted to a non-expiring credential (L10): a standing unlock grant defeats the strict search posture; give it a -ttl first")
+	}
+	return nil
+}
+
 func clientGrantCmd(ctx context.Context, st *store.Store, args []string) error {
 	fs := flag.NewFlagSet("client grant", flag.ContinueOnError)
 	id := fs.String("id", "", "client id (required)")
 	role := fs.String("role", "", "replace actions with a preset: readonly|service|admin|privacy-officer")
 	addActions := fs.String("add-actions", "", "comma-separated actions to ADD to the current set")
-	attributes := fs.String("attributes", "", "replace the attribute allowlist (empty string clears it = all)")
+	attributes := fs.String("attributes", "", "replace the attribute allowlist (comma-separated); empty is IGNORED - use -clear-attributes to read all")
 	clearAttrs := fs.Bool("clear-attributes", false, "remove the attribute allowlist (read all)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -214,6 +233,11 @@ func clientGrantCmd(ctx context.Context, st *store.Store, args []string) error {
 		if preset == nil {
 			return fmt.Errorf("unknown role %q", *role)
 		}
+		// L10: a preset that includes admin.unlock (admin does) must not land
+		// on a non-expiring credential - same rule as create and -add-actions.
+		if err := checkUnlockAgainstExpiry(ctx, st, *id, preset); err != nil {
+			return err
+		}
 		if _, err := st.Pool.Exec(ctx,
 			`UPDATE clients SET role=$2, allowed_actions=$3 WHERE client_id=$1`,
 			*id, *role, preset); err != nil {
@@ -225,6 +249,11 @@ func clientGrantCmd(ctx context.Context, st *store.Store, args []string) error {
 			if !known[a] {
 				return fmt.Errorf("unknown action %q", a)
 			}
+		}
+		// L10: adding admin.unlock to a non-expiring credential is refused,
+		// same rule as at creation.
+		if err := checkUnlockAgainstExpiry(ctx, st, *id, add); err != nil {
+			return err
 		}
 		// Union the added actions into the current set; role becomes custom.
 		if _, err := st.Pool.Exec(ctx, `

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
@@ -165,8 +166,9 @@ func TestSearchUnlockStrictPosture(t *testing.T) {
 	st := testutil.NewDB(t)
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
-		AllowedActions:  []string{auth.ActContactsRegister, auth.ActLookup, auth.ActAdminUnlock},
-		AllowedPurposes: []string{"support"}, RateLimit: 100})
+		AllowedActions:      []string{auth.ActContactsRegister, auth.ActLookup, auth.ActAdminUnlock},
+		CredentialExpiresAt: testUnlockExpiry(),
+		AllowedPurposes:     []string{"support"}, RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,8 +234,9 @@ func TestValueTokenBulkRequiresUnlock(t *testing.T) {
 	st := testutil.NewDB(t)
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
-		AllowedActions:  []string{auth.ActTokensCreate, auth.ActTokensRead, auth.ActAdminUnlock},
-		AllowedPurposes: []string{}, RateLimit: 100})
+		AllowedActions:      []string{auth.ActTokensCreate, auth.ActTokensRead, auth.ActAdminUnlock},
+		CredentialExpiresAt: testUnlockExpiry(),
+		AllowedPurposes:     []string{}, RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,8 +302,9 @@ func TestReviewF4_UnlockNotBurnedOnNonSearch(t *testing.T) {
 	st := testutil.NewDB(t)
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
-		AllowedActions:  []string{auth.ActContactsRegister, auth.ActLookup, auth.ActAdminUnlock},
-		AllowedPurposes: []string{}, RateLimit: 100})
+		AllowedActions:      []string{auth.ActContactsRegister, auth.ActLookup, auth.ActAdminUnlock},
+		CredentialExpiresAt: testUnlockExpiry(),
+		AllowedPurposes:     []string{}, RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +474,7 @@ func TestFileAndTokenHTTPErrorPaths(t *testing.T) {
 		ID: "crm", Name: "CRM", Scope: "crm",
 		AllowedActions: []string{auth.ActContactsRegister, auth.ActFilesWrite, auth.ActFilesRead,
 			auth.ActTokensCreate, auth.ActTokensRead, auth.ActAdminUnlock},
-		AllowedPurposes: []string{"support"}, RateLimit: 100})
+		AllowedPurposes: []string{"support"}, CredentialExpiresAt: testUnlockExpiry(), RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,7 +587,7 @@ func TestTokenAndFileHandlerErrorBranches(t *testing.T) {
 		ID: "crm", Name: "CRM", Scope: "crm",
 		AllowedActions: []string{auth.ActContactsRegister, auth.ActTokensCreate, auth.ActTokensRead,
 			auth.ActTokensDelete, auth.ActFilesWrite, auth.ActFilesRead, auth.ActAdminUnlock},
-		AllowedPurposes: []string{"support"}, RateLimit: 100})
+		AllowedPurposes: []string{"support"}, CredentialExpiresAt: testUnlockExpiry(), RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +666,8 @@ func TestHandlerHardErrorPaths(t *testing.T) {
 		ID: "crm", Name: "CRM", Scope: "crm",
 		AllowedActions: []string{auth.ActContactsRegister, auth.ActLookup, auth.ActAdminUnlock,
 			auth.ActTokensCreate, auth.ActTokensRead},
-		AllowedPurposes: []string{}, RateLimit: 100})
+		CredentialExpiresAt: testUnlockExpiry(),
+		AllowedPurposes:     []string{}, RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -803,7 +808,7 @@ func TestReviewFixHandlerBranches(t *testing.T) {
 		ID: "crm", Name: "CRM", Scope: "crm",
 		AllowedActions: []string{auth.ActContactsRegister, auth.ActFilesWrite, auth.ActFilesRead,
 			auth.ActTokensCreate, auth.ActTokensRead, auth.ActAdminUnlock},
-		AllowedPurposes: []string{"support"}, RateLimit: 100})
+		AllowedPurposes: []string{"support"}, CredentialExpiresAt: testUnlockExpiry(), RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -983,8 +988,9 @@ func TestBulkTokenHandlerHardErrors(t *testing.T) {
 	st := testutil.NewDB(t)
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
-		AllowedActions:  []string{auth.ActTokensCreate, auth.ActTokensRead, auth.ActAdminUnlock},
-		AllowedPurposes: []string{}, RateLimit: 100})
+		AllowedActions:      []string{auth.ActTokensCreate, auth.ActTokensRead, auth.ActAdminUnlock},
+		CredentialExpiresAt: testUnlockExpiry(),
+		AllowedPurposes:     []string{}, RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1296,8 +1302,9 @@ func TestBulkCreateHardErrorWriteErr(t *testing.T) {
 	st := testutil.NewDB(t)
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
-		AllowedActions:  []string{auth.ActTokensCreate, auth.ActAdminUnlock},
-		AllowedPurposes: []string{}, RateLimit: 100})
+		AllowedActions:      []string{auth.ActTokensCreate, auth.ActAdminUnlock},
+		CredentialExpiresAt: testUnlockExpiry(),
+		AllowedPurposes:     []string{}, RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1328,7 +1335,7 @@ func TestAdminUnlockRateLimited(t *testing.T) {
 	st := testutil.NewDB(t)
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
-		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, RateLimit: 2})
+		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, CredentialExpiresAt: testUnlockExpiry(), RateLimit: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1357,7 +1364,7 @@ func TestOpenAPIAndBulkReadForbidden(t *testing.T) {
 	st := testutil.NewDB(t)
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
-		AllowedActions: []string{auth.ActTokensCreate, auth.ActAdminUnlock}, AllowedPurposes: []string{}, RateLimit: 100})
+		AllowedActions: []string{auth.ActTokensCreate, auth.ActAdminUnlock}, AllowedPurposes: []string{}, CredentialExpiresAt: testUnlockExpiry(), RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1389,7 +1396,7 @@ func TestOpenAPIAndBulkReadForbidden(t *testing.T) {
 	st2 := testutil.NewDB(t)
 	weakCred, err := auth.Create(ctx, st2.Pool, auth.Client{
 		ID: "w", Name: "W", Scope: "crm",
-		AllowedActions: []string{auth.ActTokensRead, auth.ActAdminUnlock}, AllowedPurposes: []string{}, RateLimit: 100})
+		AllowedActions: []string{auth.ActTokensRead, auth.ActAdminUnlock}, AllowedPurposes: []string{}, CredentialExpiresAt: testUnlockExpiry(), RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1522,3 +1529,8 @@ func TestNewSurfacesAreRateLimited(t *testing.T) {
 		}
 	}
 }
+
+// testUnlockExpiry gives test credentials that hold admin.unlock the expiry
+// L10 now requires (a standing unlock grant on a non-expiring credential is
+// refused at creation).
+func testUnlockExpiry() *time.Time { t := time.Now().Add(24 * time.Hour); return &t }

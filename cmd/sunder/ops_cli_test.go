@@ -890,10 +890,11 @@ func TestClientCreateRolesAndAttributes(t *testing.T) {
 func TestReviewF2_ClientGrant(t *testing.T) {
 	st := testutil.NewDB(t)
 	ctx := context.Background()
-	if err := clientCmd(ctx, st, []string{"create", "-id", "crm", "-name", "CRM", "-scope", "crm", "-actions", "lookup", "-purposes", "support"}); err != nil {
+	if err := clientCmd(ctx, st, []string{"create", "-id", "crm", "-name", "CRM", "-scope", "crm", "-actions", "lookup", "-purposes", "support", "-ttl", "90d"}); err != nil {
 		t.Fatal(err)
 	}
-	// Grant admin.unlock so the client can mint tokens for strict posture.
+	// Grant admin.unlock so the client can mint tokens for strict posture
+	// (allowed because the credential is expiring - L10).
 	if err := clientCmd(ctx, st, []string{"grant", "-id", "crm", "-add-actions", "admin.unlock"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1072,5 +1073,41 @@ func TestKnownActionsCoversRolePresets(t *testing.T) {
 				t.Errorf("action %q is in role %q but missing from knownActions()", a, role)
 			}
 		}
+	}
+}
+
+// TestUnlockGrantClosedOnAllPaths (review F1): admin.unlock must not reach a
+// non-expiring credential through ANY operator path - create, -add-actions,
+// -role admin, or rotate-secret -no-expiry.
+func TestUnlockGrantClosedOnAllPaths(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	mk := func(id string, extra ...string) {
+		args := append([]string{"create", "-id", id, "-name", id, "-scope", "crm", "-actions", "lookup", "-purposes", "support"}, extra...)
+		if err := clientCmd(ctx, st, args); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+
+	// -role admin onto a NON-expiring credential is refused (admin preset
+	// includes admin.unlock).
+	mk("noexp")
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "noexp", "-role", "admin"}); err == nil {
+		t.Fatal("-role admin must be refused on a non-expiring credential")
+	}
+	// The same on an EXPIRING credential is allowed.
+	mk("exp", "-ttl", "90d")
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "exp", "-role", "admin"}); err != nil {
+		t.Fatalf("-role admin on an expiring credential must be allowed: %v", err)
+	}
+
+	// rotate-secret -no-expiry must not strip the expiry off a client that
+	// holds admin.unlock.
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "exp", "-no-expiry"}); err == nil {
+		t.Fatal("rotate-secret -no-expiry must be refused while admin.unlock is held")
+	}
+	// A client WITHOUT admin.unlock can be rotated to non-expiring freely.
+	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "noexp", "-no-expiry"}); err != nil {
+		t.Fatalf("rotate to non-expiring without unlock must be allowed: %v", err)
 	}
 }

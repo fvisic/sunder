@@ -18,6 +18,7 @@ package crypto
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 )
@@ -241,10 +242,10 @@ func CombineWithChecksum(shares [][]byte) ([]byte, error) {
 	}
 	secret := payload[checksumLen:]
 	want := sha256.Sum256(secret)
-	for i := 0; i < checksumLen; i++ {
-		if payload[i] != want[i] {
-			return nil, ErrInsufficientShares
-		}
+	// Constant-time: the checksum is a MAC-like verifier, so a byte-at-a-time
+	// early exit would time-leak how many leading bytes matched.
+	if subtle.ConstantTimeCompare(payload[:checksumLen], want[:checksumLen]) != 1 {
+		return nil, ErrInsufficientShares
 	}
 	return secret, nil
 }

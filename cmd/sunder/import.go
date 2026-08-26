@@ -298,6 +298,16 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 	}
 	fmt.Printf("import done: %d imported, %d skipped as existing, %d in-file duplicates, %d lines, %s\n",
 		inserted, skipped, dupes, lineNo, time.Since(start).Truncate(time.Millisecond))
+	// L12: in-file dedup is scope-BLIND (one email = one person, globally),
+	// so a single file carrying the SAME identifiers for two scopes collapses
+	// them - the second scope silently gets nothing. Import is per-scope by
+	// -scope; if you meant to load two scopes, run it once per scope with
+	// per-scope files. Say so loudly whenever duplicates were dropped.
+	if dupes > 0 {
+		fmt.Printf("NOTE: %d rows were dropped as in-file duplicates (same email or phone appearing twice). "+
+			"Dedup is scope-blind and this run loaded ONLY scope %q - to load another scope, run import again "+
+			"with its own -scope and a file of that scope's records.\n", dupes, *scope)
+	}
 	return nil
 }
 

@@ -20,7 +20,6 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -67,7 +66,7 @@ func SealRecoveryBundle(recoveryKey []byte, entries []KeyEntry) ([]byte, error) 
 		return nil, err
 	}
 	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
+	if _, err := randRead(nonce); err != nil {
 		return nil, err
 	}
 	out := append([]byte(nil), recoveryMagic...)

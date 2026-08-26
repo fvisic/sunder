@@ -15,13 +15,18 @@ jobs:
     # releases (P4.1).
     strategy:
       matrix:
-        # Pairwise over the two audit switches: the default posture and
-        # the strict posture. Each switch still sees both of its values.
+        # The two headline postures, PLUS (sync, bucketed) - the cross
+        # combination where sync sealing meets the read-bucket hour close
+        # (the H11 fix's surface); it was the untested corner of the
+        # pairwise matrix (L14). Coverage is gated on the deterministic
+        # non-race legs, so a third leg is cheap.
         include:
           - audit_sealing: async
             audit_reads: bucketed
           - audit_sealing: sync
             audit_reads: chained
+          - audit_sealing: sync
+            audit_reads: bucketed
     services:
       postgres:
         image: postgres:16

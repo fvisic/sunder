@@ -120,10 +120,12 @@ func (s *Shares) Fetch(ctx context.Context, actor, uuid string) (map[string]stri
 		uuid).Scan(&cid, &scope, &fields, &partner, &purpose)
 	if err == pgx.ErrNoRows {
 		// A miss (absent, expired or revoked) is audited and indistinguishable.
-		_ = audit.ReadEvent(ctx, s.Pool, audit.Entry{
+		if err := audit.ReadEvent(ctx, s.Pool, audit.Entry{
 			ClientID: actor, Action: "shares.fetch",
 			Detail: map[string]any{"share": uuid, "matched": false},
-		})
+		}); err != nil {
+			return nil, fmt.Errorf("audit append: %w", err)
+		}
 		return nil, ErrNotFound
 	}
 	if err != nil {
@@ -136,10 +138,12 @@ func (s *Shares) Fetch(ctx context.Context, actor, uuid string) (map[string]stri
 	if denied, err := consentDenied(ctx, s.Pool, cid, purpose); err != nil {
 		return nil, err
 	} else if denied {
-		_ = audit.ReadEvent(ctx, s.Pool, audit.Entry{
+		if err := audit.ReadEvent(ctx, s.Pool, audit.Entry{
 			ClientID: actor, Action: "shares.fetch",
 			Detail: map[string]any{"share": uuid, "matched": false},
-		})
+		}); err != nil {
+			return nil, fmt.Errorf("audit append: %w", err)
+		}
 		return nil, ErrNotFound
 	}
 	// Read the person's blob directly (the share plus its consent check IS

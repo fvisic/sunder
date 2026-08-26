@@ -144,3 +144,41 @@ func TestFileKeystoreWriteFailuresOnReadOnlyDir(t *testing.T) {
 		t.Fatal("RestoreKeys into a read-only dir must fail")
 	}
 }
+
+// TestRestoreKeysRejectsTraversalName (review L1): a forged recovery bundle
+// must not be able to write outside the keystore dir - RestoreKeys validates
+// every entry name through checkName, the same guard the write paths use.
+func TestRestoreKeysRejectsTraversalName(t *testing.T) {
+	dir := t.TempDir()
+	ks := &FileKeystore{Dir: dir}
+	evil := []KeyEntry{{Name: "../../pwned", Key: make([]byte, 32)}}
+	if err := ks.RestoreKeys(evil); err == nil {
+		t.Fatal("a bundle entry with a traversal name must be refused")
+	}
+	// And a well-formed name still restores.
+	ok := []KeyEntry{{Name: "pii-kek_v1", Key: make([]byte, 32)}}
+	if err := ks.RestoreKeys(ok); err != nil {
+		t.Fatalf("a valid entry must restore: %v", err)
+	}
+}
+
+// TestWriteRecoveryBundleRefusesOverwrite (review L2): a plain write must not
+// clobber an existing bundle (it would strand every custodian's shares);
+// only the Force variant may.
+func TestWriteRecoveryBundleRefusesOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	ks := &FileKeystore{Dir: dir}
+	if err := ks.WriteRecoveryBundle([]byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ks.WriteRecoveryBundle([]byte("second")); err == nil {
+		t.Fatal("overwriting an existing bundle without Force must be refused")
+	}
+	if err := ks.WriteRecoveryBundleForce([]byte("third")); err != nil {
+		t.Fatalf("Force must overwrite: %v", err)
+	}
+	b, err := ks.ReadRecoveryBundle()
+	if err != nil || string(b) != "third" {
+		t.Fatalf("Force write must take: %q %v", b, err)
+	}
+}

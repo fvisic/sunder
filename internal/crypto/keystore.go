@@ -46,6 +46,25 @@ func checkName(name string) error {
 	return nil
 }
 
+// validBundleName guards the ON-DISK base name a recovery bundle carries
+// (slashes already folded to "_"): no path separators, no parent reference,
+// no absolute path, and a conservative character set - enough that
+// filepath.Join can never escape f.Dir.
+func validBundleName(name string) bool {
+	if name == "" || len(name) > 128 || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") || filepath.IsAbs(name) {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // --- file driver -----------------------------------------------------------
 
 // FileKeystore stores raw keys as 0600 files under a directory. Suitable for
@@ -363,13 +382,36 @@ func (f *FileKeystore) AllKeys() ([]KeyEntry, error) {
 
 // WriteRecoveryBundle atomically writes the sealed bundle to the keystore
 // directory (0600). It contains only ciphertext - safe to back up.
+// ErrBundleExists is returned by WriteRecoveryBundle when a bundle already
+// exists and force was not requested - overwriting silently invalidates
+// every custodian's shares.
+var ErrBundleExists = errors.New("keystore: a recovery bundle already exists")
+
 func (f *FileKeystore) WriteRecoveryBundle(bundle []byte) error {
+	return f.writeRecoveryBundle(bundle, false)
+}
+
+// WriteRecoveryBundleForce overwrites an existing bundle. shamir-rotate uses
+// it deliberately (new shares supersede the old); shamir-init does not (a
+// fresh init over a live bundle would silently strand the old custodians).
+func (f *FileKeystore) WriteRecoveryBundleForce(bundle []byte) error {
+	return f.writeRecoveryBundle(bundle, true)
+}
+
+func (f *FileKeystore) writeRecoveryBundle(bundle []byte, force bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := os.MkdirAll(f.Dir, 0o700); err != nil {
 		return err
 	}
 	p := filepath.Join(f.Dir, recoveryBundleFile)
+	if !force {
+		if _, err := os.Stat(p); err == nil {
+			return ErrBundleExists
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
 	tf, err := os.CreateTemp(f.Dir, recoveryBundleFile+".tmp*")
 	if err != nil {
 		return err
@@ -409,6 +451,14 @@ func (f *FileKeystore) RestoreKeys(entries []KeyEntry) error {
 	for _, e := range entries {
 		if len(e.Key) != 32 {
 			return fmt.Errorf("keystore: recovered key %q has %d bytes, want 32", e.Name, len(e.Key))
+		}
+		// A forged bundle could carry "../../etc/x" as a name. The bundle
+		// stores the ON-DISK base name (slashes already folded to "_"), so
+		// the guard here is a path-safety check, not checkName's slash form:
+		// reject any separator, parent ref or absolute path so a name cannot
+		// escape the keystore dir (L1, defense-in-depth).
+		if !validBundleName(e.Name) {
+			return fmt.Errorf("keystore: recovery bundle carries an unsafe key name %q", e.Name)
 		}
 		p := filepath.Join(f.Dir, e.Name+".key")
 		tf, err := os.CreateTemp(f.Dir, filepath.Base(p)+".tmp*")
