@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fvisic/sunder/internal/audit"
+	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/testutil"
@@ -1057,5 +1058,19 @@ func TestBootstrapUnattendedBadCredFile(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("a failed credential write must roll back the client, found %d", n)
+	}
+}
+
+// TestKnownActionsCoversRolePresets guards against adding an auth action to
+// a role preset but forgetting it in the CLI known-actions map (which would
+// make `client create/grant -actions <new>` reject a valid action).
+func TestKnownActionsCoversRolePresets(t *testing.T) {
+	known := knownActions()
+	for _, role := range []string{auth.RoleReadonly, auth.RoleService, auth.RoleAdmin, auth.RolePrivacyOfficer} {
+		for _, a := range auth.RoleActions(role) {
+			if !known[a] {
+				t.Errorf("action %q is in role %q but missing from knownActions()", a, role)
+			}
+		}
 	}
 }

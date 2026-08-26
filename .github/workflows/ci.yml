@@ -166,6 +166,16 @@ jobs:
           echo "SUNDER_CRED_ERP=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id erp -name ERP -scope erp -actions oti.verify -purposes create_order | tail -1)" >> "$GITHUB_ENV"
       - name: Run demo
         run: bash demo/quickstart.sh
+      - name: Create feature-demo client
+        run: |
+          echo "SUNDER_CRED_VAULT=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id vault -name Vault -scope crm -actions contacts.register,attributes.read,tokens.create,tokens.read,tokens.delete,admin.unlock,files.write,files.read,attributes.history,links.manage,shares.create,consent.manage,dsr.erase -purposes support -rate 1000 | tail -1)" >> "$GITHUB_ENV"
+      - name: Run feature demos F4-F8
+        run: |
+          for s in f4-value-tokens f5-file-vault f6-versioning f7-sub-accounts f8-shared-records; do
+            echo "=== demo/$s.sh ==="; bash "demo/$s.sh"
+          done
+      - name: Run feature demo F9 (Shamir, CLI)
+        run: SUNDER_EXEC='docker compose -f deploy/docker-compose.yml exec -T sunder /sunder' bash demo/f9-shamir-recovery.sh
       - name: Verify audit chain
         run: docker compose -f deploy/docker-compose.yml exec sunder /sunder verify-audit
 

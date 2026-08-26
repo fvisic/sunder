@@ -262,6 +262,7 @@ func knownActions() map[string]bool {
 		auth.ActDSRExport: true, auth.ActClaimsExternal: true, auth.ActAdminUnlock: true,
 		auth.ActTokensCreate: true, auth.ActTokensRead: true, auth.ActTokensDelete: true,
 		auth.ActFilesWrite: true, auth.ActFilesRead: true, auth.ActLinksManage: true, auth.ActSharesCreate: true,
+		auth.ActAttributesHistory: true,
 	}
 }
 

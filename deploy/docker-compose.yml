@@ -43,6 +43,12 @@ services:
       SUNDER_LISTEN: ":8080"
       SUNDER_KEYSTORE: file
       SUNDER_KEYSTORE_PATH: /keystore
+      # Enable the file vault (local driver) and attribute versioning so the
+      # F5/F6 feature demos have something to exercise. Both are off by
+      # default in production; this is a demo stack.
+      SUNDER_FILES_STORAGE: local
+      SUNDER_FILES_DIR: /keystore/files
+      SUNDER_VERSIONS_KEEP: "5"
     volumes:
       - keystore:/keystore
     ports:
