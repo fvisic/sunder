@@ -41,6 +41,7 @@ type Server struct {
 	Unlock      *service.Unlock
 	ValueTokens *service.ValueTokens
 	Files       *service.Files
+	Links       *service.Links
 	Limiter     ratelimit.Allower
 	Detector    ratelimit.MissCounter
 	enumWarned  sync.Map // client id -> last enumeration warning (F3 latch)
@@ -132,6 +133,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		s.Auth = &auth.Authenticator{Pool: st.Pool}
 		s.Unlock = &service.Unlock{Pool: st.Pool}
 		s.ValueTokens = &service.ValueTokens{Pool: st.Pool, Eng: eng, Ring: ring, Tok: s.Contacts.Tok}
+		s.Links = &service.Links{Pool: st.Pool, Contacts: s.Contacts}
 		if cfg.FilesStorage != "" {
 			drv, err := storage.Open(storage.Config{Kind: cfg.FilesStorage, Dir: cfg.FilesDir,
 				S3Endpoint: cfg.FilesS3Endpoint, S3Bucket: cfg.FilesS3Bucket, S3Region: cfg.FilesS3Region,
@@ -182,6 +184,9 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("GET /v1/consent/{cid}", s.handleConsentList)
 		v1.HandleFunc("GET /v1/dsr/access", s.handleDSRAccess)
 		v1.HandleFunc("POST /v1/dsr/erase", s.handleDSRErase)
+		v1.HandleFunc("POST /v1/links", s.handleLinkCreate)
+		v1.HandleFunc("DELETE /v1/links", s.handleLinkDelete)
+		v1.HandleFunc("GET /v1/contacts/{cid}/links", s.handleLinkList)
 		v1.HandleFunc("GET /v1/dsr/export", s.handleDSRExport)
 		s.Auth.Limiter = s.Limiter
 		s.mux.Handle("/v1/", s.Auth.Middleware(userIDMiddleware(capturePattern(v1))))

@@ -1014,3 +1014,103 @@ func TestBulkTokenHandlerHardErrors(t *testing.T) {
 		t.Fatalf("bulk read hard error must 5xx, got %d", code)
 	}
 }
+
+// TestPersonLinksOverHTTP drives the F7 endpoints and the cascade erase.
+func TestPersonLinksOverHTTP(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActLinksManage, auth.ActDSRErase},
+		AllowedPurposes: []string{"support"}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	_, p := e.do(t, cred, "POST", "/v1/contacts", map[string]any{"email": "p@example.com"})
+	_, c := e.do(t, cred, "POST", "/v1/contacts", map[string]any{"email": "c@example.com"})
+	parent, child := p["cid"], c["cid"]
+
+	rec, _ := e.do(t, cred, "POST", "/v1/links", map[string]any{
+		"parent_cid": parent, "child_cid": child, "link_type": "guardian"})
+	if rec.Code != 201 {
+		t.Fatalf("link: %d %s", rec.Code, rec.Body.String())
+	}
+	rec, _ = e.do(t, cred, "GET", "/v1/contacts/"+parent+"/links", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), child) {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	// Erase the parent with a guardian cascade: the child is erased too.
+	rec, out := e.do(t, cred, "POST", "/v1/dsr/erase", map[string]any{
+		"cid": parent, "cascade": []string{"guardian"}})
+	if rec.Code != 200 || !strings.Contains(out["_raw"], "cascaded") {
+		// out is map[string]string via e.do; re-decode for the nested list.
+	}
+	if rec.Code != 200 {
+		t.Fatalf("cascade erase: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"cascaded":true`) {
+		t.Fatalf("response must report the cascade: %s", rec.Body.String())
+	}
+	// Unlink after erase is a miss (link gone with the persons).
+	rec, _ = e.do(t, cred, "DELETE", "/v1/links", map[string]any{"parent_cid": parent, "child_cid": child})
+	if rec.Code != 404 && rec.Code != 200 {
+		t.Fatalf("unlink after erase: %d", rec.Code)
+	}
+}
+
+func TestLinkHandlerErrorBranches(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActLinksManage},
+		AllowedPurposes: []string{"support"}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	weak, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "weak", Name: "W", Scope: "crm",
+		AllowedActions: []string{auth.ActLookup}, AllowedPurposes: []string{}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	// Link without action: 403.
+	rec, _ := e.do(t, weak, "POST", "/v1/links", map[string]any{"parent_cid": "a", "child_cid": "b", "link_type": "guardian"})
+	if rec.Code != 403 {
+		t.Fatalf("link without action: %d", rec.Code)
+	}
+	// Unlink without action: 403.
+	rec, _ = e.do(t, weak, "DELETE", "/v1/links", map[string]any{"parent_cid": "a", "child_cid": "b"})
+	if rec.Code != 403 {
+		t.Fatalf("unlink without action: %d", rec.Code)
+	}
+	// List without action: 403.
+	rec, _ = e.do(t, weak, "GET", "/v1/contacts/CID-X/links", nil)
+	if rec.Code != 403 {
+		t.Fatalf("list without action: %d", rec.Code)
+	}
+	// Malformed link body: 400.
+	req := httptest.NewRequest("POST", "/v1/links", strings.NewReader(`{bad`))
+	req.Header.Set("Authorization", "Bearer "+cred)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 400 {
+		t.Fatalf("bad link body: %d", rr.Code)
+	}
+	// Link to a nonexistent cid: 404.
+	rec, _ = e.do(t, cred, "POST", "/v1/links", map[string]any{"parent_cid": "CID-NO", "child_cid": "CID-NO2", "link_type": "guardian"})
+	if rec.Code != 404 {
+		t.Fatalf("link unknown cids: %d", rec.Code)
+	}
+}

@@ -54,17 +54,21 @@ func (s *Server) handleDSRAccess(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDSRErase(w http.ResponseWriter, r *http.Request) {
 	in, ok := decode[struct {
 		CID string `json:"cid"`
+		// Cascade names the link types (guardian|member|owner) whose linked
+		// children are erased along with this person (F7). Omitted = the
+		// children are only listed, never touched.
+		Cascade []string `json:"cascade"`
 	}](w, r)
 	if !ok {
 		return
 	}
-	erasureID, scopes, err := s.GDPR.Erase(r.Context(), auth.FromContext(r.Context()), in.CID)
+	erasureID, scopes, linked, err := s.GDPR.EraseWithCascade(r.Context(), auth.FromContext(r.Context()), in.CID, in.Cascade)
 	if err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"erasure_id": erasureID, "scopes": scopes})
+	writeJSON(w, http.StatusOK, map[string]any{"erasure_id": erasureID, "scopes": scopes, "linked": linked})
 }
 
 func (s *Server) handleDSRExport(w http.ResponseWriter, r *http.Request) {

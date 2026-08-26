@@ -344,15 +344,82 @@ func (g *GDPR) Export(ctx context.Context, client *auth.Client, cid string) (*Sc
 // erasure event per scope is queued for signed webhook delivery. A later
 // registration of the same identifiers creates a brand-new person.
 func (g *GDPR) Erase(ctx context.Context, client *auth.Client, cid string) (erasureID int64, scopes int, err error) {
+	id, scopes, _, err := g.EraseWithCascade(ctx, client, cid, nil)
+	return id, scopes, err
+}
+
+// LinkedErasure reports one person linked to an erased parent (F7): whether
+// this request cascaded the erasure to it, so a report can prove a child's
+// data was left intact unless the caller explicitly asked otherwise.
+type LinkedErasure struct {
+	CID      string `json:"cid"`
+	LinkType string `json:"link_type"`
+	Cascaded bool   `json:"cascaded"`
+}
+
+// EraseWithCascade erases the person behind cid and, for each link_type in
+// cascadeTypes (F7), the person's linked children too. Children are ALWAYS
+// listed in the returned report; they are erased only when their link_type
+// was named - a silent cascade is how a child's data gets deleted by
+// accident, so it must be asked for explicitly.
+func (g *GDPR) EraseWithCascade(ctx context.Context, client *auth.Client, cid string, cascadeTypes []string) (erasureID int64, scopes int, linked []LinkedErasure, err error) {
 	if !client.Can(auth.ActDSRErase) {
-		return 0, 0, ErrForbidden
+		return 0, 0, nil, ErrForbidden
 	}
 	personID, err := g.Contacts.personForClientCID(ctx, client, cid)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
-	return g.erasePerson(ctx, client.ID, cid, personID)
+	// List the children (all link types) BEFORE erasing, resolving each to
+	// a cid in the caller's scope for the report.
+	rows, err := g.Pool.Query(ctx, `
+		SELECT c.cid, pl.link_type, pl.child_person::text
+		  FROM person_links pl JOIN cids c ON c.person_id = pl.child_person AND c.scope = pl.scope
+		 WHERE pl.parent_person = $1 AND pl.scope = $2`, personID, client.Scope)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	type childRow struct{ cid, linkType, person string }
+	var children []childRow
+	for rows.Next() {
+		var cr childRow
+		if err := rows.Scan(&cr.cid, &cr.linkType, &cr.person); err != nil {
+			rows.Close()
+			return 0, 0, nil, err
+		}
+		children = append(children, cr)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, 0, nil, err
+	}
+	cascade := map[string]bool{}
+	for _, t := range cascadeTypes {
+		cascade[t] = true
+	}
+	// Erase the parent first.
+	erasureID, scopes, err = g.erasePerson(ctx, client.ID, cid, personID)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	for _, cr := range children {
+		le := LinkedErasure{CID: cr.cid, LinkType: cr.linkType}
+		if cascade[cr.linkType] {
+			// Erase the child too (its own transaction). An already-erased
+			// child is fine - report it as cascaded.
+			if _, _, cerr := g.erasePerson(ctx, client.ID, cr.cid, cr.person); cerr != nil && !errorsIsValidation(cerr) {
+				return 0, 0, nil, fmt.Errorf("cascade erase of %s: %w", cr.cid, cerr)
+			}
+			le.Cascaded = true
+		}
+		linked = append(linked, le)
+	}
+	return erasureID, scopes, linked, nil
 }
+
+// errorsIsValidation reports the "already erased" sentinel so a cascade
+// tolerates a child that was erased in a prior request.
+func errorsIsValidation(err error) bool { return errors.Is(err, ErrValidation) }
 
 // erasePerson runs the full erasure for a person - shared by the privacy
 // officer's Erase and the self-service portal. actor lands in the audit
