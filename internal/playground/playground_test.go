@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -647,20 +648,107 @@ func TestSessionsTTLAndCap(t *testing.T) {
 	}
 }
 
-func TestSessionIdentityIsStableAndUnique(t *testing.T) {
+func TestSessionIdentityIsUnique(t *testing.T) {
 	a := newSessionVars("abcdef012345")
 	if a["demo_email"] != newSessionVars("abcdef012345")["demo_email"] {
-		t.Fatal("the same session must keep the same identifiers across reloads")
+		t.Fatal("the e-mail must follow the session id, so a reload keeps the story")
 	}
-	b := newSessionVars("0123456789ab")
-	if a["demo_email"] == b["demo_email"] || a["demo_phone"] == b["demo_phone"] {
-		t.Fatal("two sessions must not dedup onto one person")
-	}
-	if !strings.HasPrefix(a["demo_phone"], "+3859") || len(a["demo_phone"]) != 13 {
+	if !strings.HasPrefix(a["demo_phone"], "+3859") || len(a["demo_phone"]) != 14 {
 		t.Fatalf("demo phone is not E.164-shaped: %q", a["demo_phone"])
+	}
+	// Two visitors must never dedup onto one person - not by e-mail and not
+	// by phone, since either identifier is enough for the dedup rule.
+	emails, phones := map[string]bool{}, map[string]bool{}
+	for i := 0; i < 200; i++ {
+		v := newSessionVars(newID()[:12])
+		if emails[v["demo_email"]] || phones[v["demo_phone"]] {
+			t.Fatalf("identifier collision after %d sessions: %v", i, v)
+		}
+		emails[v["demo_email"]], phones[v["demo_phone"]] = true, true
 	}
 	if len(randomDigits(6)) != 6 {
 		t.Fatal("randomDigits length")
+	}
+}
+
+// A value substituted into the query string must be escaped for a query,
+// not for a path: PathEscape leaves '&', '=' and '+' intact, so a value
+// carrying one would add a parameter or arrive as a space.
+func TestExpandEscapesPerPosition(t *testing.T) {
+	vars := map[string]string{"cid": "a&b=c+d", "seg": "x/y z"}
+	got, err := expandPath("/v1/contacts/{{seg}}/attributes/email?purpose=support&cid={{cid}}", vars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "/v1/contacts/x%2Fy%20z/attributes/email?purpose=support&cid=a%26b%3Dc%2Bd"
+	if got != want {
+		t.Fatalf("expandPath:\n got %q\nwant %q", got, want)
+	}
+	// The literal template is never escaped - only the values are.
+	if got, err := expandPath("/v1/lookup?a=1&b=2", nil); err != nil || got != "/v1/lookup?a=1&b=2" {
+		t.Fatalf("literal query mangled: %q %v", got, err)
+	}
+	if _, err := expandPath("/v1/x?cid={{nope}}", nil); err == nil {
+		t.Fatal("a missing variable in the query must be an error too")
+	}
+	if _, err := expandPath("/v1/{{nope}}", nil); err == nil {
+		t.Fatal("a missing variable in the path must be an error")
+	}
+}
+
+// The session cookie must not outlive - or expire before - the session it
+// points at.
+func TestSessionCookieFollowsTheConfiguredTTL(t *testing.T) {
+	pg, err := NewServer(Config{BaseURL: "http://127.0.0.1:1", Scenarios: embedded(t),
+		SessionTTL: 15 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(pg.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/api/scenarios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	for _, c := range resp.Cookies() {
+		if c.Name == sessionCookie {
+			if c.MaxAge != int((15 * time.Minute).Seconds()) {
+				t.Fatalf("cookie MaxAge %d does not match the session TTL", c.MaxAge)
+			}
+			return
+		}
+	}
+	t.Fatal("no session cookie was set")
+}
+
+// The webhook receiver and the browser share a source address whenever the
+// delivery loop runs on the same host; one bucket let either starve the
+// other.
+func TestRateLimitBucketsAreSeparate(t *testing.T) {
+	pg, err := NewServer(Config{BaseURL: "http://127.0.0.1:1", Scenarios: embedded(t), RatePerMin: 1,
+		WebhookSecret: "s3cret", Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(pg.Handler())
+	defer srv.Close()
+
+	body := `{"event":"erase","scope":"crm","cid":"c","erasure_id":1}`
+	if code := postWebhook(t, srv.URL, body, sign("s3cret", body)); code != 200 {
+		t.Fatalf("first delivery: %d", code)
+	}
+	// The hook bucket is now spent, but the API bucket must be untouched.
+	if code := postWebhook(t, srv.URL, body, sign("s3cret", body)); code != 429 {
+		t.Fatalf("second delivery should be limited: %d", code)
+	}
+	resp, err := http.Get(srv.URL + "/api/scenarios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("the deliveries starved the UI bucket: %d", resp.StatusCode)
 	}
 }
 

@@ -682,6 +682,11 @@ paths:
         runs, and a stalled sealer is alarmed on separately
         (`sunder_audit_unsealed_rows`).
 
+        Under `SUNDER_AUDIT_SEALING=sync` a non-zero `pending` is itself a
+        failure (`ok: false`): sync seals at insert, so a backlog means rows
+        stranded outside the chain - the same stance `verify-audit` takes.
+        `sealing` reports the active mode.
+
         The same verdict `sunder verify-audit` prints, minus the RFC 3161
         anchor checks (those need the TSA CA bundle and stay on the CLI).
         Not audited itself: appending a record per verification would make a
@@ -693,12 +698,16 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [ok, pending]
+                required: [ok, pending, sealing]
                 properties:
                   ok: {type: boolean}
                   pending:
                     type: integer
                     description: Rows appended but not yet sealed.
+                  sealing:
+                    type: string
+                    enum: [async, sync]
+                    description: Active audit write mode.
                   broken_chain_seq:
                     type: integer
                     description: Present only when ok is false - the first bad position.
