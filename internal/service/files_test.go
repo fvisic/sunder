@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -680,5 +681,98 @@ func TestFileVaultCorruptChunkHeaderNoPanic(t *testing.T) {
 	var out bytes.Buffer
 	if _, err := f.Download(ctx, client, meta.ID, "support", &out); err == nil {
 		t.Fatal("a corrupt chunk header must be a clean error")
+	}
+}
+
+// TestH9_OrphanReapedWhenInsertFails: Store.Put lands before the files row;
+// if the INSERT (or the audit append, or the tombstone re-check) then fails,
+// the ciphertext has no row and RunFileGC can never reap it (H9). The upload
+// path now guarantees reap-on-no-commit via one defer; this drives the exact
+// INSERT-failure path by denying the files table and asserts the storage dir
+// ends empty.
+func TestH9_OrphanReapedWhenInsertFails(t *testing.T) {
+	e := newFaultEnv(t, "files")
+	dir := t.TempDir()
+	drv, err := storage.Open(storage.Config{Kind: "local", Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &service.Files{Pool: e.svc.Pool, Eng: e.svc.PII.Engine(), Ring: e.svc.Ring,
+		Store: drv, Contacts: e.svc, MaxBytes: 1 << 20}
+	client := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActFilesWrite, auth.ActContactsRegister}}
+	ctx := context.Background()
+	cid, err := e.svc.Register(ctx, client, service.RegisterInput{Email: "h9@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.Upload(ctx, client, cid, "doc.pdf", "application/pdf",
+		strings.NewReader("orphan-me")); err == nil {
+		t.Fatal("upload must fail when the files INSERT is denied")
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, en := range ents {
+		left = append(left, en.Name())
+	}
+	if len(left) != 0 {
+		t.Fatalf("failed upload must reap its ciphertext, found %v", left)
+	}
+}
+
+// cancelAfterPut wraps a driver and kills the request context right after
+// Put succeeds - the moment a client disconnect typically lands.
+type cancelAfterPut struct {
+	storage.Driver
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfterPut) Put(ctx context.Context, key string, r io.Reader, size int64) error {
+	err := c.Driver.Put(ctx, key, r, size)
+	c.cancel()
+	return err
+}
+
+// TestH9_OrphanReapedWhenRequestContextDies (review F3): the commonest
+// late-upload failure is the REQUEST context dying between Put and Commit.
+// Both drivers short-circuit on a dead context, so a reap issued under the
+// request context would be a silent no-op - the defer must reap under a
+// context that survives the request's cancellation.
+func TestH9_OrphanReapedWhenRequestContextDies(t *testing.T) {
+	e := newFaultEnv(t)
+	dir := t.TempDir()
+	drv, err := storage.Open(storage.Config{Kind: "local", Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := &service.Files{Pool: e.admin.Pool, Eng: e.svc.PII.Engine(), Ring: e.svc.Ring,
+		Store: &cancelAfterPut{Driver: drv, cancel: cancel}, Contacts: e.svc, MaxBytes: 1 << 20}
+	client := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActFilesWrite, auth.ActContactsRegister}}
+	cid, err := e.svc.Register(context.Background(), client, service.RegisterInput{Email: "f3@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.Upload(ctx, client, cid, "doc.pdf", "application/pdf",
+		strings.NewReader("orphan-me")); err == nil {
+		t.Fatal("upload must fail once its context is canceled")
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 0 {
+		var left []string
+		for _, en := range ents {
+			left = append(left, en.Name())
+		}
+		t.Fatalf("the reap must survive the request context, ciphertext left: %v", left)
 	}
 }

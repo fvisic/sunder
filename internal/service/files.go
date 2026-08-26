@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -36,9 +37,14 @@ import (
 )
 
 // fileChunkSize is the AEAD chunk granularity and bounds the blast radius
-// of a corrupted chunk. (It does not bound total upload memory - see the
-// note at the encrypt loop below.)
+// of a corrupted chunk. Per-upload memory is bounded by MaxBytes (a single-
+// PUT SigV4 body is buffered whole; see the note at the encrypt loop) and
+// total upload memory by MaxConcurrentUploads * MaxBytes.
 const fileChunkSize = 4 << 20
+
+// defaultUploadConcurrency bounds simultaneous uploads when the config knob
+// is unset. See MaxConcurrentUploads.
+const defaultUploadConcurrency = 4
 
 // Files is the vault service.
 type Files struct {
@@ -49,6 +55,37 @@ type Files struct {
 	Contacts *Contacts
 	// MaxBytes caps one upload (config SUNDER_FILES_MAX_MB).
 	MaxBytes int64
+	// MaxConcurrentUploads bounds how many uploads may be encrypting/buffering
+	// at once (config SUNDER_FILES_MAX_CONCURRENT_UPLOADS, default
+	// defaultUploadConcurrency). A single-PUT SigV4 body must be buffered
+	// whole (see the Upload note), so worst-case upload memory is
+	// MaxConcurrentUploads * MaxBytes; without this bound a handful of
+	// concurrent max-size uploads is an OOM of the whole service (H8).
+	MaxConcurrentUploads int
+
+	semOnce   sync.Once
+	uploadSem chan struct{}
+}
+
+// acquireUpload blocks until an upload slot is free (or ctx is done), and
+// returns a release func. Excess uploads WAIT rather than all buffer at once.
+// The HTTP handler streams the multipart body (no ParseMultipartForm spool),
+// so a waiting request has read only part headers off the socket - the file
+// CONTENT is first read here, under the slot.
+func (f *Files) acquireUpload(ctx context.Context) (func(), error) {
+	f.semOnce.Do(func() {
+		n := f.MaxConcurrentUploads
+		if n <= 0 {
+			n = defaultUploadConcurrency
+		}
+		f.uploadSem = make(chan struct{}, n)
+	})
+	select {
+	case f.uploadSem <- struct{}{}:
+		return func() { <-f.uploadSem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // FileMeta is the listing/inspection shape - metadata only, never content.
@@ -123,6 +160,13 @@ func (f *Files) UploadWithExpiry(ctx context.Context, client *auth.Client, cid, 
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
+	// Bound concurrent uploads so peak memory stays MaxConcurrentUploads *
+	// MaxBytes, not unbounded (H8). Released as soon as this upload returns.
+	release, err := f.acquireUpload(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	personID, err := f.Contacts.personForClientCID(ctx, client, cid)
 	if err != nil {
 		return nil, err
@@ -174,6 +218,23 @@ func (f *Files) UploadWithExpiry(ctx context.Context, client *auth.Client, cid, 
 	if err := f.Store.Put(ctx, storageKey, &sealedBuf, int64(sealedBuf.Len())); err != nil {
 		return nil, fmt.Errorf("storage put: %w", err)
 	}
+	// From here the ciphertext is in storage but no row references it yet.
+	// Every path that does not end in a committed row must reap the object,
+	// or RunFileGC (which reaps only keys it can find via a files row) can
+	// never get to it (H9). One defer covers ALL such paths - the tombstone
+	// re-check, the INSERT, the audit append and the commit itself. The reap
+	// must NOT ride the request context: the commonest late failure IS that
+	// context dying (client disconnect, deadline), and both drivers
+	// short-circuit on a dead context - a reap under ctx would be a silent
+	// no-op exactly when it is needed (F3).
+	committed := false
+	defer func() {
+		if !committed {
+			reapCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			_ = f.Store.Delete(reapCtx, storageKey)
+		}
+	}()
 
 	// Wrap the DEK under the record key, bound to this file id.
 	dekWrapped := gcmSeal(recordKey, dekAAD(fileID, cid), dek)
@@ -186,15 +247,19 @@ func (f *Files) UploadWithExpiry(ctx context.Context, client *auth.Client, cid, 
 	defer func() { _ = tx.Rollback(ctx) }()
 	// L3: an erasure that committed while we were encrypting would have
 	// shredded the record key; a row inserted now would be undecryptable
-	// and never GC'd. Re-check under the row lock and fail closed.
+	// and never GC'd. Re-check under the PERSONS row lock and fail closed:
+	// EvalPlanQual re-fetches only FOR UPDATE targets, so locking cids alone
+	// evaluated erased_at against a stale persons tuple when racing the
+	// erasure itself. The persons row is the serialization point with
+	// erasePerson's opening guard; the cids lock is not needed here and
+	// would invert erasure's c -> p order (ABBA deadlock).
 	var stillLive bool
 	if err := tx.QueryRow(ctx,
 		`SELECT NOT p.erased_at IS NOT NULL FROM cids c JOIN persons p ON p.id=c.person_id
-		 WHERE c.cid=$1 FOR UPDATE OF c`, cid).Scan(&stillLive); err != nil {
+		 WHERE c.cid=$1 FOR UPDATE OF p`, cid).Scan(&stillLive); err != nil {
 		return nil, err
 	}
 	if !stillLive {
-		_ = f.Store.Delete(ctx, storageKey)
 		return nil, ErrNotFound
 	}
 	if _, err := tx.Exec(ctx, `
@@ -210,11 +275,9 @@ func (f *Files) UploadWithExpiry(ctx context.Context, client *auth.Client, cid, 
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		// The object is orphaned in storage; the GC sweep reaps unknown
-		// keys is NOT implemented - delete eagerly instead.
-		_ = f.Store.Delete(ctx, storageKey)
 		return nil, err
 	}
+	committed = true
 	return &FileMeta{ID: fileID, Name: name, ContentType: contentType,
 		SizeBytes: size, SHA256: sum, CreatedAt: time.Now().UTC(), ExpiresAt: expiresAt}, nil
 }

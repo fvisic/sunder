@@ -5,6 +5,9 @@ package api
 // accepting them silently.
 
 import (
+	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,6 +15,24 @@ import (
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/service"
 )
+
+// truncGuard distinguishes a TRUNCATED multipart body from a clean end of
+// the file part (N1). multipart.Part returns io.ErrUnexpectedEOF when the
+// closing boundary never arrives (client disconnected mid-upload); the
+// service's chunked io.ReadFull loop would treat that exactly like its own
+// short-final-chunk ErrUnexpectedEOF and store the partial content as a
+// complete file, digest and all. Converting the part's error into a
+// validation error makes the truncation a clean 400 with nothing stored
+// (the upload's reap defer removes anything already in storage).
+type truncGuard struct{ r io.Reader }
+
+func (t truncGuard) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if err == io.ErrUnexpectedEOF {
+		return n, fmt.Errorf("%w: multipart body truncated mid-file", service.ErrValidation)
+	}
+	return n, err
+}
 
 func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
@@ -25,22 +46,35 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Cap the whole request body at the per-file limit plus a small
-	// multipart overhead allowance, BEFORE ParseMultipartForm - otherwise
-	// it spools the entire (plaintext) body to os.TempDir() with no ceiling
-	// and the MaxBytes check inside Upload runs far too late (H2).
+	// multipart overhead allowance (H2), and STREAM the multipart body
+	// instead of ParseMultipartForm: parsing would read and spool the whole
+	// (plaintext) body to os.TempDir() BEFORE the service's upload slot is
+	// taken, so queued uploads would each pin a MaxBytes-sized temp file
+	// (F4). MultipartReader reads only boundaries and part headers here;
+	// the file CONTENT is first read inside Upload, under the concurrency
+	// slot, straight off the socket.
 	limit := s.Files.MaxBytes
 	if limit <= 0 {
 		limit = 25 << 20
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, limit+(1<<20))
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": "multipart form with a \"file\" part required (or body too large)"})
+	mr, err := r.MultipartReader()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": "multipart form with a \"file\" part required"})
 		return
 	}
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": "multipart part \"file\" required"})
-		return
+	var file *multipart.Part
+	for {
+		p, perr := mr.NextPart()
+		if perr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": "multipart part \"file\" required (or body too large)"})
+			return
+		}
+		if p.FormName() == "file" {
+			file = p
+			break
+		}
+		_ = p.Close() // drain and discard non-file fields (bounded by MaxBytesReader)
 	}
 	defer file.Close()
 	var expiresAt *time.Time
@@ -53,7 +87,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &t
 	}
 	meta, err := s.Files.UploadWithExpiry(r.Context(), client, r.PathValue("cid"),
-		header.Filename, header.Header.Get("Content-Type"), expiresAt, file)
+		file.FileName(), file.Header.Get("Content-Type"), expiresAt, truncGuard{file})
 	if err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)

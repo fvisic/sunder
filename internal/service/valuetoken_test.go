@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/service"
@@ -618,5 +619,311 @@ func TestBulkUniqueDedupHit(t *testing.T) {
 	}
 	if toks[0] != toks[1] {
 		t.Fatalf("bulk unique dedup must return the same token: %v", toks)
+	}
+}
+
+// TestS4_ValueTokensDieWithThePerson: a token minted for a person's CID must
+// not survive that person's erasure - value_tokens was the one PII table
+// erasure could not reach (S4).
+func TestS4_ValueTokensDieWithThePerson(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	reg := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActDSRErase}}
+	cid, err := e.svc.Register(ctx, reg, service.RegisterInput{
+		Email: "s4@example.com", Attributes: map[string]string{"iban": "HR12"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bound, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "HR99 1500 0001", CID: cid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	free, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "SCOPE-WIDE-SECRET"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A CID outside the caller's scope (or absent) is refused - one tenant's
+	// erasure must never reach another tenant's token.
+	erpReg := &auth.Client{ID: "erp", Scope: "erp", AllowedActions: []string{auth.ActContactsRegister}}
+	erpCID, err := e.svc.Register(ctx, erpReg, service.RegisterInput{Email: "s4-erp@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "x", CID: erpCID}); !errors.Is(err, service.ErrValidation) {
+		t.Fatalf("foreign-scope cid must be refused: %v", err)
+	}
+	if _, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "x", CID: "CID-NOPE"}); !errors.Is(err, service.ErrValidation) {
+		t.Fatalf("unknown cid must be refused: %v", err)
+	}
+
+	if _, _, err := e.gdpr.Erase(ctx, reg, cid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Detokenize(ctx, client, bound); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("bound token must die with the person: %v", err)
+	}
+	var n int64
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM value_tokens WHERE token=$1`, bound).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("erasure must DELETE the bound token row, %d left", n)
+	}
+	// The unattributed token belongs to no single subject and survives.
+	if got, err := v.Detokenize(ctx, client, free); err != nil || got != "SCOPE-WIDE-SECRET" {
+		t.Fatalf("unattributed token must survive: %q %v", got, err)
+	}
+}
+
+// TestS4_UniqueDedupIsPerPerson: `unique: true` dedup keys on (scope, cid,
+// unique_hash), so two people tokenizing the same value each hold their own
+// erasable token, while no-cid callers keep the old scope-wide dedup.
+func TestS4_UniqueDedupIsPerPerson(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	reg := &auth.Client{ID: "crm", Scope: "crm", AllowedActions: []string{auth.ActContactsRegister}}
+	cidA, err := e.svc.Register(ctx, reg, service.RegisterInput{Email: "a@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cidB, err := e.svc.Register(ctx, reg, service.RegisterInput{Email: "b@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tA, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "SAME", Unique: true, CID: cidA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tB, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "SAME", Unique: true, CID: cidB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tA == tB {
+		t.Fatal("two persons' unique tokens for the same value must differ (each erasable on its own)")
+	}
+	tA2, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "SAME", Unique: true, CID: cidA})
+	if err != nil || tA2 != tA {
+		t.Fatalf("same person + same value must dedup: %q vs %q (%v)", tA2, tA, err)
+	}
+	// No-cid callers keep scope-wide dedup, separate from any person's token.
+	g1, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "SAME", Unique: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g2, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "SAME", Unique: true})
+	if err != nil || g1 != g2 {
+		t.Fatalf("scope-wide dedup must hold: %q vs %q (%v)", g1, g2, err)
+	}
+	if g1 == tA || g1 == tB {
+		t.Fatal("the unattributed unique token must not collide with a person's")
+	}
+}
+
+// TestS4_TokenizeRefusesTombstonedCID (review F2): the cid check must go
+// through the same tombstone predicate as every CID-addressed path - a token
+// minted FOR an erased person after their erasure would be permanently
+// outside erasure's reach (the second Erase is refused, so the delete can
+// never run again).
+func TestS4_TokenizeRefusesTombstonedCID(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	reg := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActDSRErase}}
+	cid, err := e.svc.Register(ctx, reg, service.RegisterInput{Email: "f2@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.gdpr.Erase(ctx, reg, cid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "AFTER-ERASURE", CID: cid}); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("a tombstoned cid must be refused indistinguishably: %v", err)
+	}
+	var n int64
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM value_tokens WHERE cid=$1`, cid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("no token may be stored against a tombstone, found %d", n)
+	}
+}
+
+// TestS4_CidTokenizeAdoptsPreUpgradeAlias (review F5): a value tokenized
+// unique WITHOUT a cid before the upgrade must not become a second, never-
+// erasable alias when the caller starts passing the cid - the cid-bearing
+// call adopts the existing row, and erasure then reaches it.
+func TestS4_CidTokenizeAdoptsPreUpgradeAlias(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	reg := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActDSRErase}}
+	cid, err := e.svc.Register(ctx, reg, service.RegisterInput{Email: "f5@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pre, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "HR-PRE-UPGRADE", Unique: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "HR-PRE-UPGRADE", Unique: true, CID: cid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound != pre {
+		t.Fatalf("the cid-bearing call must ADOPT the pre-upgrade row, not mint an alias: %q vs %q", bound, pre)
+	}
+	var total int64
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM value_tokens WHERE scope='crm'`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Fatalf("exactly one live token may exist for the value, found %d", total)
+	}
+	// A second person tokenizing the same value now gets their OWN token
+	// (the row is already claimed).
+	cid2, err := e.svc.Register(ctx, reg, service.RegisterInput{Email: "f5b@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "HR-PRE-UPGRADE", Unique: true, CID: cid2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other == bound {
+		t.Fatal("a claimed row must not be re-adopted by a different person")
+	}
+	// And erasure now reaches the adopted token.
+	if _, _, err := e.gdpr.Erase(ctx, reg, cid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Detokenize(ctx, client, bound); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("the adopted token must die with the person: %v", err)
+	}
+}
+
+// TestS4_TokenizeRacingErasureCannotLandToken (review N2): the locking read
+// must target PERSONS - EvalPlanQual re-fetches only FOR UPDATE targets, so
+// locking cids alone re-evaluated erased_at against a STALE persons tuple
+// and a tokenize racing an erasure landed an unerasable token. The persons
+// row is the serialization point with erasePerson's opening guard; this
+// replays the interleaving where the erasure holds it first.
+func TestS4_TokenizeRacingErasureCannotLandToken(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	reg := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister}}
+	cid, err := e.svc.Register(ctx, reg, service.RegisterInput{Email: "n2@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The "erasure": take the locks in erasePerson's order (cids first, then
+	// the persons guard), then finish its statements and commit while the
+	// tokenize below is parked on the persons FOR UPDATE.
+	tx, err := e.admin.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM cids WHERE cid=$1 FOR UPDATE`, cid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx,
+		`SELECT erased_at FROM persons WHERE id=(SELECT person_id FROM cids WHERE cid=$1) FOR UPDATE`, cid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE cids SET pii_encrypted=NULL WHERE cid=$1`, cid); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, terr := v.Tokenize(ctx, client, service.TokenizeInput{Value: "HR-RACED", CID: cid})
+		done <- terr
+	}()
+	// Wait until the tokenize backend is genuinely parked on the row lock.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int64
+		if err := e.admin.Pool.QueryRow(ctx, `
+			SELECT count(*) FROM pg_stat_activity
+			 WHERE wait_event_type='Lock' AND query LIKE '%FOR UPDATE OF p%'`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tokenize never blocked on the cids lock - the locking read may have lost its FOR UPDATE")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Finish the erasure: its value_tokens DELETE and the tombstone, then commit.
+	if _, err := tx.Exec(ctx, `DELETE FROM value_tokens WHERE cid=$1`, cid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE persons SET erased_at=now() WHERE id=(SELECT person_id FROM cids WHERE cid=$1)`, cid); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if terr := <-done; !errors.Is(terr, service.ErrNotFound) {
+		t.Fatalf("a tokenize racing the erasure must be refused, got: %v", terr)
+	}
+	var n int64
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM value_tokens WHERE cid=$1`, cid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("the race must not land an unerasable token, found %d", n)
+	}
+}
+
+// TestS4_AdoptionSurvivesDeadRowInTargetSlot (review N3): a dead row already
+// holding (scope, cid, unique_hash) used to make the adoption UPDATE violate
+// the unique index - a raw 23505 surfacing as a 500, and in bulk with the
+// unlock token already burned. The expired-slot cleanup now runs first.
+func TestS4_AdoptionSurvivesDeadRowInTargetSlot(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	reg := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister}}
+	cid, err := e.svc.Register(ctx, reg, service.RegisterInput{Email: "n3@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dead, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "HR-N3", Unique: true, CID: cid, SlidingSeconds: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Starve its sliding window: the row is now dead but still occupies the
+	// (scope, cid, unique_hash) slot in the partial unique index.
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE value_tokens SET last_used = now() - interval '1 hour' WHERE token=$1`, dead); err != nil {
+		t.Fatal(err)
+	}
+	// A live unattributed row for the same value (the pre-upgrade shape).
+	free, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "HR-N3", Unique: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The cid-bearing call must clean the dead slot and adopt - not 500.
+	got, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "HR-N3", Unique: true, CID: cid})
+	if err != nil {
+		t.Fatalf("adoption against a dead same-slot row must succeed: %v", err)
+	}
+	if got != free {
+		t.Fatalf("must adopt the live unattributed row: got %q want %q", got, free)
 	}
 }

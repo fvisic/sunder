@@ -68,6 +68,24 @@ a card of the same digits never collide, and one tenant cannot probe
 another's values. Expiry is decided by the database clock, so a skewed
 application clock cannot make a token die early or linger.
 
+### Bind a token to a person
+
+```bash
+# cid: the person this value belongs to (a CID in your scope)
+{"value":"HR12...","unique":true,"cid":"CID-9XWFTP03LDR"}
+```
+
+A token minted with a `cid` dies with that person: their Article 17 erasure
+deletes it in the same transaction as everything else, a retention wipe of
+that CID's contact ages it out, and a tombstoned or foreign CID is refused
+at mint. The `unique` dedup then keys per person, so two people tokenizing
+the same value each hold their own erasable token. A cid-bearing `unique`
+call ADOPTS a live unattributed token for the same value (first claim wins),
+so a deployment that starts passing `cid` binds its pre-existing tokens
+instead of breeding aliases. A token minted without a `cid` belongs to no
+single subject - it is reachable only by its own expiry, never by erasure -
+so bind tokens to a person whenever one exists.
+
 ## Redeem and delete
 
 ```bash

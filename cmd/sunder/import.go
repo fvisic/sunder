@@ -55,10 +55,16 @@ type importLine struct {
 type importRow struct {
 	pid, cid                    string
 	emailTok, phoneTok, nameTok any // nil when the identifier is absent
-	phoneticToks                []string
-	suffixTok                   any
-	blob                        []byte
-	keyID, alg                  string
+	// emailMatch/phoneMatch hold the identifier token under EVERY live key
+	// version (newest first), used only for the dedup EXISTS check. Writes
+	// use the newest token above; matches must span the rotation window or an
+	// import during a rotation fails to see a contact registered under the
+	// retiring version and creates a duplicate person (H13).
+	emailMatch, phoneMatch []string
+	phoneticToks           []string
+	suffixTok              any
+	blob                   []byte
+	keyID, alg             string
 }
 
 func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
@@ -104,6 +110,16 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 		return err
 	}
 	nameV, err := ring.Newest(ctx, crypto.KeyHMACName)
+	if err != nil {
+		return err
+	}
+	// All live versions of the dedup identifiers (email, phone): the match
+	// check must span the rotation window (H13). Name is not a dedup key.
+	emailVers, err := ring.Versions(ctx, crypto.KeyHMACEmail)
+	if err != nil {
+		return err
+	}
+	phoneVers, err := ring.Versions(ctx, crypto.KeyHMACPhone)
 	if err != nil {
 		return err
 	}
@@ -188,6 +204,13 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 				return err
 			}
 			row.emailTok, attrs["email"] = t, norm
+			for _, ver := range emailVers {
+				mt, err := tok.EmailToken(ctx, ver, norm)
+				if err != nil {
+					return err
+				}
+				row.emailMatch = append(row.emailMatch, mt)
+			}
 		}
 		if l.Phone != "" {
 			norm, err := crypto.NormalizePhone(l.Phone)
@@ -199,6 +222,13 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 				return err
 			}
 			row.phoneTok, attrs["phone"] = t, norm
+			for _, ver := range phoneVers {
+				mt, err := tok.PhoneToken(ctx, ver, norm)
+				if err != nil {
+					return err
+				}
+				row.phoneMatch = append(row.phoneMatch, mt)
+			}
 		}
 		if l.Name != "" {
 			norm, err := crypto.NormalizeName(l.Name)
@@ -314,12 +344,25 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 		CREATE TEMP TABLE import_stage_ph (pid uuid, tok text) ON COMMIT DROP`); err != nil {
 		return 0, 0, err
 	}
+	// Dedup match tokens across every live key version (H13): one row per
+	// (person, kind, version-token). The DELETE below joins person_tokens on
+	// these, so a contact registered under a retiring version is still seen.
+	if _, err := tx.Exec(ctx, `
+		CREATE TEMP TABLE import_match (pid uuid, kind text, tok text) ON COMMIT DROP`); err != nil {
+		return 0, 0, err
+	}
 	src := make([][]any, len(rows))
-	var phSrc [][]any
+	var phSrc, matchSrc [][]any
 	for i, r := range rows {
 		src[i] = []any{r.pid, r.cid, r.emailTok, r.phoneTok, r.nameTok, r.suffixTok, r.blob, r.keyID, r.alg}
 		for _, pt := range r.phoneticToks {
 			phSrc = append(phSrc, []any{r.pid, pt})
+		}
+		for _, mt := range r.emailMatch {
+			matchSrc = append(matchSrc, []any{r.pid, "email", mt})
+		}
+		for _, mt := range r.phoneMatch {
+			matchSrc = append(matchSrc, []any{r.pid, "phone", mt})
 		}
 	}
 	staged, err := tx.CopyFrom(ctx, pgx.Identifier{"import_stage"},
@@ -334,17 +377,30 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 			return 0, 0, err
 		}
 	}
+	if len(matchSrc) > 0 {
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"import_match"},
+			[]string{"pid", "kind", "tok"}, pgx.CopyFromRows(matchSrc)); err != nil {
+			return 0, 0, err
+		}
+		// Freshly COPYed temp tables have no statistics; without this the
+		// planner may nested-loop the dedup DELETE at large batch sizes.
+		if _, err := tx.Exec(ctx, `ANALYZE import_match`); err != nil {
+			return 0, 0, err
+		}
+	}
 
 	// The dedup invariant: an email or phone identifies exactly one person.
 	// Existing identifiers mean an existing person - skip, never merge:
 	// merging attribute blobs is a per-contact decision for the API, not a
-	// bulk tool's.
+	// bulk tool's. The match spans every live key version via import_match, so
+	// a contact whose stored token is under a retiring version (mid-rotation,
+	// before the rekey sweep catches up) is still recognised (H13).
 	tag, err := tx.Exec(ctx, `
 		DELETE FROM import_stage s
-		 WHERE (s.email_tok IS NOT NULL AND EXISTS
-		         (SELECT 1 FROM person_tokens pt WHERE pt.kind='email' AND pt.token = s.email_tok))
-		    OR (s.phone_tok IS NOT NULL AND EXISTS
-		         (SELECT 1 FROM person_tokens pt WHERE pt.kind='phone' AND pt.token = s.phone_tok))`)
+		 WHERE EXISTS (
+			SELECT 1 FROM import_match m
+			  JOIN person_tokens pt ON pt.kind = m.kind AND pt.token = m.tok
+			 WHERE m.pid = s.pid)`)
 	if err != nil {
 		return 0, 0, err
 	}

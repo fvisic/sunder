@@ -342,10 +342,13 @@ func TestRetentionSweep(t *testing.T) {
 	if rec.Code != 404 {
 		t.Fatalf("blob must be gone after retention sweep: %d", rec.Code)
 	}
-	// Tokens survive a retention wipe (it is not an erasure): lookup still hits.
+	// S6: that was the person's LAST live blob, so the search tokens went
+	// with it - a retention-expired contact must not keep resolving through
+	// lookup and handing out its CID. (While another scope still retains a
+	// live blob, tokens survive - covered by TestS6_RetentionKillsLookupAndHistory.)
 	rec, _ = e.do(t, e.credCRM, "POST", "/v1/lookup", map[string]string{"email": "filip@example.com"})
-	if rec.Code != 200 {
-		t.Fatalf("retention must not delete search tokens: %d", rec.Code)
+	if rec.Code != 404 {
+		t.Fatalf("a fully retention-wiped contact must no longer resolve: %d", rec.Code)
 	}
 }
 

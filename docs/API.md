@@ -214,9 +214,10 @@ touched them. Audited.
 
 ### POST /v1/dsr/erase - right to be forgotten (org-wide)
 Action: `dsr.erase`. Body `{"cid": "..."}`. In one transaction: every
-scope's blob is wiped, all search tokens deleted, the person becomes a
-tombstone (client-side CID references never break), and one erasure event
-per scope is queued. Events are delivered to each scope's webhook
+scope's blob is wiped (with its version history), all search tokens
+deleted, value tokens bound to the person's CIDs deleted, shares, links and
+queued portal mail deleted, the person becomes a tombstone (client-side CID
+references never break), and one erasure event per scope is queued. Events are delivered to each scope's webhook
 (`sunder webhook set -scope crm -url ...`) as JSON signed with
 `X-Sunder-Signature: hex(HMAC-SHA256(secret, body))`; a worker retries
 PENDING deliveries every minute (`sunder dsr events` shows the queue).
@@ -238,9 +239,13 @@ subject-request tooling only.
 
 `sunder retention set -scope crm -days 365` + `sunder retention run` (cron):
 wipes caller-scope blobs older than the TTL (audited) and prunes OTI rows
-expired for more than 30 days. Search tokens survive a retention wipe (it is
-not an erasure); audit rows are NEVER pruned - the chain and its anchors are
-the tamper evidence.
+expired for more than 30 days. The wiped blob's version history and the
+value tokens bound to the wiped CID are pruned with it. The person's search
+tokens are deleted only once NOTHING live remains anywhere - no attribute
+blob, no un-collected file, no standing share, no link - so a scope holding
+live data (even against a blob-less handoff CID) keeps resolving the person,
+and a person whose last datum is gone stops being findable. Audit rows are
+NEVER pruned - the chain and its anchors are the tamper evidence.
 
 ## Key rotation
 

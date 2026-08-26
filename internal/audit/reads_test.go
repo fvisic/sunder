@@ -411,3 +411,114 @@ func TestVerifyReadBucketsDetectsTampering(t *testing.T) {
 		t.Fatal("an edited sealed bucket must be detected as a digest mismatch")
 	}
 }
+
+// TestHourDigestIndependentOfRowOrder (H12): the digest must depend on the
+// bucket CONTENT only, never on the order rows arrive - the old code let the
+// database's text collation pick the order at seal AND at verify, so a
+// dump/restore into a differently collated cluster (or a glibc collation
+// change) flipped every previously sealed hour to "tampered". sortBuckets
+// pins a byte-wise total order in Go.
+func TestHourDigestIndependentOfRowOrder(t *testing.T) {
+	// client ids chosen where common collations disagree with byte order:
+	// '-' (0x2D) < '.' (0x2E) < '_' (0x5F), while e.g. en_US often sorts
+	// punctuation-insensitively.
+	mk := func() []bucketRow {
+		return []bucketRow{
+			{ClientID: "a_b", Action: "lookup", Count: 1},
+			{ClientID: "a-b", Action: "lookup", Count: 2},
+			{ClientID: "a.b", Action: "lookup", Count: 3},
+			{ClientID: "a-b", UserID: "z", Action: "lookup", Count: 4},
+			{ClientID: "A", Action: "lookup", Count: 5},
+		}
+	}
+	a := mk()
+	b := mk()
+	// Reverse b: a different arrival order for the same set.
+	for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
+		b[i], b[j] = b[j], b[i]
+	}
+	sortBuckets(a)
+	sortBuckets(b)
+	if hourDigest(a) != hourDigest(b) {
+		t.Fatal("digest must be independent of row arrival order")
+	}
+	// Byte-wise order, explicitly: 'A'(0x41) < 'a-b' < 'a.b' < 'a_b'.
+	want := []string{"A", "a-b", "a-b", "a.b", "a_b"}
+	for i, r := range a {
+		if r.ClientID != want[i] {
+			t.Fatalf("canonical order must be byte-wise: position %d = %q, want %q", i, r.ClientID, want[i])
+		}
+	}
+}
+
+// TestSealDigestCoversExactlyTheSealedRows (H11): the chained hourly digest
+// and the set of rows marked sealed must be the SAME set - the old two-
+// statement close let a concurrent upsert slip between the digest SELECT and
+// the sealing UPDATE, permanently breaking verification. The seal is now one
+// UPDATE ... RETURNING; this test pins the property the fix guarantees: a
+// sealed row that the digest does not cover is reported as tampering.
+func TestSealDigestCoversExactlyTheSealedRows(t *testing.T) {
+	setReads(t, ReadsBucketed)
+	s := testPool(t)
+	ctx := context.Background()
+
+	if _, err := s.Pool.Exec(ctx, `
+		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count)
+		VALUES ('crm','','CID-H11','lookup', date_trunc('hour', now() - interval '2 hours'), 3)`); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := CloseReadBuckets(ctx, s.Pool); err != nil || n != 1 {
+		t.Fatalf("close: %d %v", n, err)
+	}
+	if bad, why, _, err := VerifyReadBuckets(ctx, s.Pool); err != nil || bad != "" {
+		t.Fatalf("freshly sealed hour must verify: %q (%s) err=%v", bad, why, err)
+	}
+
+	// Simulate the race's aftermath: a row that is sealed but was never in
+	// the digest (the trigger allows INSERT, so a database attacker - or the
+	// old racy close - can produce exactly this). Verification must flag it.
+	if _, err := s.Pool.Exec(ctx, `
+		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count, sealed_at)
+		VALUES ('crm','','CID-H11-EXTRA','lookup', date_trunc('hour', now() - interval '2 hours'), 1, now())`); err != nil {
+		t.Fatal(err)
+	}
+	bad, why, _, err := VerifyReadBuckets(ctx, s.Pool)
+	if err != nil || bad == "" || !strings.Contains(why, "do not match") {
+		t.Fatalf("a sealed row outside the digest must be reported: %q (%s) err=%v", bad, why, err)
+	}
+}
+
+// TestDigestMatchesGrandfathersLegacyOrder: hours sealed before the Go-sort
+// change carry digests computed in the database's collation order. Verify
+// must accept those (in the order the rows arrive from its ORDER BY) as well
+// as the canonical byte-wise order - otherwise the H12 fix itself would flip
+// every pre-existing sealed hour to "tampered" on upgrade.
+func TestDigestMatchesGrandfathersLegacyOrder(t *testing.T) {
+	rows := []bucketRow{
+		{ClientID: "a_b", Action: "lookup", Count: 1},
+		{ClientID: "a-b", Action: "lookup", Count: 2},
+		{ClientID: "a.b", Action: "lookup", Count: 3},
+	}
+	// A "legacy" digest: whatever order the old SQL ORDER BY produced -
+	// simulate a collation that sorts differently from byte order.
+	legacyOrder := []bucketRow{rows[0], rows[2], rows[1]} // a_b, a.b, a-b
+	legacyDigest := hourDigest(legacyOrder)
+
+	arrived := make([]bucketRow, len(legacyOrder))
+	copy(arrived, legacyOrder)
+	if !digestMatches(legacyDigest, arrived) {
+		t.Fatal("a pre-fix hour digested in collation order must still verify")
+	}
+	// The canonical order matches too, of course.
+	canonical := make([]bucketRow, len(rows))
+	copy(canonical, rows)
+	sortBuckets(canonical)
+	arrived2 := []bucketRow{rows[1], rows[0], rows[2]}
+	if !digestMatches(hourDigest(canonical), arrived2) {
+		t.Fatal("the canonical byte-wise digest must verify regardless of arrival order")
+	}
+	// And a genuinely wrong digest still fails.
+	if digestMatches("deadbeef", arrived2) {
+		t.Fatal("a digest matching neither order must be reported")
+	}
+}

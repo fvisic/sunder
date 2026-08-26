@@ -214,6 +214,7 @@ an upgrade must not silently start accepting them.
 | `SUNDER_FILES_STORAGE` | `` (disabled) | `local` or `s3` |
 | `SUNDER_FILES_DIR` | `./filestore` | local driver directory |
 | `SUNDER_FILES_MAX_MB` | `25` | per-file cap, 1-4096 |
+| `SUNDER_FILES_MAX_CONCURRENT_UPLOADS` | `4` | simultaneous uploads, 1-1024; a single-PUT body is buffered whole, so peak upload memory is this times `SUNDER_FILES_MAX_MB` - excess uploads wait |
 | `SUNDER_FILES_S3_ENDPOINT` | | S3-compatible endpoint (AWS/MinIO/R2), https |
 | `SUNDER_FILES_S3_BUCKET` | | bucket name |
 | `SUNDER_FILES_S3_REGION` | `us-east-1` | SigV4 region |

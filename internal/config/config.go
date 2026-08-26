@@ -98,15 +98,18 @@ type Config struct {
 	// File vault (F5). Off unless a storage driver is configured: files
 	// are a new data class with their own lifecycle, so an upgrade must
 	// not silently start accepting them.
-	FilesStorage     string // SUNDER_FILES_STORAGE: "" (disabled) | "local" | "s3"
-	FilesDir         string // SUNDER_FILES_DIR: local driver directory
-	FilesMaxMB       int64  // SUNDER_FILES_MAX_MB: per-file cap, default 25
-	FilesS3Endpoint  string // SUNDER_FILES_S3_ENDPOINT (https://... ; MinIO/R2 compatible)
-	FilesS3Bucket    string // SUNDER_FILES_S3_BUCKET
-	FilesS3Region    string // SUNDER_FILES_S3_REGION
-	FilesS3AccessKey string // SUNDER_FILES_S3_ACCESS_KEY
-	FilesS3SecretKey string // SUNDER_FILES_S3_SECRET_KEY
-	FilesS3PathStyle bool   // SUNDER_FILES_S3_PATH_STYLE=true (MinIO)
+	FilesStorage string // SUNDER_FILES_STORAGE: "" (disabled) | "local" | "s3"
+	FilesDir     string // SUNDER_FILES_DIR: local driver directory
+	FilesMaxMB   int64  // SUNDER_FILES_MAX_MB: per-file cap, default 25
+	// FilesMaxConcurrentUploads bounds simultaneous uploads so peak upload
+	// memory is bounded (SUNDER_FILES_MAX_CONCURRENT_UPLOADS, default 4).
+	FilesMaxConcurrentUploads int
+	FilesS3Endpoint           string // SUNDER_FILES_S3_ENDPOINT (https://... ; MinIO/R2 compatible)
+	FilesS3Bucket             string // SUNDER_FILES_S3_BUCKET
+	FilesS3Region             string // SUNDER_FILES_S3_REGION
+	FilesS3AccessKey          string // SUNDER_FILES_S3_ACCESS_KEY
+	FilesS3SecretKey          string // SUNDER_FILES_S3_SECRET_KEY
+	FilesS3PathStyle          bool   // SUNDER_FILES_S3_PATH_STYLE=true (MinIO)
 
 	// Attribute blob versioning (F6). 0 = off; N keeps the N most recent
 	// prior versions per cid. History extends the storage-limitation clock
@@ -280,6 +283,12 @@ func FromEnvNoDB() (Config, error) {
 	if c.FilesStorage == "s3" && c.FilesMaxMB > 256 {
 		return c, fmt.Errorf("SUNDER_FILES_MAX_MB must be <= 256 with the s3 driver (its single-PUT cap)")
 	}
+	rawUp := getenv("SUNDER_FILES_MAX_CONCURRENT_UPLOADS", "4")
+	up, err := strconv.ParseInt(rawUp, 10, 64)
+	if err != nil || up < 1 || up > 1024 {
+		return c, fmt.Errorf("SUNDER_FILES_MAX_CONCURRENT_UPLOADS: %q must be 1-1024", rawUp)
+	}
+	c.FilesMaxConcurrentUploads = int(up)
 	c.AuditReads = getenv("SUNDER_AUDIT_READS", "bucketed")
 	if c.AuditReads != "bucketed" && c.AuditReads != "chained" {
 		return c, fmt.Errorf("SUNDER_AUDIT_READS must be \"bucketed\" or \"chained\", got %q", c.AuditReads)

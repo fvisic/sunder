@@ -447,3 +447,63 @@ func TestImportMalformedLinesAndDeniedKeys(t *testing.T) {
 		t.Fatal("import must fail when key versions cannot be read")
 	}
 }
+
+// TestImportDedupsAcrossKeyRotation: mid-rotation (ACTIVE + RETIRING key
+// versions, before the rekey sweep re-tokenizes), an existing contact's
+// person_tokens still carry the RETIRING version's token. The importer used
+// to compute only the NEWEST version's token for its dedup check, miss the
+// existing row, and mint a duplicate person for the same email - breaking the
+// dedup invariant exactly when RETIRING exists to preserve it (H13).
+func TestImportDedupsAcrossKeyRotation(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+
+	f := filepath.Join(t.TempDir(), "one.jsonl")
+	if err := os.WriteFile(f, []byte(`{"email":"rot@example.com","phone":"+385 91 555 6666"}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+	var persons int64
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM persons`).Scan(&persons); err != nil {
+		t.Fatal(err)
+	}
+	if persons != 1 {
+		t.Fatalf("setup: want 1 person, got %d", persons)
+	}
+
+	// Rotate BOTH dedup identifier keys: the stored tokens are now under
+	// RETIRING versions while a fresh import tokenizes with the new ACTIVE.
+	eng := api.OpenEngine(cfg)
+	ring := &service.KeyRing{Pool: st.Pool}
+	if err := ring.EnsureAll(ctx, eng); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{crypto.KeyHMACEmail, crypto.KeyHMACPhone} {
+		if _, err := ring.Rotate(ctx, eng, kind); err != nil {
+			t.Fatalf("rotate %s: %v", kind, err)
+		}
+	}
+
+	// Re-import the same contact (and a genuinely new one, phone-only, to
+	// prove the batch still inserts what IS new).
+	f2 := filepath.Join(t.TempDir(), "two.jsonl")
+	if err := os.WriteFile(f2, []byte(`{"email":"rot@example.com"}
+{"phone":"+385 91 555 6666"}
+{"phone":"+385 91 777 8888"}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", f2, "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM persons`).Scan(&persons); err != nil {
+		t.Fatal(err)
+	}
+	if persons != 2 {
+		t.Fatalf("mid-rotation re-import must dedup by RETIRING-version tokens too: want 2 persons (1 existing + 1 new), got %d", persons)
+	}
+}

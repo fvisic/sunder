@@ -1409,3 +1409,62 @@ func TestOpenAPIAndBulkReadForbidden(t *testing.T) {
 		t.Fatalf("bulk create without tokens.create must 403: %d", rr.Code)
 	}
 }
+
+// TestFileUploadRefusesTruncatedBody (review N1): multipart.Part returns
+// io.ErrUnexpectedEOF when the closing boundary never arrives (a client
+// disconnect mid-upload). The service's chunked read loop treats its OWN
+// short-final-chunk ErrUnexpectedEOF as a clean end, so without the
+// handler's truncGuard the partial content was stored and answered 201 with
+// a digest over the truncated bytes. It must be a 400 with nothing stored.
+func TestFileUploadRefusesTruncatedBody(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActFilesWrite},
+		AllowedPurposes: []string{"support"}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	filesDir := t.TempDir()
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+		FilesStorage: "local", FilesDir: filesDir, FilesMaxMB: 1}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{"email": "trunc@example.com"})
+	cid := out["cid"]
+
+	// A well-formed multipart body, cut BEFORE the closing boundary.
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, _ := mw.CreateFormFile("file", "trunc.bin")
+	part.Write(bytes.Repeat([]byte("x"), 200000))
+	mw.Close()
+	full := body.Bytes()
+	truncated := full[:100000]
+
+	req := httptest.NewRequest("POST", "/v1/contacts/"+cid+"/files", bytes.NewReader(truncated))
+	req.Header.Set("Authorization", "Bearer "+cred)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("a truncated upload must be refused, got %d %s", rec.Code, rec.Body.String())
+	}
+	var n int64
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM files`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("a truncated upload must store no files row, found %d", n)
+	}
+	ents, err := os.ReadDir(filesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 0 {
+		t.Fatalf("a truncated upload must leave no ciphertext, found %d entries", len(ents))
+	}
+}
