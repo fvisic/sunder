@@ -35,9 +35,10 @@ const (
 	// DSR actions (docs/DESIGN.md, GDPR layer). dsr.access and dsr.erase are org-wide,
 	// linkage-capable privileges for the privacy-officer client only;
 	// dsr.export is scope-local portability.
-	ActDSRAccess = "dsr.access"
-	ActDSRErase  = "dsr.erase"
-	ActDSRExport = "dsr.export"
+	ActAdminUnlock = "admin.unlock"
+	ActDSRAccess   = "dsr.access"
+	ActDSRErase    = "dsr.erase"
+	ActDSRExport   = "dsr.export"
 )
 
 // Client is an authenticated caller (one row in the clients table).
@@ -47,13 +48,52 @@ type Client struct {
 	Scope           string
 	AllowedActions  []string
 	AllowedPurposes []string
-	RateLimit       int
+	// AllowedAttributes narrows WHICH attributes this client may read
+	// (F3): nil means all its purposes allow; a list makes GetAttribute
+	// refuse anything else and filters Export/Access output.
+	AllowedAttributes []string
+	// Role is an introspection label plus creation-time preset (F12).
+	// Enforcement is ALWAYS AllowedActions - one source of truth.
+	Role      string
+	RateLimit int
 	// CredentialExpiresAt makes the bearer credential short-lived; nil
 	// keeps it non-expiring (the pre-P2.2 behaviour).
 	CredentialExpiresAt *time.Time
 }
 
+// Roles a client can be created with. Presets expand to action sets at
+// creation; "custom" is explicit -actions (and every pre-F12 client).
+const (
+	RoleReadonly = "readonly"
+	RoleService  = "service"
+	RoleAdmin    = "admin"
+	RoleCustom   = "custom"
+)
+
+// RoleActions returns the preset action set, or nil for custom/unknown.
+func RoleActions(role string) []string {
+	switch role {
+	case RoleReadonly:
+		return []string{ActLookup, ActAttributesRead}
+	case RoleService:
+		return []string{ActLookup, ActAttributesRead, ActContactsRegister,
+			ActOTIIssue, ActOTIVerify, ActConsentManage}
+	case RoleAdmin:
+		return []string{ActLookup, ActAttributesRead, ActContactsRegister,
+			ActScopesIssue, ActOTIIssue, ActOTIVerify, ActConsentManage,
+			ActClaimsExternal, ActDSRAccess, ActDSRErase, ActDSRExport,
+			ActAdminUnlock}
+	}
+	return nil
+}
+
 func (c *Client) Can(action string) bool { return slices.Contains(c.AllowedActions, action) }
+
+// CanReadAttribute applies the F3 allowlist: nil = every attribute its
+// purposes allow (pre-F3 behaviour), a list = exactly those names.
+func (c *Client) CanReadAttribute(name string) bool {
+	return c.AllowedAttributes == nil || slices.Contains(c.AllowedAttributes, name)
+}
 func (c *Client) CanUse(purpose string) bool {
 	return slices.Contains(c.AllowedPurposes, purpose)
 }
@@ -104,9 +144,11 @@ func (a *Authenticator) Authenticate(ctx context.Context, authorization string) 
 	var keyHash []byte
 	var expiresAt *time.Time
 	err := a.Pool.QueryRow(ctx,
-		`SELECT client_id, name, scope, allowed_actions, allowed_purposes, rate_limit, key_hash, credential_expires_at
+		`SELECT client_id, name, scope, allowed_actions, allowed_purposes, allowed_attributes,
+		        COALESCE(role,'custom'), rate_limit, key_hash, credential_expires_at
 		 FROM clients WHERE client_id=$1`, id).
-		Scan(&c.ID, &c.Name, &c.Scope, &c.AllowedActions, &c.AllowedPurposes, &c.RateLimit, &keyHash, &expiresAt)
+		Scan(&c.ID, &c.Name, &c.Scope, &c.AllowedActions, &c.AllowedPurposes, &c.AllowedAttributes,
+			&c.Role, &c.RateLimit, &keyHash, &expiresAt)
 	if err == pgx.ErrNoRows {
 		// Equalize timing with the found-client path.
 		subtle.ConstantTimeCompare(crypto.HashSecret(secret), crypto.HashSecret("decoy"))
@@ -184,11 +226,12 @@ func CreateTx(ctx context.Context, tx pgx.Tx, c Client) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	applyRole(&c)
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO clients (client_id, name, key_hash, scope, allowed_actions, allowed_purposes, rate_limit, credential_expires_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		`INSERT INTO clients (client_id, name, key_hash, scope, allowed_actions, allowed_purposes, allowed_attributes, role, rate_limit, credential_expires_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 		c.ID, c.Name, crypto.HashSecret(secret), c.Scope, c.AllowedActions, c.AllowedPurposes,
-		c.RateLimit, c.CredentialExpiresAt); err != nil {
+		c.AllowedAttributes, c.Role, c.RateLimit, c.CredentialExpiresAt); err != nil {
 		return "", err
 	}
 	return c.ID + "." + secret, nil
@@ -202,14 +245,28 @@ func Create(ctx context.Context, pool *pgxpool.Pool, c Client) (credential strin
 	if err != nil {
 		return "", err
 	}
+	applyRole(&c)
 	_, err = pool.Exec(ctx,
-		`INSERT INTO clients (client_id, name, key_hash, scope, allowed_actions, allowed_purposes, rate_limit, credential_expires_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		c.ID, c.Name, crypto.HashSecret(secret), c.Scope, c.AllowedActions, c.AllowedPurposes, c.RateLimit, c.CredentialExpiresAt)
+		`INSERT INTO clients (client_id, name, key_hash, scope, allowed_actions, allowed_purposes, allowed_attributes, role, rate_limit, credential_expires_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		c.ID, c.Name, crypto.HashSecret(secret), c.Scope, c.AllowedActions, c.AllowedPurposes,
+		c.AllowedAttributes, c.Role, c.RateLimit, c.CredentialExpiresAt)
 	if err != nil {
 		return "", err
 	}
 	return c.ID + "." + secret, nil
+}
+
+// applyRole expands a preset role into its action set at creation time. A
+// preset REPLACES actions (mixing "readonly" with extra actions would make
+// the label a lie); explicit actions mean the role is custom.
+func applyRole(c *Client) {
+	if c.Role == "" {
+		c.Role = RoleCustom
+	}
+	if preset := RoleActions(c.Role); preset != nil {
+		c.AllowedActions = preset
+	}
 }
 
 // RotateSecret replaces a client's secret and returns the new credential

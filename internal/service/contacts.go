@@ -460,6 +460,12 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 	if !client.CanUse(purpose) {
 		return "", ErrPurposeNotAllowed
 	}
+	// F3 attribute allowlist: a client narrowed to specific fields must
+	// not read anything else, before any per-person work happens - the
+	// refusal must not depend on whether the CID exists.
+	if !client.CanReadAttribute(name) {
+		return "", ErrForbidden
+	}
 	// Scope ownership FIRST: the consent hook must never run on a raw
 	// caller-supplied CID, or the 403/404 split becomes an oracle revealing
 	// that a foreign CID exists and what its consent state is.

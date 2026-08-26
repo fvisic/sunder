@@ -37,6 +37,7 @@ type Server struct {
 	OTI        *service.OTI
 	GDPR       *service.GDPR
 	Auth       *auth.Authenticator
+	Unlock     *service.Unlock
 	Limiter    ratelimit.Allower
 	Detector   ratelimit.MissCounter
 	enumWarned sync.Map // client id -> last enumeration warning (F3 latch)
@@ -125,6 +126,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 			s.Portal = &service.Portal{GDPR: s.GDPR, Contacts: s.Contacts, BaseURL: cfg.PortalBaseURL}
 		}
 		s.Auth = &auth.Authenticator{Pool: st.Pool}
+		s.Unlock = &service.Unlock{Pool: st.Pool}
 
 		if cfg.RedisAddr != "" {
 			// Multi-replica deployments share windows via Redis; the same
@@ -144,6 +146,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("POST /v1/contacts/{cid}/scopes", s.handleScopesIssue)
 		v1.HandleFunc("GET /v1/contacts/{cid}/attributes/{name}", s.handleAttributeGet)
 		v1.HandleFunc("POST /v1/lookup", s.handleLookup)
+		v1.HandleFunc("POST /v1/admin/unlock", s.handleAdminUnlock)
 		v1.HandleFunc("POST /v1/oti", s.handleOTIIssue)
 		v1.HandleFunc("POST /v1/oti/verify", s.handleOTIVerify)
 		v1.HandleFunc("POST /v1/claims/external", s.handleExternalClaims)

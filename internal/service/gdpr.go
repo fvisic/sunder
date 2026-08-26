@@ -189,6 +189,12 @@ func (g *GDPR) Access(ctx context.Context, client *auth.Client, cid string) (map
 	if err != nil {
 		return nil, err
 	}
+	// F3: the allowlist applies to the org-wide view too - a narrowed
+	// officer credential sees the scopes and the trail, but only the
+	// attribute fields it is allowed to read.
+	for i := range scopes {
+		filterAllowedAttributes(client, scopes[i].Attributes)
+	}
 	if err := audit.Append(ctx, g.Pool, audit.Entry{
 		ClientID: client.ID, Action: "dsr.access", CID: cid,
 		Detail: map[string]any{"scopes": len(scopes)},
@@ -279,6 +285,19 @@ func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, 
 	return scopes, trail, nil
 }
 
+// filterAllowedAttributes removes fields outside the client's F3
+// allowlist, in place. nil allowlist = untouched (pre-F3 behaviour).
+func filterAllowedAttributes(client *auth.Client, attrs map[string]string) {
+	if client.AllowedAttributes == nil || attrs == nil {
+		return
+	}
+	for k := range attrs {
+		if !client.CanReadAttribute(k) {
+			delete(attrs, k)
+		}
+	}
+}
+
 // Export implements data portability for the CALLER'S scope only: a
 // machine-readable dump of what this scope holds.
 func (g *GDPR) Export(ctx context.Context, client *auth.Client, cid string) (*ScopeData, error) {
@@ -300,6 +319,11 @@ func (g *GDPR) Export(ctx context.Context, client *auth.Client, cid string) (*Sc
 		if sd.Attributes, err = g.Contacts.PII.Decrypt(ctx, cid, blob, keyID, alg); err != nil {
 			return nil, err
 		}
+		// F3: an export through a field-narrowed client carries only the
+		// fields that client may read - the allowlist is about the CLIENT
+		// CREDENTIAL's blast radius, and a portability dump through it is
+		// the biggest single read it can make.
+		filterAllowedAttributes(client, sd.Attributes)
 	}
 	if sd.Consents, err = consentsFor(ctx, g.Pool, cid); err != nil {
 		return nil, err

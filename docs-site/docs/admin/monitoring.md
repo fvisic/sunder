@@ -1,0 +1,93 @@
+# Monitoring and Alerts
+
+You want to know Sunder is up, fast, and not being probed for
+enumeration - and have on-call paged before a client complaint tells you
+first.
+
+```mermaid
+flowchart LR
+  Sunder["Sunder instance"] -->|"GET /metrics<br/>Prometheus text, optional bearer token"| Prom["Prometheus"]
+  Prom -->|"scrapes up{job=sunder},<br/>sunder_requests_total,<br/>sunder_request_seconds_bucket,<br/>sunder_lookup_misses_total,<br/>sunder_ratelimited_total"| Store[("Prometheus TSDB")]
+  Store -->|"evaluate rules<br/>ops/prometheus-alerts.yaml"| Rules{"Alert rules"}
+  Rules -->|"SunderDown, SunderHighErrorRate,<br/>SunderEnumerationSuspected, ..."| AM["Alertmanager"]
+  AM -->|"page"| OnCall["On-call"]
+  Store -->|"PromQL"| Graf["Grafana<br/>ops/grafana-dashboard.json"]
+```
+
+## Wire it up
+
+**1. Point Prometheus at the instance.** The alert rules match on
+`job="sunder"`, so the scrape job must be named that:
+
+```yaml
+scrape_configs:
+  - job_name: sunder
+    metrics_path: /metrics
+    scheme: https
+    bearer_token: "$SUNDER_METRICS_TOKEN"   # only if SUNDER_METRICS_TOKEN is set
+    static_configs:
+      - targets: ["sunder.internal:8443"]
+```
+
+**2. Sanity-check the endpoint directly:**
+
+```sh
+curl -s https://sunder.internal:8443/metrics \
+  -H "Authorization: Bearer $SUNDER_METRICS_TOKEN" | head -20
+```
+
+There is no SDK call for this - `/metrics`, `/healthz` and `/readyz` are
+plain HTTP endpoints for Prometheus and the kubelet, not client
+integration.
+
+**3. Load the alert rules.** `ops/prometheus-alerts.yaml` is a raw
+`groups:` file; validate it, then either reference it via `rule_files` in
+`prometheus.yml` or wrap its `groups` in a `PrometheusRule` CR if you run
+the Prometheus Operator:
+
+```sh
+promtool check rules ops/prometheus-alerts.yaml
+```
+
+**4. Import the dashboard.** Grafana -> Dashboards -> New -> Import ->
+upload `ops/grafana-dashboard.json`, pointed at the same Prometheus data
+source. Panels: *Request rate by handler*, *p99 latency by handler*
+(target: verify < 10ms, lookup/attr < 15ms, issue < 20ms), *5xx error
+rate*, *Lookup misses by client (enumeration signal)*, *Rate-limited
+requests by client*, *Auth failures (401) / min*, *Requests / s (total)*,
+*Consent / DSR / OTI denials (403,409,410) by code*.
+
+## What each alarm means
+
+| Alert | Severity | Fires when | What it means, operationally |
+|---|---|---|---|
+| `SunderDown` | critical | `up{job="sunder"}==0` for 2m | No scrape for 2 minutes. Lookups, OTI handoffs and registrations are failing org-wide. |
+| `SunderHighErrorRate` | critical | 5xx rate over 2% for 5m | Check database connectivity and service logs; audit appends failing shows up here first (operations fail closed). |
+| `SunderLookupLatencyHigh` | warning | `POST /v1/lookup` p99 over 15ms for 10m | Above the 15ms design target. Check PostgreSQL load, index bloat on `person_tokens`, and connection-pool saturation. |
+| `SunderOTIVerifyLatencyHigh` | warning | `POST /v1/oti/verify` p99 over 10ms for 10m | Above the 10ms design target. The verify hot path is a single CAS update; sustained latency means database contention. |
+| `SunderEnumerationSuspected` | critical | over 100 lookup misses for one client in 10m | Possible enumeration attack. Review the audit trail for that client and consider suspending its credential. |
+| `SunderRateLimitedSpike` | warning | over 500 rate-limited requests for one client in 10m | Either a runaway integration or an abuse attempt; check with the owning team before raising the limit. |
+| `SunderAuthFailureSpike` | warning | over 200 `401`s org-wide in 10m | Possible credential stuffing against the API, or a client with a rotated-out credential still deployed. |
+
+The dashboard's *Consent / DSR / OTI denials (403,409,410) by code* panel
+has no matching alert rule in `ops/prometheus-alerts.yaml` - it is
+visualized but nothing pages on it today. If a spike there matters to your
+compliance posture, add a rule; do not assume it is already covered.
+
+## Security notes
+
+- `/metrics` is **unauthenticated by default**. Per-client counters
+  (misses, rate-limited count, 401 count) reveal client ids and activity
+  patterns, so set `SUNDER_METRICS_TOKEN` and still restrict the endpoint
+  at the network layer - the bearer token is a second layer, not a
+  replacement for network policy.
+- Every alert fires on **aggregate, per-client counters** - `sunder
+  _lookup_misses_total{client=...}`, `sunder_ratelimited_total{client=...}`,
+  request counts by status code. None of it carries attribute values or
+  lookup keys, matching the audit chain's own rule of recording actions,
+  not PII: the alert can tell you *which client* and *how often*, never
+  *who was looked up*.
+- `SunderEnumerationSuspected` does **not** auto-suspend the client. The
+  annotation says "review... consider suspending its credential" -
+  deliberately a human decision. Sunder enforces the fixed rate limit;
+  it does not throttle or ban adaptively on its own.

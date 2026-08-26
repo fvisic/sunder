@@ -152,3 +152,70 @@ func TestPhoneSuffixLookupOverHTTP(t *testing.T) {
 		t.Fatalf("short suffix must 400, got %d", rec.Code)
 	}
 }
+
+// TestSearchUnlockStrictPosture: with SUNDER_SEARCH_UNLOCK=true a fuzzy or
+// partial lookup requires a fresh unlock token; exact lookups never do.
+func TestSearchUnlockStrictPosture(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActLookup, auth.ActAdminUnlock},
+		AllowedPurposes: []string{"support"}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+		SearchFuzzyName: true, SearchPhoneSuffix: true, SearchUnlock: true}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+
+	rec, _ := e.do(t, cred, "POST", "/v1/contacts", map[string]any{
+		"phone": "+385911234567", "name": "Ana Anić", "email": "ana@example.com"})
+	if rec.Code != 201 && rec.Code != 200 {
+		t.Fatalf("register: %d", rec.Code)
+	}
+
+	// Exact lookup: NO unlock needed even in strict posture.
+	rec, _ = e.do(t, cred, "POST", "/v1/lookup", map[string]string{"email": "ana@example.com"})
+	if rec.Code != 200 {
+		t.Fatalf("exact lookup must not need unlock: %d %s", rec.Code, rec.Body.String())
+	}
+	// Suffix lookup without a token: 403 with the pointer.
+	rec, out := e.do(t, cred, "POST", "/v1/lookup", map[string]string{"phone_suffix": "0911234567"})
+	if rec.Code != 403 || out["error"] != "unlock_required" {
+		t.Fatalf("suffix without unlock must 403 unlock_required: %d %s", rec.Code, rec.Body.String())
+	}
+	// Mint a token, spend it on the lookup: 200.
+	rec, out = e.do(t, cred, "POST", "/v1/admin/unlock", map[string]string{"purpose": "search"})
+	if rec.Code != 201 || out["unlock_token"] == "" {
+		t.Fatalf("unlock mint: %d %s", rec.Code, rec.Body.String())
+	}
+	token := out["unlock_token"]
+	req := httptest.NewRequest("POST", "/v1/lookup", strings.NewReader(`{"phone_suffix":"0911234567"}`))
+	req.Header.Set("Authorization", "Bearer "+cred)
+	req.Header.Set("X-Sunder-Unlock", token)
+	req.Header.Set("Content-Type", "application/json")
+	hrec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hrec, req)
+	if hrec.Code != 200 {
+		t.Fatalf("suffix with unlock must 200: %d %s", hrec.Code, hrec.Body.String())
+	}
+	// The token is spent: replaying it fails.
+	req = httptest.NewRequest("POST", "/v1/lookup", strings.NewReader(`{"phone_suffix":"0911234567"}`))
+	req.Header.Set("Authorization", "Bearer "+cred)
+	req.Header.Set("X-Sunder-Unlock", token)
+	req.Header.Set("Content-Type", "application/json")
+	hrec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hrec, req)
+	if hrec.Code != 403 {
+		t.Fatalf("replayed unlock must 403: %d", hrec.Code)
+	}
+	// Fuzzy name narrowing is gated too in strict posture.
+	rec, _ = e.do(t, cred, "POST", "/v1/lookup", map[string]string{"email": "ana@example.com", "name": "anic"})
+	if rec.Code != 403 {
+		t.Fatalf("fuzzy narrowing without unlock must 403 in strict posture: %d", rec.Code)
+	}
+}

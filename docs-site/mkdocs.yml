@@ -1,0 +1,76 @@
+site_name: Sunder
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+  font: false
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Get Started:
+      - Quickstart: get-started/quickstart.md
+      - Performance: get-started/performance.md
+  - Install:
+      - Docker Compose: install/docker-compose.md
+      - Helm: install/helm.md
+      - Bootstrap: install/bootstrap.md
+      - Postgres Sizing: install/postgres-sizing.md
+      - Configuration: install/configuration.md
+  - Admin:
+      - Keys and Keystores: admin/keys-and-keystores.md
+      - Rotation and Rekey: admin/rotation-and-rekey.md
+      - Audit Chain: admin/audit-chain.md
+      - Audit Operations: admin/audit-operations.md
+      - Monitoring: admin/monitoring.md
+      - Backup and DR: admin/backup-dr.md
+      - Multi-Replica: admin/multi-replica.md
+  - Concepts:
+      - Scoped Pseudonyms: concepts/scoped-pseudonyms.md
+      - OTI Handoff: concepts/oti-handoff.md
+      - Lookup vs Authentication: concepts/lookup-vs-authentication.md
+      - Selective Disclosure: concepts/selective-disclosure.md
+      - External Issuers: concepts/external-issuers.md
+      - Fuzzy and Partial Search: concepts/fuzzy-and-partial-search.md
+  - GDPR:
+      - Rights and Consent: gdpr/rights-and-consent.md
+      - Privacy Portal: gdpr/privacy-portal.md
+      - Erasure Webhooks: gdpr/erasure-webhooks.md
+  - Comparisons:
+      - Databunker: comparisons/databunker.md
+  - Migrations:
+      - From Databunker: migrations/from-databunker.md
+      - Bulk Import: migrations/bulk-import.md
+  - How-To:
+      - CRM Lookup Integration: howto/crm-lookup-integration.md
+      - Delayed Flows: howto/delayed-flows.md
+  - Dev:
+      - SDKs and API: dev/sdks-and-api.md
+
+plugins:
+  - search
+
+extra:
+  generator: false

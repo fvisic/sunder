@@ -1,0 +1,147 @@
+# Rotation and Rekey
+
+You need to replace a key - on schedule, after a suspected leak, or as part
+of an algorithm migration - without breaking lookups or attribute reads for
+data written under the old one.
+
+## The mechanism
+
+```mermaid
+sequenceDiagram
+    participant Admin
+    participant Ring as keys table (KeyRing)
+    participant DB as persons / cids
+
+    Admin->>Ring: sunder keys rotate -kind hmac-email
+    Ring->>Ring: mint v2 (ACTIVE), demote v1 to RETIRING
+    Note over DB: lookups now compute the token under<br/>BOTH v1 and v2 (dual-key window)
+    Admin->>DB: sunder keys rekey
+    DB->>DB: decrypt each person's blobs, write v2 search<br/>tokens, re-encrypt PII under newest pii-kek
+    Admin->>Ring: sunder keys retire -kind hmac-email -version v1
+    Ring->>DB: DELETE person_tokens WHERE key_version=v1
+    Note over Ring: v1 tokens stop matching, v1 stops verifying OTIs
+```
+
+Between rotate and retire, every kind is in the **dual-key lookup window**:
+`KeyRing.Versions` returns every `ACTIVE` and `RETIRING` version for a
+kind, newest first, and lookup computes the search token under each one
+until it finds a match. This is what lets rotation happen with zero
+downtime - a row token-derived under v1 keeps matching until it is
+re-keyed or v1 is retired.
+
+## Steps
+
+### 1. Rotate
+
+```sh
+sunder keys rotate -kind hmac-email
+# rotated hmac-email to v2 (previous versions RETIRING; old tokens keep matching, rows re-key on touch)
+# running servers pick up the change within 30s (keyring cache TTL)
+```
+
+Valid `-kind` values: `hmac-email`, `hmac-phone`, `hmac-name`, `pii-kek`,
+`oti-sign`. Rotate mints the new version's key bytes first, then commits the
+metadata row that makes it `ACTIVE` and demotes the previous `ACTIVE` to
+`RETIRING` - key material always exists before anything can reference it.
+
+Rows re-key "on touch" (any register/lookup/share that writes a token or
+blob writes it under the newest version) - but a contact nobody touches
+again stays on the old version forever. That is what `rekey` is for.
+
+### 2. Complete the rotation with `keys rekey`
+
+```sh
+sunder keys rekey -reencrypt-pii=true -batch 500
+# rekey sweep: 41203 person(s), 3 token(s) written, 41118 blob(s) re-encrypted, 0 blob(s) undecryptable
+# old versions can now be retired: sunder keys retire -kind <kind> -version <v>
+```
+
+This is a batch sweep over every non-erased person (id order, `-batch` per
+page): it decrypts each person's per-scope attribute blobs, derives fresh
+search tokens for every identifier it finds under the *newest* ACTIVE
+version of each HMAC kind, and (unless `-reencrypt-pii=false`) re-encrypts
+the blob under the newest `pii-kek` if its stored key version or algorithm
+is stale. It is idempotent and resumable - rerun until the counts read
+zero. A contact whose blobs were already wiped by retention has no
+recoverable identifiers; its old-version tokens simply die when you retire
+that version.
+
+**`keys rekey` is also the backfill path for derived search tokens.**
+Turning on `SUNDER_SEARCH_FUZZY_NAME` or `SUNDER_SEARCH_PHONE_SUFFIX` on an
+existing dataset does nothing for contacts registered before the flag was
+set - those derived tokens (`name_phonetic`, `phone_suffix`) only get
+written going forward, or by rerunning the same sweep:
+
+```sh
+export SUNDER_SEARCH_FUZZY_NAME=true
+sunder keys rekey
+```
+
+The sweep re-derives phonetic codes / suffixes from the names and phones it
+already decrypted and inserts the missing token rows
+(`ON CONFLICT DO NOTHING`), so this is the single command for both "finish
+a key rotation" and "backfill a newly enabled search feature."
+
+### 3. Verify, then retire the old version
+
+```sh
+sunder keys list
+# hmac-email/v1              RETIRING  2026-01-04T09:00:00Z
+# hmac-email/v2              ACTIVE    2026-08-20T11:12:03Z
+
+sunder keys retire -kind hmac-email -version v1
+# retired hmac-email/v1 - it no longer matches lookups nor verifies tokens
+# (for hmac kinds: rows still stored under this version stop matching; re-key first)
+```
+
+Retire only accepts a `RETIRING` version (rotate first) and refuses the
+current `ACTIVE` version outright. For `hmac-*` kinds it also deletes every
+`person_tokens` row still stored under that version in the same
+transaction - so retiring before a full `rekey` sweep permanently drops
+lookup-ability for any contact that was never re-keyed. Check `keys list`
+and the sweep's `token(s) written` count before retiring.
+
+SDK equivalent: none - CLI-only, operator-run maintenance, deliberately
+separate from the request-serving API surface.
+
+## Algorithm migration
+
+`SUNDER_PII_ALG` (`aes256gcm` default, or `xchacha20poly1305`) only governs
+what *new writes* use - reads always follow the algorithm stored per-blob
+(`cids.pii_alg`), so old and new algorithms coexist with no downtime. The
+same `keys rekey` sweep converts the backlog, because it re-encrypts a blob
+whenever its stored key version *or* algorithm is stale:
+
+```sh
+sunder keys rotate -kind pii-kek          # mint pii-kek/v2 first - don't reuse
+                                           # key material across algorithms
+export SUNDER_PII_ALG=xchacha20poly1305   # restart replicas (rolling is fine)
+sunder keys rekey -batch 500              # converts the backlog; rerun until
+                                           # "0 blob(s) re-encrypted"
+```
+
+Verify with `SELECT pii_alg, count(*) FROM cids WHERE pii_encrypted IS NOT NULL GROUP BY pii_alg;`.
+Full procedure, including the associated-data binding that makes a hostile
+`pii_alg` downgrade in the database fail authentication rather than decrypt
+under the wrong cipher: `docs/RUNBOOK-ALG-MIGRATION.md`.
+
+## Security notes
+
+- Retirement deliberately does **not** leave old tokens lying around
+  "just in case" - it deletes `person_tokens` rows under the retired
+  version in the same transaction that flips its status, removing material
+  derived from a possibly-leaked key rather than merely disabling it.
+- Rotation deliberately does **not** let you skip straight to retiring the
+  version you just replaced - `Retire` only accepts a `RETIRING` version,
+  so a leaked key still requires one explicit `rotate` before it can be
+  cut off, and the newest `ACTIVE` version can never be retired out from
+  under live traffic.
+- The rekey sweep deliberately does **not** treat a blob it cannot decrypt
+  as fatal - it counts it under `blob(s) undecryptable` and continues, so
+  one corrupted or already-erased row cannot stall the sweep for every
+  other contact.
+- The keyring cache deliberately does **not** refresh instantly on every
+  request - a 30s TTL means a rotation takes up to 30s to reach running
+  replicas, and an unknown-kid verification miss forces at most one reload
+  per 5s (`InvalidateThrottled`), so a flood of tokens signed by an
+  already-retired key cannot be used to hammer the keys table.
