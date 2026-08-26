@@ -481,8 +481,15 @@ func TestShamirCLIErrorPaths(t *testing.T) {
 		}
 	})
 	shares = parseSharesFromOutput(out)
-	// Three shares that do not all belong together: corrupt one hex nibble.
-	bad := shares[0][:len(shares[0])-1] + "0"
+	// Three shares that do not all belong together: flip the last hex nibble
+	// to a DIFFERENT digit (setting it to a fixed "0" would be a no-op when
+	// the nibble already was "0", leaving a valid share and a flaky pass).
+	last := shares[0][len(shares[0])-1]
+	repl := byte('0')
+	if last == '0' {
+		repl = '1'
+	}
+	bad := shares[0][:len(shares[0])-1] + string(repl)
 	if err := run("keys", []string{"shamir-recover", "-shares", bad + "," + shares[1] + "," + shares[2]}); err == nil {
 		t.Fatal("a corrupted share set must fail the checksum")
 	}
