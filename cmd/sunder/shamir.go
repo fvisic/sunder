@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 
@@ -16,6 +17,7 @@ import (
 type recoveryKeystore interface {
 	AllKeys() ([]crypto.KeyEntry, error)
 	WriteRecoveryBundle([]byte) error
+	WriteRecoveryBundleForce([]byte) error
 	ReadRecoveryBundle() ([]byte, error)
 	RestoreKeys([]crypto.KeyEntry) error
 }
@@ -39,7 +41,14 @@ func shamirInit(ks recoveryKeystore, n, k int, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// L2: refuse a fresh init over an existing bundle - it would silently
+	// strand every current custodian's shares. Write BEFORE printing so a
+	// write failure never leaves shares in the operator's scrollback for a
+	// bundle that was not persisted.
 	if err := ks.WriteRecoveryBundle(bundle); err != nil {
+		if errors.Is(err, crypto.ErrBundleExists) {
+			return fmt.Errorf("a recovery bundle already exists; shamir-init would strand the current custodians - use `keys shamir-rotate` to re-seal under fresh shares")
+		}
 		return err
 	}
 	// The recovery key and the shares are never stored - this is the only
@@ -91,7 +100,9 @@ func shamirRotate(ks recoveryKeystore, shares [][]byte, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := ks.WriteRecoveryBundle(bundle); err != nil {
+	// Rotate deliberately supersedes the existing bundle under the SAME
+	// shares - Force is correct here (unlike init).
+	if err := ks.WriteRecoveryBundleForce(bundle); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "Recovery bundle re-sealed over %d keys under the existing shares.\n", len(entries))

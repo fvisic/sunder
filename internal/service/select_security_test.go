@@ -61,7 +61,7 @@ func TestUnlockTokenLifecycle(t *testing.T) {
 	// Real rows: unlock_tokens carries a foreign key to clients, so
 	// fabricated client literals cannot issue.
 	admin := &auth.Client{ID: "ops", Name: "Ops", Scope: "crm",
-		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, RateLimit: 10}
+		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, CredentialExpiresAt: testUnlockExpiry(), RateLimit: 10}
 	if _, err := auth.Create(ctx, e.admin.Pool, *admin); err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestUnlockTokenLifecycle(t *testing.T) {
 		t.Fatalf("wrong purpose must fail: %v", err)
 	}
 	other := &auth.Client{ID: "other", Name: "Other", Scope: "crm",
-		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, RateLimit: 10}
+		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, CredentialExpiresAt: testUnlockExpiry(), RateLimit: 10}
 	if _, err := auth.Create(ctx, e.admin.Pool, *other); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestUnlockFailsClosedUnderDeniedTable(t *testing.T) {
 	e := newFaultEnv(t, "unlock_tokens")
 	ctx := context.Background()
 	admin := &auth.Client{ID: "ops2", Name: "Ops2", Scope: "crm",
-		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, RateLimit: 10}
+		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, CredentialExpiresAt: testUnlockExpiry(), RateLimit: 10}
 	if _, err := auth.Create(ctx, e.admin.Pool, *admin); err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +314,7 @@ func TestNewSurfacesFailClosedOnAuditDenied(t *testing.T) {
 	ctx := context.Background()
 
 	admin := &auth.Client{ID: "ops3", Name: "Ops3", Scope: "crm",
-		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, RateLimit: 10}
+		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, CredentialExpiresAt: testUnlockExpiry(), RateLimit: 10}
 	if _, err := auth.Create(ctx, e.admin.Pool, *admin); err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +524,7 @@ func TestUnlockAndRecordKeyQueryErrors(t *testing.T) {
 	e := newFaultEnv(t)
 	ctx := context.Background()
 	admin := &auth.Client{ID: "opsq", Name: "OpsQ", Scope: "crm",
-		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, RateLimit: 10}
+		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, CredentialExpiresAt: testUnlockExpiry(), RateLimit: 10}
 	if _, err := auth.Create(ctx, e.admin.Pool, *admin); err != nil {
 		t.Fatal(err)
 	}
@@ -760,3 +760,5 @@ func TestGDPRAndPortalQueryErrorBranches(t *testing.T) {
 		}
 	})
 }
+
+func testUnlockExpiry() *time.Time { t := time.Now().Add(24 * time.Hour); return &t }

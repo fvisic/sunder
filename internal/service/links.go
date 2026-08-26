@@ -123,6 +123,13 @@ func (l *Links) List(ctx context.Context, client *auth.Client, cid string) ([]Li
 	if err != nil {
 		return nil, err
 	}
+	// A metadata read is still a read: leave a trail, like every other read
+	// path (L5).
+	if err := audit.ReadEvent(ctx, l.Pool, audit.Entry{
+		ClientID: client.ID, Action: "links.list", CID: cid,
+	}); err != nil {
+		return nil, fmt.Errorf("audit append: %w", err)
+	}
 	// One query, both directions, resolving the OTHER person back to its
 	// cid in this scope.
 	rows, err := l.Pool.Query(ctx, `

@@ -68,6 +68,13 @@ func (c *Contacts) ListVersions(ctx context.Context, client *auth.Client, cid st
 	if _, err := c.personForClientCID(ctx, client, cid); err != nil {
 		return nil, err
 	}
+	// A metadata read is still a read: leave a trail, like every other read
+	// path (L5).
+	if err := audit.ReadEvent(ctx, c.Pool, audit.Entry{
+		ClientID: client.ID, Action: "versions.list", CID: cid,
+	}); err != nil {
+		return nil, fmt.Errorf("audit append: %w", err)
+	}
 	rows, err := c.Pool.Query(ctx,
 		`SELECT version_no, written_by, written_at FROM cid_blob_versions WHERE cid=$1 ORDER BY version_no DESC`, cid)
 	if err != nil {

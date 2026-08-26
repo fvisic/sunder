@@ -94,6 +94,12 @@ func (s *Server) handleTokenBulkCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Shape-check the whole batch BEFORE spending the single-use unlock
+	// token (L9): a malformed item must not burn the token.
+	if err := s.ValueTokens.ValidateInputs(in.Items); err != nil {
+		writeErr(w, err)
+		return
+	}
 	if !s.requireUnlock(w, r, "bulk-tokens") {
 		return
 	}

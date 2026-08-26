@@ -999,3 +999,30 @@ func TestTokenDeleteIsAttributed(t *testing.T) {
 		t.Fatalf("the delete audit must attribute what was destroyed: %s", detail)
 	}
 }
+
+// TestBulkValidateBeforeUnlock (review L9): a malformed item must be rejected
+// by ValidateInputs BEFORE the unlock token is spent, so a bad batch cannot
+// burn a single-use token. (The handler calls ValidateInputs first; this
+// pins the pure validator it relies on.)
+func TestBulkValidateBeforeUnlock(t *testing.T) {
+	_, v, _ := tokenEnv(t)
+	// empty batch, over-cap, and a bad item are all caught with no side effects.
+	if err := v.ValidateInputs(nil); !errors.Is(err, service.ErrValidation) {
+		t.Fatalf("empty batch: %v", err)
+	}
+	big := make([]service.TokenizeInput, 1001)
+	for i := range big {
+		big[i] = service.TokenizeInput{Value: "x"}
+	}
+	if err := v.ValidateInputs(big); !errors.Is(err, service.ErrValidation) {
+		t.Fatalf("over-cap: %v", err)
+	}
+	batch := []service.TokenizeInput{{Value: "ok"}, {Type: "card", Value: "not-luhn"}}
+	if err := v.ValidateInputs(batch); !errors.Is(err, service.ErrValidation) {
+		t.Fatalf("a bad item must fail the batch pre-unlock: %v", err)
+	}
+	// A clean batch validates.
+	if err := v.ValidateInputs([]service.TokenizeInput{{Value: "a"}, {Value: "b"}}); err != nil {
+		t.Fatalf("a clean batch must validate: %v", err)
+	}
+}

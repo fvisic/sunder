@@ -114,6 +114,19 @@ func RoleActions(role string) []string {
 	return nil
 }
 
+// ValidateUnlockGrant refuses admin.unlock on a NON-EXPIRING credential
+// (L10): the unlock token is already ephemeral (60s single-use), but a
+// standing grant on a long-lived service token turns the strict search
+// posture back into "always allowed with an extra step". A warning would be
+// ignored; this refuses at issuance. Grant it to a credential with an
+// expiry, or mint the token per session.
+func ValidateUnlockGrant(actions []string, expiresAt *time.Time) error {
+	if slices.Contains(actions, ActAdminUnlock) && expiresAt == nil {
+		return fmt.Errorf("admin.unlock must be granted only to a credential with an expiry (set -expires-in): a standing unlock grant defeats the strict search posture")
+	}
+	return nil
+}
+
 func (c *Client) Can(action string) bool { return slices.Contains(c.AllowedActions, action) }
 
 // CanReadAttribute applies the F3 allowlist: nil = every attribute its
@@ -275,6 +288,9 @@ func Create(ctx context.Context, pool *pgxpool.Pool, c Client) (credential strin
 	if !clientIDPattern.MatchString(c.ID) {
 		return "", fmt.Errorf("client id must match %s", clientIDPattern)
 	}
+	if err := ValidateUnlockGrant(c.AllowedActions, c.CredentialExpiresAt); err != nil {
+		return "", err
+	}
 	secret, err := crypto.NewClientSecret()
 	if err != nil {
 		return "", err
@@ -308,6 +324,20 @@ func applyRole(c *Client) {
 // rotations, don't race them. setExpiry=false preserves the stored expiry
 // policy (the safe default); setExpiry=true writes expiresAt (nil clears).
 func RotateSecret(ctx context.Context, pool *pgxpool.Pool, clientID string, expiresAt *time.Time, setExpiry bool) (string, error) {
+	// L10: rotating a credential to a NON-expiring one must not strip the
+	// expiry off a client that holds admin.unlock - that would recreate
+	// exactly the standing-unlock state create/grant refuse. Checked here so
+	// every RotateSecret caller is covered.
+	if setExpiry && expiresAt == nil {
+		var acts []string
+		if err := pool.QueryRow(ctx,
+			`SELECT allowed_actions FROM clients WHERE client_id=$1`, clientID).Scan(&acts); err != nil {
+			return "", err
+		}
+		if err := ValidateUnlockGrant(acts, nil); err != nil {
+			return "", err
+		}
+	}
 	secret, err := crypto.NewClientSecret()
 	if err != nil {
 		return "", err

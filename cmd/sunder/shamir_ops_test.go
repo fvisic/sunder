@@ -33,6 +33,13 @@ func (f *fakeKS) WriteRecoveryBundle(b []byte) error {
 	f.bundle = append([]byte(nil), b...)
 	return nil
 }
+func (f *fakeKS) WriteRecoveryBundleForce(b []byte) error {
+	if f.failWrite {
+		return errors.New("write boom")
+	}
+	f.bundle = append([]byte(nil), b...)
+	return nil
+}
 func (f *fakeKS) ReadRecoveryBundle() ([]byte, error) {
 	if f.failRead {
 		return nil, errors.New("read boom")
