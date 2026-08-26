@@ -40,6 +40,8 @@ tags:
     description: Token-based contact lookup (LOOKUP != AUTHENTICATION).
   - name: oti
     description: One-time identifiers for cross-system handoff.
+  - name: audit
+    description: Read-only tamper-evidence surface for the hash-chained audit log.
   - name: ops
     description: Unauthenticated operational endpoints.
 
@@ -666,6 +668,91 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/admin/audit/verify:
+    get:
+      tags: [audit]
+      operationId: auditVerify
+      summary: Verify the audit hash chain
+      description: |
+        Action `audit.verify` - read-only. Recomputes the whole sealed chain
+        and reports the first broken position, if any. Unsealed rows are
+        `pending`, not broken: they are outside the chain until the sealer
+        runs, and a stalled sealer is alarmed on separately
+        (`sunder_audit_unsealed_rows`).
+
+        The same verdict `sunder verify-audit` prints, minus the RFC 3161
+        anchor checks (those need the TSA CA bundle and stay on the CLI).
+        Not audited itself: appending a record per verification would make a
+        monitoring loop the loudest writer in the chain it checks.
+      responses:
+        '200':
+          description: "The verdict. `ok: false` is a successful answer, not an error."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, pending]
+                properties:
+                  ok: {type: boolean}
+                  pending:
+                    type: integer
+                    description: Rows appended but not yet sealed.
+                  broken_chain_seq:
+                    type: integer
+                    description: Present only when ok is false - the first bad position.
+                  reason:
+                    type: string
+                    description: Present only when ok is false - what did not match.
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/admin/audit/chain:
+    get:
+      tags: [audit]
+      operationId: auditChain
+      summary: Read the tail of the sealed chain
+      description: |
+        Action `audit.verify` - read-only. The newest sealed records with
+        their hash links, oldest-first within the window.
+
+        Deliberately WITHOUT `cid` and `detail`: showing that the chain
+        cannot have been altered is a different privilege from showing what
+        happened to whom. Use `GET /v1/dsr/access` (privacy officer) for a
+        person's trail.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, default: 20, maximum: 200}
+          description: Records to return; values above 200 are clamped.
+      responses:
+        '200':
+          description: The chain window.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unsealed: {type: integer}
+                  rows:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        chain_seq: {type: integer}
+                        ts: {type: string, format: date-time}
+                        client_id: {type: string}
+                        action: {type: string}
+                        hash: {type: string}
+                        prev_hash: {type: string}
+        '400': {$ref: '#/components/responses/Validation'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/Internal'}
 
   /healthz:
