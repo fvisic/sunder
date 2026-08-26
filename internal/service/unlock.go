@@ -49,8 +49,8 @@ func (u *Unlock) Issue(ctx context.Context, client *auth.Client, purpose string)
 	if !client.Can(auth.ActAdminUnlock) {
 		return "", time.Time{}, ErrForbidden
 	}
-	if purpose == "" {
-		return "", time.Time{}, fmt.Errorf("%w: purpose required", ErrValidation)
+	if purpose == "" || len(purpose) > 64 {
+		return "", time.Time{}, fmt.Errorf("%w: purpose must be 1-64 chars", ErrValidation)
 	}
 	var raw [20]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -58,16 +58,19 @@ func (u *Unlock) Issue(ctx context.Context, client *auth.Client, purpose string)
 	}
 	token = base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw[:])
 	sum := sha256.Sum256([]byte(token))
-	expiresAt = time.Now().UTC().Add(unlockTTL)
 
 	tx, err := u.Pool.Begin(ctx)
 	if err != nil {
 		return "", time.Time{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO unlock_tokens (token_hash, client_id, purpose, expires_at) VALUES ($1,$2,$3,$4)`,
-		sum[:], client.ID, purpose, expiresAt); err != nil {
+	// expires_at and its comparison in Consume both use the database
+	// clock (review F6): an app clock a minute off would make every 60s
+	// token dead on arrival or silently long-lived.
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO unlock_tokens (token_hash, client_id, purpose, expires_at)
+		 VALUES ($1,$2,$3, now() + make_interval(secs => $4)) RETURNING expires_at`,
+		sum[:], client.ID, purpose, unlockTTL.Seconds()).Scan(&expiresAt); err != nil {
 		return "", time.Time{}, err
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{

@@ -41,6 +41,11 @@ type PIIBox struct {
 
 func NewPIIBox(eng Engine) *PIIBox { return &PIIBox{eng: eng} }
 
+// Engine exposes the box's crypto engine: services that seal their own
+// payloads (portal outbox, value tokens) must use the SAME engine so a
+// signer split covers them too.
+func (p *PIIBox) Engine() Engine { return p.eng }
+
 // Algorithm returns the algorithm this box writes with.
 func (p *PIIBox) Algorithm() string {
 	if p.Alg == "" {

@@ -369,3 +369,47 @@ func TestImportFailsClosedOnBrokenKeystore(t *testing.T) {
 		t.Fatalf("nothing may land after a keystore failure, found %d", n)
 	}
 }
+
+func TestImportSuffixOnlyDerived(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	cfg.SearchPhoneSuffix = true // suffix only, no fuzzy name
+	f := filepath.Join(t.TempDir(), "c.jsonl")
+	if err := os.WriteFile(f, []byte(`{"phone":"+385911234567"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+	var suffix, phonetic int64
+	if err := st.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM person_tokens WHERE kind='phone_suffix'),
+		(SELECT count(*) FROM person_tokens WHERE kind='name_phonetic')`).Scan(&suffix, &phonetic); err != nil {
+		t.Fatal(err)
+	}
+	if suffix != 1 || phonetic != 0 {
+		t.Fatalf("suffix-only: %d suffix, %d phonetic", suffix, phonetic)
+	}
+}
+
+func TestImportBatchTableDenied(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Drop the persons table so the batch INSERT fails mid-transaction;
+	// the whole batch must roll back.
+	if _, err := st.Pool.Exec(ctx, `ALTER TABLE persons RENAME TO persons_hidden`); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testCfg(t)
+	f := filepath.Join(t.TempDir(), "c.jsonl")
+	if err := os.WriteFile(f, []byte(`{"email":"x@example.com"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm"}); err == nil {
+		t.Fatal("import must fail when a target table is missing")
+	}
+}

@@ -104,6 +104,22 @@ func (o *OTI) IssueFull(ctx context.Context, client *auth.Client, in IssueInput)
 	if !client.CanUse(purpose) {
 		return "", time.Time{}, ErrPurposeNotAllowed
 	}
+	// F3 allowlist (review F1): an OTI is a disclosure channel too. A
+	// credential narrowed to some attributes must not share the VALUES of
+	// others, nor assert PREDICATES over them - a predicate is a binary
+	// search oracle for the value, so it leaks exactly what the allowlist
+	// forbids. Gate both by the same rule as GetAttribute, before any
+	// per-person work.
+	for _, a := range shareAttrs {
+		if !client.CanReadAttribute(a) {
+			return "", time.Time{}, ErrForbidden
+		}
+	}
+	for _, pr := range in.SharePredicates {
+		if !client.CanReadAttribute(pr.Attr) {
+			return "", time.Time{}, ErrForbidden
+		}
+	}
 	// Scope ownership FIRST (see GetAttribute: the consent hook on a raw
 	// caller CID would leak foreign-CID existence via the 403/404 split).
 	if _, err := o.Contacts.personForClientCID(ctx, client, cid); err != nil {

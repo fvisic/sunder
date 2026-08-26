@@ -623,3 +623,50 @@ func TestPortalDataForPersonWithoutScopes(t *testing.T) {
 		t.Fatalf("want no scopes, got %d", len(scopes))
 	}
 }
+
+// TestPortalMailDeliveredSuccessfully covers the SENT branch of settleMail
+// and the enqueue/deliver happy path with a working mailer.
+func TestPortalMailDeliveredSuccessfully(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	e.register(t)
+	p := &service.Portal{GDPR: e.gdpr, Contacts: e.svc}
+
+	var got int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got++
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	if _, err := e.admin.Pool.Exec(ctx,
+		`INSERT INTO webhooks (scope, url, secret) VALUES ('_portal', $1, 's')`, srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(ctx, "fault@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := p.DeliverPendingMail(ctx)
+	if err != nil || n != 1 {
+		t.Fatalf("delivery: %d %v", n, err)
+	}
+	if got != 1 {
+		t.Fatalf("mailer must have been called once, got %d", got)
+	}
+	var status string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT status FROM portal_outbox ORDER BY id DESC LIMIT 1`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "DELIVERED" {
+		t.Fatalf("status must be DELIVERED, got %s", status)
+	}
+	// The delivery is recorded in the chain.
+	var sent int64
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit WHERE action='portal.mail.delivered'`).Scan(&sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent != 1 {
+		t.Fatalf("chain must record the delivery, got %d", sent)
+	}
+}

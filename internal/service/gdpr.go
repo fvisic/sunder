@@ -288,7 +288,7 @@ func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, 
 // filterAllowedAttributes removes fields outside the client's F3
 // allowlist, in place. nil allowlist = untouched (pre-F3 behaviour).
 func filterAllowedAttributes(client *auth.Client, attrs map[string]string) {
-	if client.AllowedAttributes == nil || attrs == nil {
+	if len(client.AllowedAttributes) == 0 || attrs == nil {
 		return
 	}
 	for k := range attrs {
@@ -376,6 +376,12 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 		return 0, 0, fmt.Errorf("%w: person already erased", ErrValidation)
 	}
 
+	// F5 crypto-shredding: destroying the record key makes every file of
+	// this person unrecoverable the instant this transaction commits; the
+	// dead ciphertext is garbage-collected by the retention sweep.
+	if err := ShredRecordKey(ctx, tx, personID); err != nil {
+		return 0, 0, err
+	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO erasures (person_id, requested_by) VALUES ($1,$2) RETURNING id`,
 		personID, actor).Scan(&erasureID); err != nil {

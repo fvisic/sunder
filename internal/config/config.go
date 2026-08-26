@@ -94,6 +94,19 @@ type Config struct {
 	// round trip per caller-ID lookup kills the flow. Genuinely bulk
 	// surfaces always require unlock regardless of this switch.
 	SearchUnlock bool // SUNDER_SEARCH_UNLOCK=true
+
+	// File vault (F5). Off unless a storage driver is configured: files
+	// are a new data class with their own lifecycle, so an upgrade must
+	// not silently start accepting them.
+	FilesStorage     string // SUNDER_FILES_STORAGE: "" (disabled) | "local" | "s3"
+	FilesDir         string // SUNDER_FILES_DIR: local driver directory
+	FilesMaxMB       int64  // SUNDER_FILES_MAX_MB: per-file cap, default 25
+	FilesS3Endpoint  string // SUNDER_FILES_S3_ENDPOINT (https://... ; MinIO/R2 compatible)
+	FilesS3Bucket    string // SUNDER_FILES_S3_BUCKET
+	FilesS3Region    string // SUNDER_FILES_S3_REGION
+	FilesS3AccessKey string // SUNDER_FILES_S3_ACCESS_KEY
+	FilesS3SecretKey string // SUNDER_FILES_S3_SECRET_KEY
+	FilesS3PathStyle bool   // SUNDER_FILES_S3_PATH_STYLE=true (MinIO)
 }
 
 func getenv(key, def string) string {
@@ -222,6 +235,29 @@ func FromEnvNoDB() (Config, error) {
 	c.SearchFuzzyName = os.Getenv("SUNDER_SEARCH_FUZZY_NAME") == "true"
 	c.SearchPhoneSuffix = os.Getenv("SUNDER_SEARCH_PHONE_SUFFIX") == "true"
 	c.SearchUnlock = os.Getenv("SUNDER_SEARCH_UNLOCK") == "true"
+	c.FilesStorage = os.Getenv("SUNDER_FILES_STORAGE")
+	c.FilesDir = getenv("SUNDER_FILES_DIR", "./filestore")
+	c.FilesS3Endpoint = os.Getenv("SUNDER_FILES_S3_ENDPOINT")
+	c.FilesS3Bucket = os.Getenv("SUNDER_FILES_S3_BUCKET")
+	c.FilesS3Region = getenv("SUNDER_FILES_S3_REGION", "us-east-1")
+	c.FilesS3AccessKey = os.Getenv("SUNDER_FILES_S3_ACCESS_KEY")
+	c.FilesS3SecretKey = os.Getenv("SUNDER_FILES_S3_SECRET_KEY")
+	c.FilesS3PathStyle = os.Getenv("SUNDER_FILES_S3_PATH_STYLE") == "true"
+	switch c.FilesStorage {
+	case "", "local":
+	case "s3":
+		if c.FilesS3Endpoint == "" || c.FilesS3Bucket == "" || c.FilesS3AccessKey == "" || c.FilesS3SecretKey == "" {
+			return c, fmt.Errorf("SUNDER_FILES_STORAGE=s3 requires SUNDER_FILES_S3_ENDPOINT, _BUCKET, _ACCESS_KEY and _SECRET_KEY")
+		}
+	default:
+		return c, fmt.Errorf("SUNDER_FILES_STORAGE must be \"local\" or \"s3\", got %q", c.FilesStorage)
+	}
+	rawMB := getenv("SUNDER_FILES_MAX_MB", "25")
+	mb, err := strconv.ParseInt(rawMB, 10, 64)
+	if err != nil || mb < 1 || mb > 4096 {
+		return c, fmt.Errorf("SUNDER_FILES_MAX_MB: %q must be 1-4096", rawMB)
+	}
+	c.FilesMaxMB = mb
 	c.AuditReads = getenv("SUNDER_AUDIT_READS", "bucketed")
 	if c.AuditReads != "bucketed" && c.AuditReads != "chained" {
 		return c, fmt.Errorf("SUNDER_AUDIT_READS must be \"bucketed\" or \"chained\", got %q", c.AuditReads)
