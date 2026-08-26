@@ -666,3 +666,43 @@ func TestS6_BlobLessCIDWithLiveDataKeepsLookup(t *testing.T) {
 		t.Fatalf("the person with a live file must still resolve: %v", err)
 	}
 }
+
+// TestLookupHonorsAttributeAllowlist (review medium): the F3 allowlist gated
+// every read EXCEPT lookup, so a client narrowed to {iban} could still probe
+// emails, phones and names through 200-vs-404 - a name oracle. Lookup now
+// requires the identifier's kind in the allowlist; unrestricted clients are
+// unchanged.
+func TestLookupHonorsAttributeAllowlist(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	open := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActLookup}}
+	if _, err := e.svc.Register(ctx, open, service.RegisterInput{
+		Email: "oracle@example.com", Phone: "+385 91 123 4567", Name: "Ana Anic"}); err != nil {
+		t.Fatal(err)
+	}
+
+	narrowed := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions:    []string{auth.ActLookup},
+		AllowedAttributes: []string{"iban"}}
+	if _, err := e.svc.Lookup(ctx, narrowed, service.LookupInput{Email: "oracle@example.com"}); !errors.Is(err, service.ErrForbidden) {
+		t.Fatalf("an {iban}-narrowed client must not probe emails: %v", err)
+	}
+	if _, err := e.svc.Lookup(ctx, narrowed, service.LookupInput{Phone: "+385 91 123 4567"}); !errors.Is(err, service.ErrForbidden) {
+		t.Fatalf("...nor phones: %v", err)
+	}
+	if _, err := e.svc.Lookup(ctx, narrowed, service.LookupInput{Email: "oracle@example.com", Name: "Ana Anic"}); !errors.Is(err, service.ErrForbidden) {
+		t.Fatalf("...nor names: %v", err)
+	}
+	// A client whose allowlist COVERS the kind, and an unrestricted one,
+	// both keep working.
+	emailAllowed := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions:    []string{auth.ActLookup},
+		AllowedAttributes: []string{"email"}}
+	if cid, err := e.svc.Lookup(ctx, emailAllowed, service.LookupInput{Email: "oracle@example.com"}); err != nil || cid == "" {
+		t.Fatalf("email-allowed lookup must work: %q %v", cid, err)
+	}
+	if cid, err := e.svc.Lookup(ctx, open, service.LookupInput{Email: "oracle@example.com"}); err != nil || cid == "" {
+		t.Fatalf("unrestricted lookup must work: %q %v", cid, err)
+	}
+}

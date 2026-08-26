@@ -90,16 +90,22 @@ func RoleActions(role string) []string {
 	case RoleReadonly:
 		return []string{ActLookup, ActAttributesRead}
 	case RoleService:
+		// tokens.delete is deliberately absent: destroying a value token is
+		// unrecoverable (the row is the only copy) - an explicit grant, not
+		// preset baggage for every scope member.
 		return []string{ActLookup, ActAttributesRead, ActContactsRegister,
 			ActOTIIssue, ActOTIVerify, ActConsentManage,
-			ActTokensCreate, ActTokensRead, ActTokensDelete, ActFilesWrite, ActFilesRead}
+			ActTokensCreate, ActTokensRead, ActFilesWrite, ActFilesRead}
 	case RoleAdmin:
 		// Operational admin: the full integration set plus unlock, value
 		// tokens and files - but NOT the org-wide, cross-scope DSR
 		// privileges (review F5: those stay deliberately opt-in and go to
-		// the privacy-officer preset or explicit -actions).
+		// the privacy-officer preset or explicit -actions), and NOT
+		// scopes.issue: its own security note says to grant it only to
+		// trusted integration components, so it must be an explicit
+		// -actions decision, never preset baggage.
 		return []string{ActLookup, ActAttributesRead, ActContactsRegister,
-			ActScopesIssue, ActOTIIssue, ActOTIVerify, ActConsentManage,
+			ActOTIIssue, ActOTIVerify, ActConsentManage,
 			ActClaimsExternal, ActAdminUnlock, ActTokensCreate, ActTokensRead, ActTokensDelete,
 			ActFilesWrite, ActFilesRead, ActAttributesHistory, ActLinksManage, ActSharesCreate}
 	case RolePrivacyOfficer:

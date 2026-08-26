@@ -196,12 +196,20 @@ signature/purpose/shape), `audience_mismatch` (403), `token_used` (409),
 ## Endpoints (v1.5 - GDPR / data-subject rights)
 
 ### POST /v1/consent - record a consent decision
-Action: `consent.manage`; CID must be caller-scope.
+Action: `consent.manage`; CID must be caller-scope, and the purpose must be
+one the CLIENT may operate under (`allowed_purposes`) - a client cannot
+manage consent, nor revoke standing shares through a withdrawal, for
+purposes outside its own remit. **Upgrade note:** a `consent.manage`
+credential with NO declared purposes can no longer set consent at all -
+grant its purposes explicitly (this applies to privacy-officer clients too).
 Body: `{"cid": "...", "purpose": "newsletter", "granted": false}`.
 Absence of a record means "not consent-governed" (contract/legitimate-
 interest bases); an explicit `granted:false` **blocks** attribute reads and
-OTI issuance for that purpose (403 `consent_denied`) until re-granted.
-Decisions survive erasure for accountability.
+OTI issuance for that purpose (403 `consent_denied`) until re-granted, and
+revokes the cid's standing shares for exactly that purpose.
+Consent STATE is deleted by the person's erasure - there is nothing left to
+gate; the accountability record ("what was granted when") is the immutable
+`consent.set` trail in the audit chain, not this mutable table.
 
 ### GET /v1/consent/{cid} - list recorded decisions
 Action: `consent.manage`. `200 {"consents": [{purpose, granted, updated_at}]}`

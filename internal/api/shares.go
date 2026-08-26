@@ -40,6 +40,9 @@ func (s *Server) handleShareCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
+	if !s.allow(w, client) {
+		return
+	}
 	if err := s.Shares.Revoke(r.Context(), client, r.PathValue("uuid")); err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)

@@ -190,8 +190,17 @@ never the values themselves.
 
 Per-client narrowing lives on the client record, not in env: `sunder client
 create -attributes iban,tier` restricts which attribute names that
-credential can read (GetAttribute refuses, Export/Access filter); `-role
-readonly|service|admin` applies an action preset instead of `-actions`.
+credential can read (GetAttribute refuses, Export/Access filter, and lookup
+BY an identifier kind outside the list is refused too - a client narrowed
+to `{iban}` cannot probe emails, phones or names through 200-vs-404; the
+lookup gate keys on the BARE kind, so a list naming only a multi-value slot
+like `email_1` does not permit email lookup - name `email` itself);
+`-role readonly|service|admin` applies an action preset instead of
+`-actions`. Two actions are deliberately in NO broad preset and need an
+explicit `-actions` grant: `scopes.issue` (linkage-capable; its own
+security note limits it to trusted integration components) and
+`tokens.delete` on the service preset (destroying a value token is
+unrecoverable - admin keeps it).
 
 ## Value tokenization (F4)
 

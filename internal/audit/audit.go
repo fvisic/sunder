@@ -103,16 +103,29 @@ func userCol(e Entry) any {
 	return e.UserID
 }
 
+// hashV2 is the canonical-tuple version new rows seal under. v1 (pre-0033)
+// excluded user_id - the one audited field a database attacker could edit
+// without tripping verification. Rows carry their version (audit.hash_v) so
+// every pre-existing chain keeps verifying under the tuple it was hashed
+// over; flipping a row's version cannot hide an edit, because the stored
+// hash matches only its own tuple and recomputing it breaks the prev_hash
+// linkage the external anchor pins.
+const hashV2 = 2
+
 // canonical is an unambiguous encoding of the hashed tuple: JSON array, so a
 // '|' (or anything else) inside a field can never shift content across field
 // boundaries and produce a hash collision between different records.
 // chain_seq is deliberately NOT part of the hash - integrity comes from
 // prev_hash linkage walked in chain_seq order, and the trigger plus a UNIQUE
 // index keep chain_seq itself honest.
-func canonical(prevHash string, ts time.Time, e Entry, detailJSON []byte) string {
-	b, _ := json.Marshal([]string{
+func canonical(v int16, prevHash string, ts time.Time, e Entry, detailJSON []byte) string {
+	fields := []string{
 		prevHash, ts.UTC().Format(time.RFC3339Nano), e.ClientID, e.Action, e.CID, string(detailJSON),
-	})
+	}
+	if v >= hashV2 {
+		fields = append(fields, e.UserID)
+	}
+	b, _ := json.Marshal(fields)
 	return string(b)
 }
 
@@ -166,16 +179,16 @@ func AppendTx(ctx context.Context, tx pgx.Tx, e Entry) error {
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256([]byte(canonical(prev, ts, e, detailJSON)))
+	sum := sha256.Sum256([]byte(canonical(hashV2, prev, ts, e, detailJSON)))
 	hash := hex.EncodeToString(sum[:])
 	var prevCol any
 	if prev != "" {
 		prevCol = prev
 	}
 	_, err = tx.Exec(ctx,
-		`INSERT INTO audit (ts, client_id, action, cid, detail, prev_hash, hash, chain_seq, user_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		ts, e.ClientID, e.Action, cidCol, detailJSON, prevCol, hash, headSeq+1, userCol(e))
+		`INSERT INTO audit (ts, client_id, action, cid, detail, prev_hash, hash, chain_seq, user_id, hash_v)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		ts, e.ClientID, e.Action, cidCol, detailJSON, prevCol, hash, headSeq+1, userCol(e), hashV2)
 	return err
 }
 
@@ -261,17 +274,19 @@ func sealBatch(ctx context.Context, pool *pgxpool.Pool, batch int, delay time.Du
 		return 0, err
 	}
 
-	// delay <= 0 must mean "no age filter", not "ts < now()": ts is stamped
-	// by the APPLICATION clock and now() by the DATABASE clock, so with an
-	// app clock running ahead the youngest rows would silently escape a
-	// drain - and a drain that misses rows strands them (see Drain).
-	where := `hash IS NULL AND ts < now() - $1::interval`
+	// The age filter compares the DATABASE clock to the DATABASE clock:
+	// db_ts is stamped by the database at insert, so an application clock
+	// running ahead can no longer stall sealing (rows forever "too young").
+	// Pre-0033 rows have db_ts NULL and count as old - which they are.
+	// delay <= 0 must still mean "no age filter": a drain that misses rows
+	// strands them (see Drain).
+	where := `hash IS NULL AND (db_ts IS NULL OR db_ts < now() - $1::interval)`
 	args := []any{delay.String(), batch}
 	if delay <= 0 {
 		where, args = `hash IS NULL`, []any{batch}
 	}
 	rows, err := tx.Query(ctx,
-		`SELECT seq, ts, COALESCE(client_id,''), action, COALESCE(cid,''), COALESCE(detail,'null')
+		`SELECT seq, ts, COALESCE(client_id,''), action, COALESCE(cid,''), COALESCE(detail,'null'), COALESCE(user_id,'')
 		   FROM audit
 		  WHERE `+where+`
 		  ORDER BY seq
@@ -288,19 +303,19 @@ func sealBatch(ctx context.Context, pool *pgxpool.Pool, batch int, delay time.Du
 	var seals []sealRow
 	for rows.Next() {
 		var (
-			seq                           int64
-			ts                            time.Time
-			clientID, action, cid, detail string
+			seq                                   int64
+			ts                                    time.Time
+			clientID, action, cid, detail, userID string
 		)
-		if err := rows.Scan(&seq, &ts, &clientID, &action, &cid, &detail); err != nil {
+		if err := rows.Scan(&seq, &ts, &clientID, &action, &cid, &detail, &userID); err != nil {
 			rows.Close()
 			return 0, err
 		}
 		// The exact recomputation Verify performs: hash over the stored
 		// values, so a chain sealed here is indistinguishable from one
 		// sealed synchronously at insert time.
-		e := Entry{ClientID: clientID, Action: action, CID: cid}
-		sum := sha256.Sum256([]byte(canonical(prev, ts, e, []byte(detail))))
+		e := Entry{ClientID: clientID, Action: action, CID: cid, UserID: userID}
+		sum := sha256.Sum256([]byte(canonical(hashV2, prev, ts, e, []byte(detail))))
 		hash := hex.EncodeToString(sum[:])
 		chainSeq++
 		seals = append(seals, sealRow{seq: seq, prevHash: prev, hash: hash, chainSeq: chainSeq})
@@ -320,8 +335,8 @@ func sealBatch(ctx context.Context, pool *pgxpool.Pool, batch int, delay time.Du
 		if s.prevHash != "" {
 			prevCol = s.prevHash
 		}
-		b.Queue(`UPDATE audit SET prev_hash=$1, hash=$2, chain_seq=$3 WHERE seq=$4`,
-			prevCol, s.hash, s.chainSeq, s.seq)
+		b.Queue(`UPDATE audit SET prev_hash=$1, hash=$2, chain_seq=$3, hash_v=$4 WHERE seq=$5`,
+			prevCol, s.hash, s.chainSeq, int16(hashV2), s.seq)
 	}
 	if err := tx.SendBatch(ctx, b).Close(); err != nil {
 		return 0, err
@@ -367,7 +382,7 @@ func UnsealedCount(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 func Verify(ctx context.Context, pool *pgxpool.Pool) (brokenSeq int64, reason string, pending int64, err error) {
 	rows, err := pool.Query(ctx,
 		`SELECT chain_seq, seq, ts, COALESCE(client_id,''), action, COALESCE(cid,''),
-		        COALESCE(detail,'null'), COALESCE(prev_hash,''), hash
+		        COALESCE(detail,'null'), COALESCE(prev_hash,''), hash, COALESCE(user_id,''), hash_v
 		 FROM audit WHERE hash IS NOT NULL ORDER BY chain_seq`)
 	if err != nil {
 		return 0, "", 0, err
@@ -378,8 +393,9 @@ func Verify(ctx context.Context, pool *pgxpool.Pool) (brokenSeq int64, reason st
 	for rows.Next() {
 		var chainSeq, seq int64
 		var ts time.Time
-		var clientID, action, cid, detail, prevHash, hash string
-		if err := rows.Scan(&chainSeq, &seq, &ts, &clientID, &action, &cid, &detail, &prevHash, &hash); err != nil {
+		var clientID, action, cid, detail, prevHash, hash, userID string
+		var hashV int16
+		if err := rows.Scan(&chainSeq, &seq, &ts, &clientID, &action, &cid, &detail, &prevHash, &hash, &userID, &hashV); err != nil {
 			return 0, "", 0, err
 		}
 		expect++
@@ -392,8 +408,8 @@ func Verify(ctx context.Context, pool *pgxpool.Pool) (brokenSeq int64, reason st
 		if prevHash != prev {
 			return chainSeq, "prev_hash does not match preceding record (insertion or deletion)", 0, nil
 		}
-		e := Entry{ClientID: clientID, Action: action, CID: cid}
-		sum := sha256.Sum256([]byte(canonical(prev, ts, e, []byte(detail))))
+		e := Entry{ClientID: clientID, Action: action, CID: cid, UserID: userID}
+		sum := sha256.Sum256([]byte(canonical(hashV, prev, ts, e, []byte(detail))))
 		if hex.EncodeToString(sum[:]) != hash {
 			return chainSeq, "record content does not match its hash (record changed)", 0, nil
 		}

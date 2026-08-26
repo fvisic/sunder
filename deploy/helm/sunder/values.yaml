@@ -110,6 +110,27 @@ retention:
   enabled: true
   schedule: "43 3 * * *"
 
+# Audit posture (docs/CONFIG.md; docs/THREAT-MODEL.md "Audit chain" - these
+# are security trade-offs, not preferences). Empty = server default.
+audit:
+  sealing: ""        # SUNDER_AUDIT_SEALING: async (default) | sync
+  reads: ""          # SUNDER_AUDIT_READS: bucketed (default) | chained
+  sealInterval: ""   # SUNDER_AUDIT_SEAL_INTERVAL, e.g. "200ms"
+  sealDelay: ""      # SUNDER_AUDIT_SEAL_DELAY, e.g. "2s"
+  sealBatch: ""      # SUNDER_AUDIT_SEAL_BATCH, e.g. "5000"
+  # The recommended hardening: sealing runs in a dedicated single-replica
+  # deployment (SUNDER_AUDIT_SEAL_EXTERNAL on the API pods), so the API
+  # role needs no UPDATE on the audit table.
+  sealer:
+    enabled: false
+  # A chain nobody verifies is decoration: this cron runs `verify-audit`
+  # daily (chain + read buckets + stored TSA anchors; exit != 0 on a break -
+  # alert on job failure). With anchor.enabled it also cross-checks the
+  # exported .tsr files.
+  verify:
+    enabled: true
+    schedule: "29 4 * * *"
+
 resources:
   requests: {cpu: 250m, memory: 256Mi}
   limits: {memory: 512Mi}

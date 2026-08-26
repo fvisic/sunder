@@ -39,6 +39,20 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 	if !client.Can(auth.ActLookup) {
 		return "", ErrForbidden
 	}
+	// The F3 attribute allowlist gates lookup BY that identifier kind too: a
+	// client narrowed to {iban} must not probe emails, phones or names via
+	// 200-vs-404 - lookup was the one read surface the allowlist did not
+	// cover (a name oracle). An unrestricted client (no allowlist) is
+	// unchanged.
+	for kind, present := range map[string]bool{
+		"email": in.Email != "",
+		"phone": in.Phone != "" || in.PhoneSuffix != "",
+		"name":  in.Name != "",
+	} {
+		if present && !client.CanReadAttribute(kind) {
+			return "", ErrForbidden
+		}
+	}
 	if in.PhoneSuffix != "" {
 		if !c.PhoneSuffix {
 			return "", fmt.Errorf("%w: phone_suffix lookup is not enabled on this instance (SUNDER_SEARCH_PHONE_SUFFIX)", ErrValidation)

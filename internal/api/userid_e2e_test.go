@@ -384,7 +384,7 @@ func TestFileVaultOverHTTP(t *testing.T) {
 
 	// List (metadata only).
 	rec2 := httptest.NewRecorder()
-	lreq := httptest.NewRequest("GET", "/v1/contacts/"+cid+"/files", nil)
+	lreq := httptest.NewRequest("GET", "/v1/contacts/"+cid+"/files?purpose=support", nil)
 	lreq.Header.Set("Authorization", "Bearer "+cred)
 	srv.Handler().ServeHTTP(rec2, lreq)
 	if rec2.Code != 200 || !strings.Contains(rec2.Body.String(), "dopis.txt") {
@@ -1466,5 +1466,59 @@ func TestFileUploadRefusesTruncatedBody(t *testing.T) {
 	}
 	if len(ents) != 0 {
 		t.Fatalf("a truncated upload must leave no ciphertext, found %d entries", len(ents))
+	}
+}
+
+// TestNewSurfacesAreRateLimited (review medium): rate limiting was absent on
+// file download/list/delete, token read/delete, both bulk token paths, share
+// revoke, link list and the F6 history reads - every one an audit-writing or
+// crypto-performing endpoint. One exhausted per-client window must answer
+// 429 on all of them.
+func TestNewSurfacesAreRateLimited(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActLookup, auth.ActFilesWrite, auth.ActFilesRead,
+			auth.ActTokensCreate, auth.ActTokensRead, auth.ActTokensDelete,
+			auth.ActSharesCreate, auth.ActLinksManage, auth.ActAttributesHistory, auth.ActAttributesRead},
+		AllowedPurposes: []string{"support"}, RateLimit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+		FilesStorage: "local", FilesDir: t.TempDir(), FilesMaxMB: 1}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{"email": "rl@example.com"})
+	cid := out["cid"]
+
+	// Exhaust the window: shrink the client's limit to 1 and burn it.
+	if _, err := st.Pool.Exec(ctx, `UPDATE clients SET rate_limit=1 WHERE client_id='crm'`); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := e.do(t, cred, "POST", "/v1/lookup", map[string]string{"email": "rl@example.com"}); rec.Code != 200 {
+		t.Fatalf("the one allowed request: %d", rec.Code)
+	}
+
+	for _, probe := range []struct{ method, path string }{
+		{"GET", "/v1/tokens/VT-X"},
+		{"DELETE", "/v1/tokens/VT-X"},
+		{"POST", "/v1/tokens/bulk"},
+		{"POST", "/v1/tokens/bulk/read"},
+		{"GET", "/v1/contacts/" + cid + "/files?purpose=support"},
+		{"GET", "/v1/files/f-x?purpose=support"},
+		{"DELETE", "/v1/files/f-x"},
+		{"DELETE", "/v1/shares/00000000-0000-0000-0000-000000000000"},
+		{"GET", "/v1/contacts/" + cid + "/links"},
+		{"GET", "/v1/contacts/" + cid + "/versions"},
+		{"GET", "/v1/contacts/" + cid + "/versions/1/attributes/iban?purpose=support"},
+	} {
+		rec, _ := e.do(t, cred, probe.method, probe.path, nil)
+		if rec.Code != 429 {
+			t.Errorf("%s %s must be rate-limited before any work: got %d", probe.method, probe.path, rec.Code)
+		}
 	}
 }

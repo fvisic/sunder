@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -423,7 +424,20 @@ func (c *Contacts) IssueScopedCid(ctx context.Context, client *auth.Client, cid,
 // personForClientCID resolves cid to its person, enforcing that the CID
 // belongs to the caller's scope - a client can never reference another
 // scope's pseudonyms (that unlinkability is the whole point).
+// validCIDShape rejects path values that can never be a CID before they
+// reach a query: a NUL byte or invalid UTF-8 makes Postgres error the whole
+// statement (a 500 where a 404 belongs), and an oversized value is never a
+// miss worth a round trip. Deliberately NOT a strict format check - legacy
+// and test pseudonyms vary - just the properties the database itself
+// requires of a text parameter.
+func validCIDShape(cid string) bool {
+	return cid != "" && len(cid) <= 128 && utf8.ValidString(cid) && !strings.ContainsRune(cid, 0)
+}
+
 func (c *Contacts) personForClientCID(ctx context.Context, client *auth.Client, cid string) (string, error) {
+	if !validCIDShape(cid) {
+		return "", ErrNotFound
+	}
 	var personID, scope string
 	var erased bool
 	err := c.Pool.QueryRow(ctx,
@@ -456,6 +470,13 @@ func (c *Contacts) personForClientCID(ctx context.Context, client *auth.Client, 
 // caller-scope one, and the read is audited BEFORE the value is released -
 // an unaudited disclosure must not happen (fail closed).
 func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, name, purpose string) (string, error) {
+	// The one cid-addressed surface that bypasses personForClientCID (the
+	// P0-a refactor folded its tombstone check into the read below) - so it
+	// needs the same shape guard, or a NUL byte in the path 500s the hottest
+	// read endpoint instead of missing cleanly.
+	if !validCIDShape(cid) {
+		return "", ErrNotFound
+	}
 	if !client.Can(auth.ActAttributesRead) {
 		return "", ErrForbidden
 	}

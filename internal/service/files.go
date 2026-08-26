@@ -343,16 +343,38 @@ func (f *Files) Download(ctx context.Context, client *auth.Client, fileID, purpo
 // List returns metadata for one person's files in the caller's scope.
 // Metadata only - names and sizes, never content - and only for a person
 // the caller can already resolve, so it is not a bulk surface.
-func (f *Files) List(ctx context.Context, client *auth.Client, cid string) ([]FileMeta, error) {
+func (f *Files) List(ctx context.Context, client *auth.Client, cid, purpose string) ([]FileMeta, error) {
 	if !client.Can(auth.ActFilesRead) {
+		return nil, ErrForbidden
+	}
+	// Metadata IS disclosure - filenames are often the sensitive part - so
+	// listing carries the same purpose + consent gate and the same audit
+	// trail as a download, and hides expired files exactly like loadOwned.
+	if purpose == "" {
+		return nil, fmt.Errorf("%w: purpose required", ErrValidation)
+	}
+	if !client.CanUse(purpose) {
 		return nil, ErrForbidden
 	}
 	if _, err := f.Contacts.personForClientCID(ctx, client, cid); err != nil {
 		return nil, err
 	}
+	if denied, err := consentDenied(ctx, f.Pool, cid, purpose); err != nil {
+		return nil, err
+	} else if denied {
+		return nil, ErrConsentDenied
+	}
+	if err := audit.ReadEvent(ctx, f.Pool, audit.Entry{
+		ClientID: client.ID, Action: "files.list", CID: cid,
+		Detail: map[string]any{"purpose": purpose},
+	}); err != nil {
+		return nil, fmt.Errorf("audit append: %w", err)
+	}
 	rows, err := f.Pool.Query(ctx, `
 		SELECT id, name, content_type, size_bytes, sha256, created_at, expires_at
-		  FROM files WHERE cid=$1 AND gc_at IS NULL ORDER BY created_at`, cid)
+		  FROM files WHERE cid=$1 AND gc_at IS NULL
+		   AND (expires_at IS NULL OR expires_at > now())
+		 ORDER BY created_at`, cid)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +405,9 @@ func (f *Files) Delete(ctx context.Context, client *auth.Client, fileID string) 
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `UPDATE files SET gc_at = now() WHERE id=$1`, fileID); err != nil {
+	// Same redaction as ShredRecordKey: a deleted file's name and content
+	// hash must not linger until the GC sweep.
+	if _, err := tx.Exec(ctx, `UPDATE files SET gc_at = now(), name = '', sha256 = '' WHERE id=$1`, fileID); err != nil {
 		return err
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
@@ -433,8 +457,12 @@ func ShredRecordKey(ctx context.Context, tx pgx.Tx, personID string) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM person_record_keys WHERE person_id=$1`, personID); err != nil {
 		return err
 	}
+	// Redact the plaintext metadata with the mark: name is often the
+	// sensitive part, and sha256 of a guessable document is a content-
+	// confirmation oracle that would otherwise survive crypto-shredding
+	// until the GC sweep gets to the row.
 	_, err := tx.Exec(ctx, `
-		UPDATE files SET gc_at = now()
+		UPDATE files SET gc_at = now(), name = '', sha256 = ''
 		 WHERE gc_at IS NULL AND cid IN (SELECT cid FROM cids WHERE person_id=$1)`, personID)
 	return err
 }
@@ -444,7 +472,7 @@ func ShredRecordKey(ctx context.Context, tx pgx.Tx, personID string) error {
 // `sunder retention run`.
 func RunFileGC(ctx context.Context, pool *pgxpool.Pool, store storage.Driver) (int64, error) {
 	if _, err := pool.Exec(ctx, `
-		UPDATE files SET gc_at = now()
+		UPDATE files SET gc_at = now(), name = '', sha256 = ''
 		 WHERE gc_at IS NULL AND expires_at IS NOT NULL AND expires_at < now()`); err != nil {
 		return 0, err
 	}

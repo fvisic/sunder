@@ -174,15 +174,26 @@ func (v *ValueTokens) Delete(ctx context.Context, client *auth.Client, token str
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	tag, err := tx.Exec(ctx, `DELETE FROM value_tokens WHERE token=$1 AND scope=$2`, token, client.Scope)
+	// RETURNING gives the audit record something to attribute: destroying
+	// the only copy of a sealed value must say WHAT was destroyed and whose
+	// mint it was, not land as an empty detail.
+	var createdBy *string
+	err = tx.QueryRow(ctx,
+		`DELETE FROM value_tokens WHERE token=$1 AND scope=$2 RETURNING created_by`,
+		token, client.Scope).Scan(&createdBy)
+	if err == pgx.ErrNoRows {
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	minter := ""
+	if createdBy != nil {
+		minter = *createdBy
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
-		ClientID: client.ID, Action: "tokens.delete", Detail: map[string]any{}}); err != nil {
+		ClientID: client.ID, Action: "tokens.delete",
+		Detail: map[string]any{"token": token, "created_by": minter}}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -367,13 +378,18 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 	// cids lock is not needed here, and taking it would invert the c -> p
 	// order erasure uses - an ABBA deadlock.
 	if in.CID != "" {
+		if !validCIDShape(in.CID) {
+			return "", ErrNotFound
+		}
 		var live bool
 		err := tx.QueryRow(ctx, `
 			SELECT NOT p.erased_at IS NOT NULL FROM cids c JOIN persons p ON p.id = c.person_id
 			 WHERE c.cid=$1 AND c.scope=$2 FOR UPDATE OF p`,
 			in.CID, client.Scope).Scan(&live)
 		if err == pgx.ErrNoRows {
-			return "", fmt.Errorf("%w: cid not found in this scope", ErrValidation)
+			// Absent and foreign-scope are one indistinguishable miss, like
+			// every other cid-addressed path (and like the tombstone below).
+			return "", ErrNotFound
 		}
 		if err != nil {
 			return "", err
@@ -408,7 +424,16 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 		// unique_hash in the partial unique index. It is dead; remove it
 		// FIRST - both a fresh insert and an adoption below re-point the
 		// slot, and a dead row would fail either with a raw 23505 (N3).
-		if _, err := tx.Exec(ctx, `DELETE FROM value_tokens WHERE scope=$1 AND COALESCE(cid,'')=$2 AND unique_hash=$3`,
+		// The liveness predicate on the DELETE is load-bearing: a CONCURRENT
+		// tokenize of the same value can commit between our SELECT miss and
+		// this statement, and an unguarded DELETE would destroy the winner's
+		// LIVE token (their caller keeps a dangling handle) instead of
+		// letting our INSERT collide and return theirs.
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM value_tokens
+			 WHERE scope=$1 AND COALESCE(cid,'')=$2 AND unique_hash=$3
+			   AND NOT ((expires_final IS NULL OR expires_final > now())
+			        AND (sliding_seconds IS NULL OR last_used + make_interval(secs => sliding_seconds) > now()))`,
 			client.Scope, cidKey, uniqueHash); err != nil {
 			return "", err
 		}
@@ -449,14 +474,39 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 			return "", err
 		}
 		_, err = sp.Exec(ctx, `
-			INSERT INTO value_tokens (token, scope, cid, token_type, ciphertext, key_id, alg, unique_hash, expires_final, sliding_seconds)
-			VALUES ($1,$2,NULLIF($3,''),$4,$5,$6,'aes256gcm',$7,$8,NULLIF($9,0))`,
-			token, client.Scope, in.CID, tokenType, sealed, keyID, uniqueHash, expiresFinal, in.SlidingSeconds)
+			INSERT INTO value_tokens (token, scope, cid, token_type, ciphertext, key_id, alg, unique_hash, expires_final, sliding_seconds, created_by)
+			VALUES ($1,$2,NULLIF($3,''),$4,$5,$6,'aes256gcm',$7,$8,NULLIF($9,0),$10)`,
+			token, client.Scope, in.CID, tokenType, sealed, keyID, uniqueHash, expiresFinal, in.SlidingSeconds, client.ID)
 		if err == nil {
 			return token, sp.Commit(ctx)
 		}
 		_ = sp.Rollback(ctx)
-		if isUniqueViolation(err) {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// WHICH constraint decides the retry strategy: a token-PK
+			// collision wants a fresh random token, but a unique_hash
+			// collision means a CONCURRENT tokenize of the same value won
+			// the slot - minting again can never satisfy it (three raw-23505
+			// retries ended in a 500, and in bulk with the unlock token
+			// already burned). Return the winner's token: dedup semantics,
+			// just decided by the database instead of our earlier SELECT.
+			if pgErr.ConstraintName == "value_tokens_unique_uq" {
+				var existing string
+				werr := tx.QueryRow(ctx, `
+					SELECT token FROM value_tokens
+					 WHERE scope=$1 AND COALESCE(cid,'')=$2 AND unique_hash=$3
+					   AND (expires_final IS NULL OR expires_final > now())
+					   AND (sliding_seconds IS NULL OR last_used + make_interval(secs => sliding_seconds) > now())`,
+					client.Scope, cidKey, uniqueHash).Scan(&existing)
+				if werr == nil {
+					return existing, nil
+				}
+				if werr != pgx.ErrNoRows {
+					return "", werr
+				}
+				// The winner's row is already dead (sub-second expiry):
+				// retry the mint against the now-free slot.
+			}
 			continue
 		}
 		return "", err

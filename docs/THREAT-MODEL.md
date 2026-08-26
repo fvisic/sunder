@@ -181,8 +181,12 @@ The optional `user_id` attribution (body field on lookup, header on GET)
 is CLIENT-ASSERTED and unverifiable by design: it improves the Article 15
 answer from "which system" to "which operator the system claims", and a
 lying client system was always capable of lying in its own logs too. It
-is an opaque bounded ID, not a name, and is not part of the chain hash -
-the append-only trigger is what pins it.
+is an opaque bounded ID, not a name. Since migration 0033 it IS part of
+the chain hash (versioned canonical tuple, hash_v=2), so a database
+attacker editing WHO did something trips verification - with one honest
+limit: rows sealed BEFORE 0033 keep the v1 tuple, a sealed chain cannot
+retroactively cover a new field, and on those rows only the append-only
+trigger pins `user_id`.
 
 ## Phase 3 features: the privacy line (F1, F2, F4, F5, F6, F8)
 
@@ -214,6 +218,21 @@ ciphertext.
   bulk channel. The strict posture (`SUNDER_SEARCH_UNLOCK=true`) adds a
   60-second single-use unlock token in front of it for deployments that
   want the extra friction.
+- **Residual risk, stated plainly: the derived tokens are invertible by
+  anyone with MAC access.** `phone_suffix` ranges over 10^8 values and a
+  ph1 phonetic code over roughly 10^6, both unsalted keyed HMACs under the
+  same key as their parent kind - so a party who can COMPUTE the MAC (the
+  application holds MAC access by design, without key material) can walk
+  the whole input space and invert every stored derived token. The keyed
+  HMAC protects against a database thief WITHOUT engine access, and
+  nothing more. This is inherent to searchable derived tokens over tiny
+  input spaces; the mitigations are the off-by-default switches and the
+  fact that inversion yields a suffix or a phonetic bucket, never the full
+  identifier. Note also that `person_tokens` is global per person while
+  `sunder keys rekey` harvests names from every scope's blob, so a scope
+  can probe (via lookup) a name that only another scope ever stored - the
+  flip side of the dedup invariant; the F3 attribute allowlist now gates
+  lookup by identifier kind, which narrows who can run such probes.
 
 ### F4 value tokenization
 

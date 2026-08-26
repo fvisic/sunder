@@ -202,11 +202,21 @@ func closeOneHour(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
 		return false, nil // another replica is closing; skip this cycle
 	}
 
+	// Skip any hour whose chained hourly row ALREADY exists: open rows for
+	// such an hour arrived after it was closed (a forged insert, or an
+	// extreme clock anomaly), and summarizing them again would write a
+	// second audit.reads_hourly row - poisoning verification permanently
+	// ("hour summarized twice"). Left unsealed, they surface through the
+	// pending count instead, and every later hour still closes normally.
 	var hour time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT bucket_start FROM audit_read_buckets
-		 WHERE sealed_at IS NULL AND bucket_start < date_trunc('hour', now())
-		 ORDER BY bucket_start LIMIT 1`).Scan(&hour)
+		SELECT b.bucket_start FROM audit_read_buckets b
+		 WHERE b.sealed_at IS NULL AND b.bucket_start < date_trunc('hour', now())
+		   AND NOT EXISTS (
+			SELECT 1 FROM audit a
+			 WHERE a.action = 'audit.reads_hourly'
+			   AND (a.detail::jsonb)->>'hour' = to_char(b.bucket_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+		 ORDER BY b.bucket_start LIMIT 1`).Scan(&hour)
 	if err == pgx.ErrNoRows {
 		return false, nil // no finished hour with open buckets
 	}
