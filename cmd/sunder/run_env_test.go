@@ -235,3 +235,33 @@ func TestCLIExitCodes(t *testing.T) {
 		t.Fatalf("serve without a database must exit 1, got %d", code)
 	}
 }
+
+// TestRunKeysRekeyReencrypt drives the keys rekey command with -reencrypt
+// through run(), covering the CLI rekey path and the vault-rewrap output.
+func TestRunKeysRekeyReencrypt(t *testing.T) {
+	st := testutil.NewDB(t)
+	url := st.Pool.Config().ConnString()
+	st.Close()
+	t.Setenv("SUNDER_DB_URL", url)
+	t.Setenv("SUNDER_KEYSTORE_PATH", t.TempDir())
+	if err := run("client", []string{"create", "-id", "crm", "-name", "C", "-scope", "crm", "-actions", "contacts.register", "-purposes", "support"}); err != nil {
+		t.Fatal(err)
+	}
+	// Import a person with attributes so the rekey actually re-encrypts a
+	// blob and prints its summary (BlobsReenc > 0).
+	dir := t.TempDir()
+	jf := dir + "/c.jsonl"
+	if err := os.WriteFile(jf, []byte(`{"email":"rk@example.com","attributes":{"tier":"gold"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("import", []string{"-file", jf, "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+	// Rotate then rekey so there is stale-kek data to move.
+	if err := run("keys", []string{"rotate", "-kind", "pii-kek"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("keys", []string{"rekey", "-reencrypt-pii"}); err != nil {
+		t.Fatalf("keys rekey -reencrypt: %v", err)
+	}
+}

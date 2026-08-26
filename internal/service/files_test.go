@@ -633,3 +633,27 @@ func TestReviewL3_UploadAfterErasureRejected(t *testing.T) {
 		t.Fatalf("no file row must survive, got %d", n)
 	}
 }
+
+func TestRekeyRecordKeyCorruptSkipped(t *testing.T) {
+	e, f, client, cid := filesEnv(t)
+	ctx := context.Background()
+	if _, err := f.Upload(ctx, client, cid, "a.txt", "", strings.NewReader("data")); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt the wrapped record key: rekey must skip it, not abort.
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE person_record_keys SET wrapped = $1, key_id='v0'`, []byte{9, 9, 9}); err != nil {
+		t.Fatal(err)
+	}
+	// Rotate + rekey.
+	if _, err := e.svc.Ring.Rotate(ctx, e.svc.PII.Engine(), "pii-kek"); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := e.svc.Rekey(ctx, true, 100)
+	if err != nil {
+		t.Fatalf("a corrupt record key must be skipped, not fatal: %v", err)
+	}
+	if stats.Skipped < 1 {
+		t.Fatalf("corrupt record key should be skipped: %+v", stats)
+	}
+}

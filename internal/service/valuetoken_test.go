@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/service"
+	"github.com/fvisic/sunder/internal/storage"
 )
 
 func tokenEnv(t *testing.T) (*faultEnv, *service.ValueTokens, *auth.Client) {
@@ -477,5 +479,129 @@ func TestValueTokenDeleteNeedsDeleteAction(t *testing.T) {
 		AllowedActions: []string{auth.ActTokensCreate, auth.ActTokensRead}}
 	if err := v.Delete(ctx, writer, tok); !errors.Is(err, service.ErrForbidden) {
 		t.Fatalf("delete without tokens.delete must be forbidden: %v", err)
+	}
+}
+
+// TestReviewM5_RekeyRewrapsVaults: after a kek rotation + rekey, value
+// tokens and record keys are wrapped under the newest kek, so retiring the
+// old kek actually protects F4/F5 data.
+func TestReviewM5_RekeyRewrapsVaults(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	// A value token and a file (record key) under the current kek.
+	tok, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "iban-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drv, err := storage.Open(storage.Config{Kind: "local", Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := &service.Files{Pool: e.admin.Pool, Eng: e.svc.PII.Engine(), Ring: e.svc.Ring,
+		Store: drv, Contacts: e.svc, MaxBytes: 1 << 20}
+	fclient := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions:  []string{auth.ActFilesWrite, auth.ActFilesRead, auth.ActContactsRegister},
+		AllowedPurposes: []string{"support"}}
+	cid, err := e.svc.Register(ctx, fclient, service.RegisterInput{Email: "m5@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fm, err := files.Upload(ctx, fclient, cid, "f.txt", "", strings.NewReader("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Note the current key ids.
+	var vtKey, rkKey string
+	e.admin.Pool.QueryRow(ctx, `SELECT key_id FROM value_tokens WHERE token=$1`, tok).Scan(&vtKey)
+	e.admin.Pool.QueryRow(ctx, `SELECT rk.key_id FROM person_record_keys rk JOIN cids c ON c.person_id=rk.person_id WHERE c.cid=$1`, cid).Scan(&rkKey)
+
+	// Rotate the kek and rekey with -reencrypt.
+	newKEK, err := e.svc.Ring.Rotate(ctx, e.svc.PII.Engine(), "pii-kek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := e.svc.Rekey(ctx, true, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ValueTokensRewrapped < 1 || stats.RecordKeysRewrapped < 1 {
+		t.Fatalf("rekey must re-wrap the vaults: %+v", stats)
+	}
+	// Both now point at the newest kek.
+	var vtKey2, rkKey2 string
+	e.admin.Pool.QueryRow(ctx, `SELECT key_id FROM value_tokens WHERE token=$1`, tok).Scan(&vtKey2)
+	e.admin.Pool.QueryRow(ctx, `SELECT rk.key_id FROM person_record_keys rk JOIN cids c ON c.person_id=rk.person_id WHERE c.cid=$1`, cid).Scan(&rkKey2)
+	if vtKey2 != newKEK || rkKey2 != newKEK {
+		t.Fatalf("vaults not moved to newest kek: vt=%s rk=%s newest=%s", vtKey2, rkKey2, newKEK)
+	}
+	if vtKey2 == vtKey || rkKey2 == rkKey {
+		t.Fatal("key ids should have changed after rekey")
+	}
+	// Data still reads correctly under the new wrapping.
+	got, err := v.Detokenize(ctx, client, tok)
+	if err != nil || got != "iban-123" {
+		t.Fatalf("token still readable: %q %v", got, err)
+	}
+	var out bytes.Buffer
+	if _, err := files.Download(ctx, fclient, fm.ID, "support", &out); err != nil || out.String() != "secret" {
+		t.Fatalf("file still readable: %q %v", out.String(), err)
+	}
+}
+
+func TestRekeyVaultsFaultBranches(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	if _, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	// A corrupt ciphertext must be counted as Skipped, not abort the rekey.
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE value_tokens SET ciphertext = $1, key_id='v0'`, []byte{0, 1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := e.svc.Rekey(ctx, true, 100)
+	if err != nil {
+		t.Fatalf("a corrupt token must be skipped, not fatal: %v", err)
+	}
+	if stats.Skipped < 1 {
+		t.Fatalf("corrupt token should be skipped: %+v", stats)
+	}
+
+	// A broken value_tokens table makes rekeyVaults' query fail.
+	e2, v2, c2 := tokenEnv(t)
+	if _, err := v2.Tokenize(ctx, c2, service.TokenizeInput{Value: "y"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e2.admin.Pool.Exec(ctx, `ALTER TABLE value_tokens RENAME TO vt_rekey_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e2.svc.Rekey(ctx, true, 100); err == nil {
+		t.Fatal("rekey must fail when value_tokens is broken")
+	}
+	if _, err := e2.admin.Pool.Exec(ctx, `ALTER TABLE vt_rekey_gone RENAME TO value_tokens`); err != nil {
+		t.Fatal(err)
+	}
+
+	// A broken person_record_keys table makes the record-key pass fail.
+	e3 := newFaultEnv(t)
+	if _, err := e3.admin.Pool.Exec(ctx, `ALTER TABLE person_record_keys RENAME TO prk_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e3.svc.Rekey(ctx, true, 100); err == nil {
+		t.Fatal("rekey must fail when person_record_keys is broken")
+	}
+}
+
+func TestRekeyFailsWhenKeysUnavailable(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	// Break the keys table: Rekey's Newest lookups must surface the error
+	// up front, before touching any data.
+	if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE keys RENAME TO keys_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Rekey(ctx, true, 100); err == nil {
+		t.Fatal("rekey must fail when key versions cannot be read")
 	}
 }
