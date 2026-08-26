@@ -247,6 +247,30 @@ read through `GET /v1/contacts/{cid}/versions` (metadata) and
 and audited exactly like a live read. History is erased with the person
 (same personal data, one generation older) and pruned by retention.
 
+## Sub-accounts / person links (F7)
+
+No configuration - gated by the `links.manage` action. `POST /v1/links`
+`{parent_cid, child_cid, link_type}` (guardian|member|owner) relates two
+cids the caller can resolve; `DELETE /v1/links` unlinks;
+`GET /v1/contacts/{cid}/links` lists both directions. Erasure ALWAYS lists
+linked children in the response `linked[]`; it cascades only when
+`POST /v1/dsr/erase` names the link types in `cascade: [...]` - a silent
+cascade is how a child's data is deleted by accident.
+
+## Shared records (F8)
+
+| Variable | Default | Description |
+|---|---|---|
+| `SUNDER_SHARES_PUBLIC` | `false` | When true, `GET /v1/shares/{uuid}` needs no credential (the UUID is the bearer) for cross-org partners. Default requires any valid client credential. |
+
+`POST /v1/shares` (action `shares.create`, the F3 allowlist applies to the
+listed fields) mints an expiring, revocable UUID exposing only the named
+attributes; `GET /v1/shares/{uuid}` returns just those fields;
+`DELETE /v1/shares/{uuid}` revokes. Erasure and consent withdrawal
+auto-revoke standing shares, so a partner UUID never outlives the data.
+Every fetch is audited with the partner label. Long-expired shares are
+pruned by `sunder retention run`.
+
 ## PostgreSQL sizing (P4.5)
 
 Stock Postgres defaults (128 MB `shared_buffers`) measure the defaults,
