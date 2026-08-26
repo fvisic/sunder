@@ -16,6 +16,9 @@ import (
 
 func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
+	if !s.allow(w, client) {
+		return
+	}
 	in, ok := decode[service.TokenizeInput](w, r)
 	if !ok {
 		return
@@ -68,14 +71,21 @@ func (s *Server) requireUnlock(w http.ResponseWriter, r *http.Request, purpose s
 }
 
 func (s *Server) handleTokenBulkCreate(w http.ResponseWriter, r *http.Request) {
-	if !s.requireUnlock(w, r, "bulk-tokens") {
+	client := auth.FromContext(r.Context())
+	// Action and body shape are checked BEFORE the unlock token is spent
+	// (M7): a request that would never tokenize must not burn a single-use
+	// token or write an "intent spent" audit row.
+	if !client.Can(auth.ActTokensCreate) {
+		writeErr(w, service.ErrForbidden)
 		return
 	}
-	client := auth.FromContext(r.Context())
 	in, ok := decode[struct {
 		Items []service.TokenizeInput `json:"items"`
 	}](w, r)
 	if !ok {
+		return
+	}
+	if !s.requireUnlock(w, r, "bulk-tokens") {
 		return
 	}
 	tokens, err := s.ValueTokens.TokenizeBulk(r.Context(), client, in.Items)
@@ -88,14 +98,18 @@ func (s *Server) handleTokenBulkCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTokenBulkRead(w http.ResponseWriter, r *http.Request) {
-	if !s.requireUnlock(w, r, "bulk-tokens") {
+	client := auth.FromContext(r.Context())
+	if !client.Can(auth.ActTokensRead) {
+		writeErr(w, service.ErrForbidden)
 		return
 	}
-	client := auth.FromContext(r.Context())
 	in, ok := decode[struct {
 		Tokens []string `json:"tokens"`
 	}](w, r)
 	if !ok {
+		return
+	}
+	if !s.requireUnlock(w, r, "bulk-tokens") {
 		return
 	}
 	values, err := s.ValueTokens.DetokenizeBulk(r.Context(), client, in.Tokens)

@@ -271,6 +271,9 @@ func FromEnvNoDB() (Config, error) {
 		return c, fmt.Errorf("SUNDER_FILES_MAX_MB: %q must be 1-4096", rawMB)
 	}
 	c.FilesMaxMB = mb
+	if c.FilesStorage == "s3" && c.FilesMaxMB > 256 {
+		return c, fmt.Errorf("SUNDER_FILES_MAX_MB must be <= 256 with the s3 driver (its single-PUT cap)")
+	}
 	c.AuditReads = getenv("SUNDER_AUDIT_READS", "bucketed")
 	if c.AuditReads != "bucketed" && c.AuditReads != "chained" {
 		return c, fmt.Errorf("SUNDER_AUDIT_READS must be \"bucketed\" or \"chained\", got %q", c.AuditReads)

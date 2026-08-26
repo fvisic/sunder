@@ -278,3 +278,42 @@ func TestVersioningConfig(t *testing.T) {
 		t.Fatal("versions keep over 1000 must be rejected")
 	}
 }
+
+func TestFileVaultConfigValidation(t *testing.T) {
+	t.Setenv("SUNDER_DB_URL", "postgres://localhost/sunder")
+	// Invalid storage kind.
+	t.Setenv("SUNDER_FILES_STORAGE", "gcs")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("unknown storage kind must be rejected")
+	}
+	// S3 without required fields.
+	t.Setenv("SUNDER_FILES_STORAGE", "s3")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("s3 without endpoint/bucket/keys must be rejected")
+	}
+	t.Setenv("SUNDER_FILES_S3_ENDPOINT", "https://s3.example.com")
+	t.Setenv("SUNDER_FILES_S3_BUCKET", "b")
+	t.Setenv("SUNDER_FILES_S3_ACCESS_KEY", "ak")
+	t.Setenv("SUNDER_FILES_S3_SECRET_KEY", "sk")
+	// Over the S3 single-PUT cap.
+	t.Setenv("SUNDER_FILES_MAX_MB", "512")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("s3 with max > 256 MB must be rejected")
+	}
+	t.Setenv("SUNDER_FILES_MAX_MB", "128")
+	if c, err := FromEnv(); err != nil || c.FilesStorage != "s3" {
+		t.Fatalf("valid s3 config: %+v %v", c, err)
+	}
+	// Bad max value.
+	t.Setenv("SUNDER_FILES_STORAGE", "local")
+	t.Setenv("SUNDER_FILES_MAX_MB", "0")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("max 0 must be rejected")
+	}
+	// Bad versions TTL.
+	t.Setenv("SUNDER_FILES_MAX_MB", "25")
+	t.Setenv("SUNDER_VERSIONS_TTL", "notaduration")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("bad versions TTL must be rejected")
+	}
+}

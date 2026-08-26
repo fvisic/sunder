@@ -370,3 +370,44 @@ func TestReadBucketFuncsSurfaceQueryErrors(t *testing.T) {
 		t.Fatal("read event must surface the query error")
 	}
 }
+
+// TestVerifyReadBucketsDetectsTampering plants a past hour, seals it, then
+// edits a sealed bucket's count - VerifyReadBuckets must catch the digest
+// mismatch (the tamper-evidence the hourly digest exists for).
+func TestVerifyReadBucketsDetectsTampering(t *testing.T) {
+	setReads(t, ReadsBucketed)
+	s := testPool(t)
+	ctx := context.Background()
+	if _, err := s.Pool.Exec(ctx, `
+		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count, first_seen, last_seen)
+		VALUES ('crm','a','CID-A','lookup', date_trunc('hour', now() - interval '2 hour'), 5, now() - interval '130 minutes', now() - interval '121 minutes')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CloseReadBuckets(ctx, s.Pool); err != nil {
+		t.Fatal(err)
+	}
+	// Clean verify first.
+	if _, reason, _, err := VerifyReadBuckets(ctx, s.Pool); err != nil || reason != "" {
+		t.Fatalf("clean verify: reason=%q err=%v", reason, err)
+	}
+	// Tamper out-of-band: an attacker with direct DB write disables the
+	// append-only trigger and edits a sealed bucket. The digest still
+	// catches it - that is the point of the chained hourly digest.
+	if _, err := s.Pool.Exec(ctx, `ALTER TABLE audit_read_buckets DISABLE TRIGGER USER`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE audit_read_buckets SET count = count + 1 WHERE sealed_at IS NOT NULL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `ALTER TABLE audit_read_buckets ENABLE TRIGGER USER`); err != nil {
+		t.Fatal(err)
+	}
+	_, reason, _, err := VerifyReadBuckets(ctx, s.Pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason == "" {
+		t.Fatal("an edited sealed bucket must be detected as a digest mismatch")
+	}
+}

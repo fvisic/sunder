@@ -110,6 +110,12 @@ func recordKeyAAD(personID string) []byte { return []byte("record-key\x00" + per
 
 // Upload stores one file for the person behind cid, in the caller's scope.
 func (f *Files) Upload(ctx context.Context, client *auth.Client, cid, name, contentType string, r io.Reader) (*FileMeta, error) {
+	return f.UploadWithExpiry(ctx, client, cid, name, contentType, nil, r)
+}
+
+// UploadWithExpiry is Upload with an optional hard expiry after which the
+// file is unreadable and gets garbage-collected.
+func (f *Files) UploadWithExpiry(ctx context.Context, client *auth.Client, cid, name, contentType string, expiresAt *time.Time, r io.Reader) (*FileMeta, error) {
 	if !client.Can(auth.ActFilesWrite) {
 		return nil, ErrForbidden
 	}
@@ -172,7 +178,7 @@ func (f *Files) Upload(ctx context.Context, client *auth.Client, cid, name, cont
 	}
 
 	// Wrap the DEK under the record key, bound to this file id.
-	dekWrapped, err := gcmSeal(recordKey, fileAAD(fileID, 0xFFFFFFFF), dek)
+	dekWrapped, err := gcmSeal(recordKey, dekAAD(fileID, cid), dek)
 	if err != nil {
 		return nil, err
 	}
@@ -183,10 +189,23 @@ func (f *Files) Upload(ctx context.Context, client *auth.Client, cid, name, cont
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// L3: an erasure that committed while we were encrypting would have
+	// shredded the record key; a row inserted now would be undecryptable
+	// and never GC'd. Re-check under the row lock and fail closed.
+	var stillLive bool
+	if err := tx.QueryRow(ctx,
+		`SELECT NOT p.erased_at IS NOT NULL FROM cids c JOIN persons p ON p.id=c.person_id
+		 WHERE c.cid=$1 FOR UPDATE OF c`, cid).Scan(&stillLive); err != nil {
+		return nil, err
+	}
+	if !stillLive {
+		_ = f.Store.Delete(ctx, storageKey)
+		return nil, ErrNotFound
+	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO files (id, cid, name, content_type, size_bytes, sha256, dek_wrapped, storage_key)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		fileID, cid, name, contentType, size, sum, dekWrapped, storageKey); err != nil {
+		INSERT INTO files (id, cid, name, content_type, size_bytes, sha256, dek_wrapped, storage_key, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		fileID, cid, name, contentType, size, sum, dekWrapped, storageKey, expiresAt); err != nil {
 		return nil, err
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
@@ -202,7 +221,7 @@ func (f *Files) Upload(ctx context.Context, client *auth.Client, cid, name, cont
 		return nil, err
 	}
 	return &FileMeta{ID: fileID, Name: name, ContentType: contentType,
-		SizeBytes: size, SHA256: sum, CreatedAt: time.Now().UTC()}, nil
+		SizeBytes: size, SHA256: sum, CreatedAt: time.Now().UTC(), ExpiresAt: expiresAt}, nil
 }
 
 // Download streams one file's plaintext to w. Purpose-checked like an
@@ -234,7 +253,7 @@ func (f *Files) Download(ctx context.Context, client *auth.Client, fileID, purpo
 	if err != nil {
 		return nil, err
 	}
-	dek, err := gcmOpen(recordKey, fileAAD(fileID, 0xFFFFFFFF), dekWrapped)
+	dek, err := gcmOpen(recordKey, dekAAD(fileID, cid), dekWrapped)
 	if err != nil {
 		return nil, err
 	}
@@ -250,8 +269,15 @@ func (f *Files) Download(ctx context.Context, client *auth.Client, fileID, purpo
 		return nil, fmt.Errorf("storage get: %w", err)
 	}
 	defer rc.Close()
-	if err := decryptChunks(dek, fileID, rc, w); err != nil {
+	written, err := decryptChunks(dek, fileID, rc, w)
+	if err != nil {
 		return nil, err
+	}
+	// M2: a truncated object decrypts cleanly chunk by chunk and stops at a
+	// boundary; compare against the size recorded at upload so a short read
+	// is an error, not a silent partial success.
+	if written != meta.SizeBytes {
+		return meta, fmt.Errorf("file vault: short read (%d of %d bytes) - stored object truncated", written, meta.SizeBytes)
 	}
 	return meta, nil
 }
@@ -328,7 +354,8 @@ func (f *Files) loadOwned(ctx context.Context, client *auth.Client, fileID strin
 		SELECT fl.id, fl.name, fl.content_type, fl.size_bytes, fl.sha256, fl.created_at, fl.expires_at,
 		       fl.cid, fl.dek_wrapped, fl.storage_key
 		  FROM files fl JOIN cids c ON c.cid = fl.cid
-		 WHERE fl.id=$1 AND c.scope=$2 AND fl.gc_at IS NULL`,
+		 WHERE fl.id=$1 AND c.scope=$2 AND fl.gc_at IS NULL
+		   AND (fl.expires_at IS NULL OR fl.expires_at > now())`,
 		fileID, client.Scope).
 		Scan(&m.ID, &m.Name, &m.ContentType, &m.SizeBytes, &m.SHA256, &m.CreatedAt, &m.ExpiresAt,
 			&cid, &dekWrapped, &storageKey)
@@ -399,6 +426,13 @@ func RunFileGC(ctx context.Context, pool *pgxpool.Pool, store storage.Driver) (i
 // Wire format per chunk: 4-byte big-endian ciphertext length, then
 // nonce||ciphertext as produced by GCM Seal. The AAD binds file id and
 // chunk index; index 0xFFFFFFFF is reserved for the wrapped DEK.
+// dekAAD binds the wrapped DEK to BOTH the file id and its cid (L2): a
+// DB attacker who repoints files.cid to another of the same person's cids
+// keeps the record key but not this AAD, so the DEK no longer unwraps.
+func dekAAD(fileID, cid string) []byte {
+	return []byte("file-dek\x00" + fileID + "\x00" + cid)
+}
+
 func fileAAD(fileID string, idx uint32) []byte {
 	aad := make([]byte, 0, len(fileID)+6)
 	aad = append(aad, []byte("file\x00"+fileID+"\x00")...)
@@ -449,33 +483,35 @@ func (c *chunkWriter) writeChunk(w io.Writer, plain []byte) error {
 	return err
 }
 
-func decryptChunks(dek []byte, fileID string, r io.Reader, w io.Writer) error {
+func decryptChunks(dek []byte, fileID string, r io.Reader, w io.Writer) (int64, error) {
 	gcm := mustGCM(dek)
 	var idx uint32
+	var written int64
 	var lenHdr [4]byte
 	for {
 		if _, err := io.ReadFull(r, lenHdr[:]); err == io.EOF {
-			return nil
+			return written, nil
 		} else if err != nil {
-			return err
+			return written, err
 		}
 		n := binary.BigEndian.Uint32(lenHdr[:])
 		if n == 0 || n > fileChunkSize+64 {
-			return fmt.Errorf("file vault: corrupt chunk header")
+			return written, fmt.Errorf("file vault: corrupt chunk header")
 		}
 		sealed := make([]byte, n)
 		if _, err := io.ReadFull(r, sealed); err != nil {
-			return err
+			return written, err
 		}
 		nonce, ct := sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():]
 		plain, err := gcm.Open(nil, nonce, ct, fileAAD(fileID, idx))
 		if err != nil {
-			return fmt.Errorf("file vault: chunk %d failed to open (reordered, truncated or shredded): %w", idx, err)
+			return written, fmt.Errorf("file vault: chunk %d failed to open (reordered, truncated or shredded): %w", idx, err)
 		}
 		idx++
 		if _, err := w.Write(plain); err != nil {
-			return err
+			return written, err
 		}
+		written += int64(len(plain))
 	}
 }
 

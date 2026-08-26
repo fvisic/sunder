@@ -238,8 +238,12 @@ func clientGrantCmd(ctx context.Context, st *store.Store, args []string) error {
 			return err
 		}
 	} else if *attributes != "" {
+		attrs := splitCSV(*attributes)
+		if len(attrs) == 0 {
+			return fmt.Errorf("-attributes given but empty after parsing; use -clear-attributes to allow all")
+		}
 		if _, err := st.Pool.Exec(ctx, `UPDATE clients SET allowed_attributes=$2 WHERE client_id=$1`,
-			*id, splitCSV(*attributes)); err != nil {
+			*id, attrs); err != nil {
 			return err
 		}
 	}
@@ -667,6 +671,9 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 	var allowedAttrs []string
 	if *attributes != "" {
 		allowedAttrs = splitCSV(*attributes)
+		if len(allowedAttrs) == 0 {
+			return fmt.Errorf("-attributes given but empty after parsing (a stray comma?); omit it to allow all")
+		}
 	}
 	if err := st.Migrate(ctx); err != nil {
 		return err
