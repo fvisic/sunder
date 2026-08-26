@@ -30,6 +30,21 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 			"error": "validation", "detail": "user_id must be an id: 1-64 of [A-Za-z0-9._@:-]"})
 		return
 	}
+	// F3 strict posture: fuzzy/partial lookups spend an unlock token. The
+	// consumption is atomic and single-use - replaying the same header on
+	// a second request fails it.
+	if s.Cfg.SearchUnlock && (in.PhoneSuffix != "" || (in.Name != "" && s.Cfg.SearchFuzzyName)) {
+		if err := s.Unlock.Consume(r.Context(), client, "search", r.Header.Get("X-Sunder-Unlock")); err != nil {
+			if errors.Is(err, service.ErrUnlockRequired) {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "unlock_required", "detail": "mint a token at POST /v1/admin/unlock {\"purpose\":\"search\"} and send it as X-Sunder-Unlock"})
+				return
+			}
+			s.logErr(r, err)
+			writeErr(w, err)
+			return
+		}
+	}
 	cid, err := s.Contacts.Lookup(r.Context(), client, in)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
@@ -58,4 +73,26 @@ func (s *Server) warnLatch(clientID string) bool {
 	}
 	s.enumWarned.Store(clientID, now)
 	return true
+}
+
+// handleAdminUnlock mints the F3 unlock token: the explicit, chained
+// declaration of bulk intent, spent within 60 seconds or not at all.
+func (s *Server) handleAdminUnlock(w http.ResponseWriter, r *http.Request) {
+	client := auth.FromContext(r.Context())
+	in, ok := decode[struct {
+		Purpose string `json:"purpose"`
+	}](w, r)
+	if !ok {
+		return
+	}
+	token, expiresAt, err := s.Unlock.Issue(r.Context(), client, in.Purpose)
+	if err != nil {
+		s.logErr(r, err)
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"unlock_token": token,
+		"expires_at":   expiresAt.Format(time.RFC3339),
+	})
 }

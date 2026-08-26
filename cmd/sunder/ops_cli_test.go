@@ -844,3 +844,41 @@ func TestSealerLoopSurvivesDeadPool(t *testing.T) {
 		t.Fatal("sealer did not exit on cancel")
 	}
 }
+
+func TestClientCreateRolesAndAttributes(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+
+	// A preset role expands to its action set.
+	if err := clientCmd(ctx, st, []string{"create", "-id", "ro1", "-name", "RO", "-scope", "crm", "-role", "readonly", "-purposes", "support"}); err != nil {
+		t.Fatal(err)
+	}
+	var role string
+	var acts []string
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT role, allowed_actions FROM clients WHERE client_id='ro1'`).Scan(&role, &acts); err != nil {
+		t.Fatal(err)
+	}
+	if role != "readonly" || len(acts) != 2 {
+		t.Fatalf("readonly preset: role=%q actions=%v", role, acts)
+	}
+	// Role and explicit actions are mutually exclusive; unknown roles refuse.
+	if err := clientCmd(ctx, st, []string{"create", "-id", "x1", "-name", "X", "-scope", "crm", "-role", "readonly", "-actions", "lookup"}); err == nil {
+		t.Fatal("-role with -actions must be refused")
+	}
+	if err := clientCmd(ctx, st, []string{"create", "-id", "x2", "-name", "X", "-scope", "crm", "-role", "superuser"}); err == nil {
+		t.Fatal("unknown role must be refused")
+	}
+	// The F3 attribute allowlist lands as a column.
+	if err := clientCmd(ctx, st, []string{"create", "-id", "b1", "-name", "B", "-scope", "crm", "-role", "readonly", "-attributes", "iban,tier"}); err != nil {
+		t.Fatal(err)
+	}
+	var attrs []string
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT allowed_attributes FROM clients WHERE client_id='b1'`).Scan(&attrs); err != nil {
+		t.Fatal(err)
+	}
+	if len(attrs) != 2 {
+		t.Fatalf("allowlist must persist, got %v", attrs)
+	}
+}

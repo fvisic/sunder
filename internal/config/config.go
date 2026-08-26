@@ -87,6 +87,13 @@ type Config struct {
 	// existing contacts via `sunder keys rekey`.
 	SearchFuzzyName   bool // SUNDER_SEARCH_FUZZY_NAME=true: phonetic name narrowing (ph1)
 	SearchPhoneSuffix bool // SUNDER_SEARCH_PHONE_SUFFIX=true: last-8-digits phone lookup, single-hit
+	// SearchUnlock=true (F3 strict posture, Databunker-like) additionally
+	// requires a 60s single-use unlock token (X-Sunder-Unlock, minted at
+	// POST /v1/admin/unlock) for fuzzy and partial lookups. Default false:
+	// those are single-hit, rate-limited and audited, and a pre-flight
+	// round trip per caller-ID lookup kills the flow. Genuinely bulk
+	// surfaces always require unlock regardless of this switch.
+	SearchUnlock bool // SUNDER_SEARCH_UNLOCK=true
 }
 
 func getenv(key, def string) string {
@@ -214,6 +221,7 @@ func FromEnvNoDB() (Config, error) {
 	c.AuditSealExternal = os.Getenv("SUNDER_AUDIT_SEAL_EXTERNAL") == "true"
 	c.SearchFuzzyName = os.Getenv("SUNDER_SEARCH_FUZZY_NAME") == "true"
 	c.SearchPhoneSuffix = os.Getenv("SUNDER_SEARCH_PHONE_SUFFIX") == "true"
+	c.SearchUnlock = os.Getenv("SUNDER_SEARCH_UNLOCK") == "true"
 	c.AuditReads = getenv("SUNDER_AUDIT_READS", "bucketed")
 	if c.AuditReads != "bucketed" && c.AuditReads != "chained" {
 		return c, fmt.Errorf("SUNDER_AUDIT_READS must be \"bucketed\" or \"chained\", got %q", c.AuditReads)

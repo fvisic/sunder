@@ -223,8 +223,12 @@ func retentionCmd(ctx context.Context, st *store.Store, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned, %d consumed envelope(s) pruned, %d portal row(s) pruned\n",
-			wiped, otiPruned, envelopes, portalRows)
+		unlockRows, err := service.PruneUnlockTokens(ctx, st.Pool)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned, %d consumed envelope(s) pruned, %d portal row(s) pruned, %d unlock token(s) pruned\n",
+			wiped, otiPruned, envelopes, portalRows, unlockRows)
 		fmt.Println("(audit rows are never pruned - the chain and its anchors are the tamper evidence)")
 		return nil
 	default:
@@ -525,7 +529,9 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 	id := fs.String("id", "", "client id (required)")
 	name := fs.String("name", "", "display name (required)")
 	scope := fs.String("scope", "", "CID scope this client belongs to (required)")
-	actions := fs.String("actions", "", "comma-separated allowed actions")
+	actions := fs.String("actions", "", "comma-separated allowed actions (implies -role custom)")
+	role := fs.String("role", "", "preset: readonly | service | admin (replaces -actions)")
+	attributes := fs.String("attributes", "", "comma-separated attribute allowlist; empty = all attributes (F3)")
 	purposes := fs.String("purposes", "", "comma-separated allowed purposes")
 	rate := fs.Int("rate", 60, "lookup rate limit per minute")
 	ttl := fs.String("ttl", "", "credential lifetime (e.g. 90d, 720h); empty = non-expiring")
@@ -545,7 +551,7 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 		auth.ActContactsRegister: true, auth.ActScopesIssue: true, auth.ActLookup: true,
 		auth.ActAttributesRead: true, auth.ActOTIIssue: true, auth.ActOTIVerify: true,
 		auth.ActConsentManage: true, auth.ActDSRAccess: true, auth.ActDSRErase: true,
-		auth.ActDSRExport: true, auth.ActClaimsExternal: true,
+		auth.ActDSRExport: true, auth.ActClaimsExternal: true, auth.ActAdminUnlock: true,
 	}
 	acts := splitCSV(*actions)
 	for _, a := range acts {
@@ -553,12 +559,28 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 			return fmt.Errorf("unknown action %q", a)
 		}
 	}
+	// A role preset and explicit actions are mutually exclusive: mixing
+	// them would make the role label a lie about what the client can do.
+	if *role != "" {
+		if len(acts) > 0 {
+			return fmt.Errorf("-role and -actions are mutually exclusive: a preset defines the action set")
+		}
+		if auth.RoleActions(*role) == nil {
+			return fmt.Errorf("unknown role %q (readonly | service | admin)", *role)
+		}
+	}
+	var allowedAttrs []string
+	if *attributes != "" {
+		allowedAttrs = splitCSV(*attributes)
+	}
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: *id, Name: *name, Scope: *scope,
 		AllowedActions:      acts,
+		Role:                *role,
+		AllowedAttributes:   allowedAttrs,
 		AllowedPurposes:     splitCSV(*purposes),
 		RateLimit:           *rate,
 		CredentialExpiresAt: expiresAt,
