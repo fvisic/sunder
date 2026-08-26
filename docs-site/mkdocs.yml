@@ -43,6 +43,7 @@ nav:
       - Bootstrap: install/bootstrap.md
       - Postgres Sizing: install/postgres-sizing.md
       - Configuration: install/configuration.md
+      - Multi-Jurisdiction: install/multi-jurisdiction.md
   - Admin:
       - Keys and Keystores: admin/keys-and-keystores.md
       - Rotation and Rekey: admin/rotation-and-rekey.md
@@ -50,6 +51,7 @@ nav:
       - Audit Operations: admin/audit-operations.md
       - Monitoring: admin/monitoring.md
       - Backup and DR: admin/backup-dr.md
+      - Shamir Recovery: admin/shamir-recovery.md
       - Multi-Replica: admin/multi-replica.md
   - Concepts:
       - Scoped Pseudonyms: concepts/scoped-pseudonyms.md
@@ -58,6 +60,11 @@ nav:
       - Selective Disclosure: concepts/selective-disclosure.md
       - External Issuers: concepts/external-issuers.md
       - Fuzzy and Partial Search: concepts/fuzzy-and-partial-search.md
+      - Value Tokenization: concepts/value-tokenization.md
+      - File Vault: concepts/file-vault.md
+      - Attribute Versioning: concepts/attribute-versioning.md
+      - Sub-Accounts: concepts/sub-accounts.md
+      - Shared Records: concepts/shared-records.md
   - GDPR:
       - Rights and Consent: gdpr/rights-and-consent.md
       - Privacy Portal: gdpr/privacy-portal.md
