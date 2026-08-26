@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -263,5 +264,344 @@ func TestRunKeysRekeyReencrypt(t *testing.T) {
 	}
 	if err := run("keys", []string{"rekey", "-reencrypt-pii"}); err != nil {
 		t.Fatalf("keys rekey -reencrypt: %v", err)
+	}
+}
+
+// TestShamirRecoveryCycle runs the real F9 CLI flow: bootstrap keys,
+// shamir-init to issue shares, wipe the keystore, then shamir-recover from a
+// threshold of shares and confirm the keys are byte-identical.
+func TestShamirRecoveryCycle(t *testing.T) {
+	st := testutil.NewDB(t)
+	url := st.Pool.Config().ConnString()
+	st.Close()
+	ksDir := t.TempDir()
+	t.Setenv("SUNDER_DB_URL", url)
+	t.Setenv("SUNDER_KEYSTORE_PATH", ksDir)
+
+	// Bootstrap creates the keystore keys.
+	if err := run("bootstrap", []string{"-id", "admin", "-scope", "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	before := readKeystore(t, ksDir)
+	if len(before) == 0 {
+		t.Fatal("bootstrap must create keys")
+	}
+
+	// shamir-init: capture the printed shares.
+	out := captureStdout(t, func() {
+		if err := run("keys", []string{"shamir-init", "-n", "5", "-k", "3"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	shares := parseSharesFromOutput(out)
+	if len(shares) != 5 {
+		t.Fatalf("want 5 shares printed, got %d\n%s", len(shares), out)
+	}
+
+	// Simulate a keystore loss: delete every .key file (the bundle stays).
+	entries, _ := os.ReadDir(ksDir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".key") {
+			os.Remove(filepath.Join(ksDir, e.Name()))
+		}
+	}
+	if len(readKeystore(t, ksDir)) != 0 {
+		t.Fatal("keystore should be wiped")
+	}
+
+	// Recover from shares 1, 3, 5 (a valid 3-of-5 subset).
+	if err := run("keys", []string{"shamir-recover", "-shares", shares[0] + "," + shares[2] + "," + shares[4]}); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	after := readKeystore(t, ksDir)
+	if len(after) != len(before) {
+		t.Fatalf("recovered %d keys, had %d", len(after), len(before))
+	}
+	for name, key := range before {
+		if string(after[name]) != string(key) {
+			t.Fatalf("key %q did not round-trip through recovery", name)
+		}
+	}
+
+	// Too few shares must fail cleanly.
+	entries, _ = os.ReadDir(ksDir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".key") {
+			os.Remove(filepath.Join(ksDir, e.Name()))
+		}
+	}
+	if err := run("keys", []string{"shamir-recover", "-shares", shares[0] + "," + shares[1]}); err == nil {
+		t.Fatal("2 of 3 shares must fail recovery")
+	}
+}
+
+func readKeystore(t *testing.T, dir string) map[string][]byte {
+	t.Helper()
+	out := map[string][]byte{}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".key") {
+			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out[e.Name()] = b
+		}
+	}
+	return out
+}
+
+func parseSharesFromOutput(out string) []string {
+	var shares []string
+	for _, line := range strings.Split(out, "\n") {
+		if i := strings.Index(line, ": "); i >= 0 && strings.Contains(line, "share ") {
+			shares = append(shares, strings.TrimSpace(line[i+2:]))
+		}
+	}
+	return shares
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what
+// it printed. Used to grab the once-only shamir shares.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var buf strings.Builder
+		b := make([]byte, 4096)
+		for {
+			n, err := r.Read(b)
+			if n > 0 {
+				buf.Write(b[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+		done <- buf.String()
+	}()
+	fn()
+	w.Close()
+	os.Stdout = old
+	return <-done
+}
+
+// TestShamirRotateAndGuards covers shamir-rotate (re-seal under the same
+// shares) and the error/guard branches.
+func TestShamirRotateAndGuards(t *testing.T) {
+	st := testutil.NewDB(t)
+	url := st.Pool.Config().ConnString()
+	st.Close()
+	ksDir := t.TempDir()
+	t.Setenv("SUNDER_DB_URL", url)
+	t.Setenv("SUNDER_KEYSTORE_PATH", ksDir)
+	if err := run("bootstrap", []string{"-id", "admin", "-scope", "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if err := run("keys", []string{"shamir-init"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	shares := parseSharesFromOutput(out)
+	// Rotate re-seals the bundle over the SAME shares.
+	if err := run("keys", []string{"shamir-rotate", "-shares", shares[0] + "," + shares[1] + "," + shares[2]}); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	// The old shares still recover after a rotate (a key added meanwhile is
+	// picked up). Add a key by rotating a kind, then re-rotate the bundle.
+	if err := run("keys", []string{"rotate", "-kind", "pii-kek"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("keys", []string{"shamir-rotate", "-shares", shares[0] + "," + shares[3] + "," + shares[4]}); err != nil {
+		t.Fatalf("rotate after key add: %v", err)
+	}
+	// Guards: no shares, non-hex share, unknown subcommand.
+	if err := run("keys", []string{"shamir-recover", "-shares", ""}); err == nil {
+		t.Fatal("empty shares must error")
+	}
+	if err := run("keys", []string{"shamir-recover", "-shares", "zzzz"}); err == nil {
+		t.Fatal("non-hex share must error")
+	}
+	// Vault driver refuses shamir.
+	t.Setenv("SUNDER_KEYSTORE", "vault")
+	if err := run("keys", []string{"shamir-init"}); err == nil {
+		t.Fatal("shamir must refuse the vault driver")
+	}
+	t.Setenv("SUNDER_KEYSTORE", "file")
+}
+
+// TestShamirCLIErrorPaths covers the shamir subcommands' error branches.
+func TestShamirCLIErrorPaths(t *testing.T) {
+	st := testutil.NewDB(t)
+	url := st.Pool.Config().ConnString()
+	st.Close()
+	t.Setenv("SUNDER_DB_URL", url)
+
+	// shamir-init before any keys exist: AllKeys fails.
+	emptyKS := t.TempDir()
+	t.Setenv("SUNDER_KEYSTORE_PATH", emptyKS)
+	if err := run("keys", []string{"shamir-init"}); err == nil {
+		t.Fatal("shamir-init with no keys must error")
+	}
+
+	// Bootstrap, then shamir-recover with a valid-looking but wrong share:
+	// CombineWithChecksum fails.
+	ksDir := t.TempDir()
+	t.Setenv("SUNDER_KEYSTORE_PATH", ksDir)
+	if err := run("bootstrap", []string{"-id", "admin", "-scope", "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	// Recover before shamir-init: no bundle file.
+	out := captureStdout(t, func() {
+		if err := run("keys", []string{"shamir-init"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	shares := parseSharesFromOutput(out)
+	// Delete the bundle, then recover: ReadRecoveryBundle fails.
+	os.Remove(filepath.Join(ksDir, "recovery.bundle"))
+	if err := run("keys", []string{"shamir-recover", "-shares", shares[0] + "," + shares[1] + "," + shares[2]}); err == nil {
+		t.Fatal("recover without a bundle must error")
+	}
+	// A short (odd-length) hex share fails hex decode; a wrong share set
+	// fails the checksum. Rewrite a fresh bundle first.
+	out = captureStdout(t, func() {
+		if err := run("keys", []string{"shamir-init"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	shares = parseSharesFromOutput(out)
+	// Three shares that do not all belong together: corrupt one hex nibble.
+	bad := shares[0][:len(shares[0])-1] + "0"
+	if err := run("keys", []string{"shamir-recover", "-shares", bad + "," + shares[1] + "," + shares[2]}); err == nil {
+		t.Fatal("a corrupted share set must fail the checksum")
+	}
+	// Unknown keys subcommand.
+	if err := run("keys", []string{"bogus"}); err == nil {
+		t.Fatal("unknown keys subcommand must error")
+	}
+}
+
+// TestShamirRecoverInteractiveStdin covers readShares' interactive branch:
+// shares are fed on stdin, one hex per line, blank line to end.
+func TestShamirRecoverInteractiveStdin(t *testing.T) {
+	st := testutil.NewDB(t)
+	url := st.Pool.Config().ConnString()
+	st.Close()
+	ksDir := t.TempDir()
+	t.Setenv("SUNDER_DB_URL", url)
+	t.Setenv("SUNDER_KEYSTORE_PATH", ksDir)
+	if err := run("bootstrap", []string{"-id", "admin", "-scope", "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if err := run("keys", []string{"shamir-init"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	shares := parseSharesFromOutput(out)
+	// Wipe the key files (bundle stays).
+	entries, _ := os.ReadDir(ksDir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".key") {
+			os.Remove(filepath.Join(ksDir, e.Name()))
+		}
+	}
+	// Feed three shares on stdin, blank line to finish.
+	stdin := shares[0] + "\n" + shares[1] + "\n" + shares[2] + "\n\n"
+	withStdin(t, stdin, func() {
+		if err := run("keys", []string{"shamir-recover"}); err != nil {
+			t.Fatalf("interactive recover: %v", err)
+		}
+	})
+	if len(readKeystore(t, ksDir)) == 0 {
+		t.Fatal("interactive recovery restored no keys")
+	}
+}
+
+func withStdin(t *testing.T, input string, fn func()) {
+	t.Helper()
+	old := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	go func() {
+		_, _ = w.WriteString(input)
+		w.Close()
+	}()
+	defer func() { os.Stdin = old }()
+	fn()
+}
+
+// TestShamirWriteFailures covers the bundle-write and key-restore failure
+// branches by making the keystore directory unwritable, and the bad-n/k
+// branch of SplitWithChecksum.
+func TestShamirWriteFailures(t *testing.T) {
+	st := testutil.NewDB(t)
+	url := st.Pool.Config().ConnString()
+	st.Close()
+	ksDir := t.TempDir()
+	t.Setenv("SUNDER_DB_URL", url)
+	t.Setenv("SUNDER_KEYSTORE_PATH", ksDir)
+	if err := run("bootstrap", []string{"-id", "admin", "-scope", "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	// Bad -n/-k: SplitWithChecksum rejects k > n.
+	if err := run("keys", []string{"shamir-init", "-n", "2", "-k", "5"}); err == nil {
+		t.Fatal("k > n must be rejected")
+	}
+	// Issue real shares first (dir still writable).
+	out := captureStdout(t, func() {
+		if err := run("keys", []string{"shamir-init"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	shares := parseSharesFromOutput(out)
+
+	// Make the keystore directory read-only: WriteRecoveryBundle (rotate)
+	// and RestoreKeys (recover) must surface the failure.
+	if err := os.Chmod(ksDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(ksDir, 0o700)
+	rotErr := run("keys", []string{"shamir-rotate", "-shares", shares[0] + "," + shares[1] + "," + shares[2]})
+	recErr := run("keys", []string{"shamir-recover", "-shares", shares[0] + "," + shares[1] + "," + shares[2]})
+	if rotErr == nil && recErr == nil {
+		t.Fatal("a read-only keystore must fail at least one of rotate/recover")
+	}
+}
+
+// TestShamirFlagAndDriverGuards covers the fs.Parse error branch and the
+// vault-driver refusal on all three shamir subcommands.
+func TestShamirFlagAndDriverGuards(t *testing.T) {
+	st := testutil.NewDB(t)
+	url := st.Pool.Config().ConnString()
+	st.Close()
+	t.Setenv("SUNDER_DB_URL", url)
+	t.Setenv("SUNDER_KEYSTORE_PATH", t.TempDir())
+	for _, sub := range []string{"shamir-init", "shamir-recover", "shamir-rotate"} {
+		// A bad flag fails fs.Parse.
+		if err := run("keys", []string{sub, "-nope"}); err == nil {
+			t.Fatalf("%s with a bad flag must error", sub)
+		}
+	}
+	// The vault driver refuses every shamir subcommand.
+	t.Setenv("SUNDER_KEYSTORE", "vault")
+	for _, sub := range []string{"shamir-init", "shamir-recover", "shamir-rotate"} {
+		if err := run("keys", []string{sub, "-shares", "00"}); err == nil {
+			t.Fatalf("%s must refuse the vault driver", sub)
+		}
 	}
 }

@@ -1202,6 +1202,13 @@ func TestSharesPublicMode(t *testing.T) {
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "HR12") {
 		t.Fatalf("public fetch: %d %s", rr.Code, rr.Body.String())
 	}
+	// A missing UUID in public mode is a 404 through the public handler.
+	req = httptest.NewRequest("GET", "/v1/shares/00000000-0000-4000-8000-000000000000", nil)
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 404 {
+		t.Fatalf("public fetch of a missing share: %d", rr.Code)
+	}
 }
 
 func TestShareHandlerErrorBranches(t *testing.T) {
@@ -1278,5 +1285,125 @@ func TestShareCreateRateLimited(t *testing.T) {
 	}
 	if !got429 {
 		t.Fatal("share creation must be rate limited")
+	}
+}
+
+// TestAdminUnlockRateLimited covers the mint endpoint's rate-limit branch.
+func TestBulkCreateHardErrorWriteErr(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActTokensCreate, auth.ActAdminUnlock},
+		AllowedPurposes: []string{}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	// A valid client + unlock, but a broken value_tokens table: the bulk
+	// create reaches TokenizeBulk and hits a hard error -> writeErr (5xx).
+	_, o := e.do(t, cred, "POST", "/v1/admin/unlock", map[string]string{"purpose": "bulk-tokens"})
+	if _, err := st.Pool.Exec(ctx, `ALTER TABLE value_tokens RENAME TO vt_hard`); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/v1/tokens/bulk", strings.NewReader(`{"items":[{"value":"a"}]}`))
+	req.Header.Set("Authorization", "Bearer "+cred)
+	req.Header.Set("X-Sunder-Unlock", o["unlock_token"])
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code < 500 {
+		t.Fatalf("bulk create hard error must 5xx: %d", rr.Code)
+	}
+}
+
+func TestAdminUnlockRateLimited(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions: []string{auth.ActAdminUnlock}, AllowedPurposes: []string{}, RateLimit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	got429 := false
+	for i := 0; i < 10; i++ {
+		rec, _ := e.do(t, cred, "POST", "/v1/admin/unlock", map[string]string{"purpose": "search"})
+		if rec.Code == 429 {
+			got429 = true
+			break
+		}
+	}
+	if !got429 {
+		t.Fatal("unlock minting must be rate limited")
+	}
+}
+
+// TestOpenAPIAndBulkReadForbidden covers the /openapi.yaml handler and the
+// bulk-read forbidden branch.
+func TestOpenAPIAndBulkReadForbidden(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions: []string{auth.ActTokensCreate, auth.ActAdminUnlock}, AllowedPurposes: []string{}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// /openapi.yaml is public and serves the spec.
+	req := httptest.NewRequest("GET", "/openapi.yaml", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 || rr.Body.Len() == 0 {
+		t.Fatalf("openapi.yaml: %d len=%d", rr.Code, rr.Body.Len())
+	}
+	// Bulk read without tokens.read: 403 (before the unlock is spent).
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	_, o := e.do(t, cred, "POST", "/v1/admin/unlock", map[string]string{"purpose": "bulk-tokens"})
+	req = httptest.NewRequest("POST", "/v1/tokens/bulk/read", strings.NewReader(`{"tokens":["x"]}`))
+	req.Header.Set("Authorization", "Bearer "+cred)
+	req.Header.Set("X-Sunder-Unlock", o["unlock_token"])
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 403 {
+		t.Fatalf("bulk read without tokens.read must 403: %d", rr.Code)
+	}
+	// Bulk CREATE without tokens.create is 403 too (this client lacks it in
+	// a fresh server).
+	st2 := testutil.NewDB(t)
+	weakCred, err := auth.Create(ctx, st2.Pool, auth.Client{
+		ID: "w", Name: "W", Scope: "crm",
+		AllowedActions: []string{auth.ActTokensRead, auth.ActAdminUnlock}, AllowedPurposes: []string{}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv2, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e2 := &e2eEnv{srv: srv2, credCRM: weakCred}
+	_, o2 := e2.do(t, weakCred, "POST", "/v1/admin/unlock", map[string]string{"purpose": "bulk-tokens"})
+	req = httptest.NewRequest("POST", "/v1/tokens/bulk", strings.NewReader(`{"items":[{"value":"a"}]}`))
+	req.Header.Set("Authorization", "Bearer "+weakCred)
+	req.Header.Set("X-Sunder-Unlock", o2["unlock_token"])
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	srv2.Handler().ServeHTTP(rr, req)
+	if rr.Code != 403 {
+		t.Fatalf("bulk create without tokens.create must 403: %d", rr.Code)
 	}
 }

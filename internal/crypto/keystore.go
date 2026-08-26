@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -318,4 +319,118 @@ func (*PKCS11Keystore) Key(context.Context, string) ([]byte, error) {
 
 func (*PKCS11Keystore) Ensure(context.Context, string) error {
 	return fmt.Errorf("keystore: pkcs11 driver not implemented yet")
+}
+
+// --- F9 recovery helpers (file keystore only) ------------------------------
+
+const recoveryBundleFile = "recovery.bundle"
+
+// AllKeys reads every key file in the keystore as a recovery entry. Used by
+// shamir-init/rotate to snapshot the keystore into a recovery bundle.
+func (f *FileKeystore) AllKeys() ([]KeyEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ents, err := os.ReadDir(f.Dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []KeyEntry
+	for _, e := range ents {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".key") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(f.Dir, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		if len(b) != 32 {
+			return nil, fmt.Errorf("keystore: %s has %d bytes, want 32", e.Name(), len(b))
+		}
+		// The stored file name reverses path()'s "/" -> "_" mapping only for
+		// display; the recovery bundle stores the ON-DISK base name so
+		// restore is a byte-for-byte round trip.
+		name := strings.TrimSuffix(e.Name(), ".key")
+		out = append(out, KeyEntry{Name: name, Key: b})
+	}
+	if len(out) == 0 {
+		return nil, errors.New("keystore: no keys to protect (run bootstrap first)")
+	}
+	return out, nil
+}
+
+// WriteRecoveryBundle atomically writes the sealed bundle to the keystore
+// directory (0600). It contains only ciphertext - safe to back up.
+func (f *FileKeystore) WriteRecoveryBundle(bundle []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := os.MkdirAll(f.Dir, 0o700); err != nil {
+		return err
+	}
+	p := filepath.Join(f.Dir, recoveryBundleFile)
+	tf, err := os.CreateTemp(f.Dir, recoveryBundleFile+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmp := tf.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if err := tf.Chmod(0o600); err != nil {
+		_ = tf.Close()
+		return err
+	}
+	if _, err := tf.Write(bundle); err != nil {
+		_ = tf.Close()
+		return err
+	}
+	if err := tf.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+// ReadRecoveryBundle reads the sealed bundle.
+func (f *FileKeystore) ReadRecoveryBundle() ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return os.ReadFile(filepath.Join(f.Dir, recoveryBundleFile))
+}
+
+// RestoreKeys writes each recovered key file atomically. Existing keys of
+// the same name are overwritten - recovery is the authoritative source
+// after a keystore loss.
+func (f *FileKeystore) RestoreKeys(entries []KeyEntry) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := os.MkdirAll(f.Dir, 0o700); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if len(e.Key) != 32 {
+			return fmt.Errorf("keystore: recovered key %q has %d bytes, want 32", e.Name, len(e.Key))
+		}
+		p := filepath.Join(f.Dir, e.Name+".key")
+		tf, err := os.CreateTemp(f.Dir, filepath.Base(p)+".tmp*")
+		if err != nil {
+			return err
+		}
+		tmp := tf.Name()
+		if err := tf.Chmod(0o600); err != nil {
+			_ = tf.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
+		if _, err := tf.Write(e.Key); err != nil {
+			_ = tf.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
+		if err := tf.Close(); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		if err := os.Rename(tmp, p); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	return nil
 }
