@@ -235,10 +235,20 @@ function auditPanel(sc) {
     card.appendChild(el("p", "muted", "Run the verification step to see the verdict and the chain."));
     return card;
   }
+  // Three outcomes, not two: intact, a break at a named position, and
+  // "not verifiable" (rows stranded outside the chain under sync sealing,
+  // which has a reason but no position).
+  let label = "chain intact";
+  if (!verdict.ok) {
+    label = verdict.broken_chain_seq
+      ? "chain BROKEN at #" + verdict.broken_chain_seq
+      : "chain NOT verifiable";
+  }
   const row = el("div", "state");
-  row.appendChild(el("span", "badge " + (verdict.ok ? "granted" : "withdrawn"),
-    verdict.ok ? "chain intact" : "chain BROKEN at #" + verdict.broken_chain_seq));
-  row.appendChild(el("span", "muted", (verdict.pending || 0) + " row(s) appended but not yet sealed"));
+  row.appendChild(el("span", "badge " + (verdict.ok ? "granted" : "withdrawn"), label));
+  row.appendChild(el("span", "muted", (verdict.pending || 0) +
+    " row(s) appended but not yet sealed" +
+    (verdict.sealing ? " (" + verdict.sealing + " sealing)" : "")));
   card.appendChild(row);
   if (!verdict.ok && verdict.reason) card.appendChild(el("p", "assert fail", verdict.reason));
 

@@ -82,29 +82,25 @@ func builtinVarNames() []string {
 }
 
 // newSessionVars mints the per-visitor demo identity. Unique per session on
-// purpose: two visitors registering the same e-mail would dedup onto ONE
-// person (that is what the dedup rule does), and then one visitor's erasure
-// step would wipe the other's record out from under them.
+// purpose: two visitors registering the same e-mail or phone would dedup
+// onto ONE person (that is what the dedup rule does), and then one
+// visitor's erasure step would wipe the other's record out from under them.
+//
+// Both identifiers are freshly random rather than derived from the session
+// id: deriving the phone from the id gave only ~10^8 skewed combinations,
+// which is a coin flip at a few thousand visitors - and the whole point of
+// per-session identities is that they never collide. Stability across page
+// reloads comes from storing them in the session, not from being
+// reproducible.
 func newSessionVars(unique string) map[string]string {
 	return map[string]string{
-		"unique":     unique,
-		"demo_name":  "Ana Horvat",
+		"unique":    unique,
+		"demo_name": "Ana Horvat",
+		// E.164: +385 plus a mobile-shaped subscriber number.
+		"demo_phone": "+3859" + randomDigits(9),
 		"demo_email": fmt.Sprintf("ana.horvat+%s@example.com", unique),
-		// E.164 with a session-derived subscriber number.
-		"demo_phone": "+3859" + digitsFrom(unique, 8),
 		"miss_email": fmt.Sprintf("nobody-%s@example.com", unique),
 	}
-}
-
-// digitsFrom maps a hex string onto n decimal digits, deterministically:
-// the same session keeps the same phone number across page reloads (the
-// dedup story depends on the identifier being stable within a session).
-func digitsFrom(seed string, n int) string {
-	out := make([]byte, 0, n)
-	for i := 0; i < n; i++ {
-		out = append(out, '0'+seed[i%len(seed)]%10)
-	}
-	return string(out)
 }
 
 // Sessions is a TTL map of visitor state. Bounded on purpose: an unbounded
@@ -200,6 +196,10 @@ func (s *Sessions) sweepLocked(now time.Time) {
 		delete(s.byID, all[i].id)
 	}
 }
+
+// TTL is how long an idle session survives - also the session cookie's
+// lifetime, so the two cannot drift apart.
+func (s *Sessions) TTL() time.Duration { return s.ttl }
 
 // Count reports how many sessions are live (used by the status endpoint and
 // the tests).

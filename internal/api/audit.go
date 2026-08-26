@@ -43,11 +43,21 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal"})
 		return
 	}
-	out := map[string]any{"ok": broken == 0, "pending": pending}
+	out := map[string]any{"ok": broken == 0, "pending": pending, "sealing": audit.Mode()}
 	if broken != 0 {
 		// A break is reported, not hidden behind a 500: the caller asked
 		// whether the chain is intact and the answer is "no, here".
 		out["broken_chain_seq"], out["reason"] = broken, reason
+	} else if audit.Mode() == audit.ModeSync && pending > 0 {
+		// Under sync sealing, pending rows cannot be in-flight work: sync
+		// seals at insert. A backlog means rows stranded OUTSIDE the chain,
+		// which the CLI already refuses to call success - and one surface
+		// answering "intact" where the other answers "broken" would make
+		// the verdict worthless.
+		out["ok"] = false
+		out["reason"] = fmt.Sprintf("%d unsealed row(s) under sync sealing: outside the chain, "+
+			"and they will not seal on their own - drain them with `sunder sealer -once` "+
+			"under SUNDER_AUDIT_SEALING=async", pending)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -90,11 +100,14 @@ func (s *Server) handleAuditChain(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"rows": rows, "unsealed": unsealed})
 }
 
-// parsePositiveInt parses a small positive integer without pulling strconv
-// error text into a response body.
+// parsePositiveInt parses a positive integer without pulling strconv error
+// text into a response body. The digit cap only guards overflow: any
+// well-formed number is accepted here and clamped by audit.Tail, which is
+// what the contract promises ("values above 200 are clamped") - rejecting
+// limit=99999 while accepting limit=9999 was an accident of the cap.
 func parsePositiveInt(s string) (int, error) {
 	n := 0
-	if s == "" || len(s) > 4 {
+	if s == "" || len(s) > 9 {
 		return 0, fmt.Errorf("out of range")
 	}
 	for i := 0; i < len(s); i++ {

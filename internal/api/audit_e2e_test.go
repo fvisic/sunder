@@ -94,6 +94,31 @@ func TestAuditVerifyAndChainOverHTTP(t *testing.T) {
 	}
 }
 
+// Under sync sealing, unsealed rows are stranded outside the chain, and the
+// CLI refuses to call that success. The HTTP verdict must not disagree with
+// the CLI about the same instance.
+func TestAuditVerifyMatchesTheCLIUnderSyncSealing(t *testing.T) {
+	e, credAuditor := auditEnv(t)
+	registerFilip(t, e)
+
+	// pinMode (sealing_test.go) is the established way to pin the write
+	// mode for one test and restore the matrix-selected one after.
+	pinMode(t, audit.ModeSync)
+
+	rec, out := e.doRaw(t, credAuditor, "GET", "/v1/admin/audit/verify")
+	if rec.Code != http.StatusOK || out["sealing"] != audit.ModeSync {
+		t.Fatalf("verify: %d %s", rec.Code, rec.Body.String())
+	}
+	pending, _ := out["pending"].(float64)
+	if pending > 0 {
+		if out["ok"] != false || out["reason"] == "" {
+			t.Fatalf("pending rows under sync sealing must not report ok: %s", rec.Body.String())
+		}
+	} else if out["ok"] != true {
+		t.Fatalf("a drained chain under sync sealing must be ok: %s", rec.Body.String())
+	}
+}
+
 func TestAuditSurfaceIsGatedAndValidated(t *testing.T) {
 	e, credAuditor := auditEnv(t)
 
@@ -108,16 +133,18 @@ func TestAuditSurfaceIsGatedAndValidated(t *testing.T) {
 			t.Fatalf("%s unauthenticated: %d", path, rec.Code)
 		}
 	}
-	for _, bad := range []string{"0", "-1", "abc", "99999"} {
+	for _, bad := range []string{"0", "-1", "abc", "1234567890"} {
 		rec, out := e.doRaw(t, credAuditor, "GET", "/v1/admin/audit/chain?limit="+bad)
 		if rec.Code != http.StatusBadRequest || out["error"] != "validation" {
 			t.Fatalf("limit=%q: %d %s", bad, rec.Code, rec.Body.String())
 		}
 	}
-	// A huge but well-formed limit is clamped, not refused.
-	rec, _ := e.doRaw(t, credAuditor, "GET", "/v1/admin/audit/chain?limit=9999")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("limit=9999 should clamp: %d %s", rec.Code, rec.Body.String())
+	// Any well-formed limit is clamped, not refused - the contract says so.
+	for _, big := range []string{"9999", "99999"} {
+		rec, _ := e.doRaw(t, credAuditor, "GET", "/v1/admin/audit/chain?limit="+big)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("limit=%s should clamp: %d %s", big, rec.Code, rec.Body.String())
+		}
 	}
 }
 

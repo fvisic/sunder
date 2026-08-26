@@ -88,7 +88,7 @@ func (r *Runner) RunStep(ctx context.Context, sc *Scenario, idx int, vars map[st
 		res.Error = (&ErrNoCredential{Role: step.Actor}).Error()
 		return res
 	}
-	path, err := expand(step.Path, vars, url.PathEscape)
+	path, err := expandPath(step.Path, vars)
 	if err != nil {
 		res.Error = err.Error()
 		return res
@@ -171,10 +171,31 @@ func (r *Runner) RunStep(ctx context.Context, sc *Scenario, idx int, vars map[st
 	return res
 }
 
+// expandPath substitutes into a request target, escaping each value for the
+// part it lands in. The two halves need different escaping: PathEscape
+// leaves '&', '=' and '+' alone, so a value carrying one of those into the
+// query string would silently add a parameter or turn into a space. Today's
+// captured values are base32 pseudonyms and tokens, but the escaping has to
+// be right for the value, not for the values we happen to have.
+func expandPath(tmpl string, vars map[string]string) (string, error) {
+	path, query, hasQuery := strings.Cut(tmpl, "?")
+	out, err := expand(path, vars, url.PathEscape)
+	if err != nil {
+		return "", err
+	}
+	if !hasQuery {
+		return out, nil
+	}
+	q, err := expand(query, vars, url.QueryEscape)
+	if err != nil {
+		return "", err
+	}
+	return out + "?" + q, nil
+}
+
 // expand substitutes {{vars}} using esc to make each value safe for its
-// context (path escaping in a URL, JSON escaping inside a body). A missing
-// variable is an error: sending the literal "{{crm_cid}}" would produce a
-// baffling 404 instead of naming the authoring mistake.
+// context. A missing variable is an error: sending the literal "{{crm_cid}}"
+// would produce a baffling 404 instead of naming the authoring mistake.
 func expand(in string, vars map[string]string, esc func(string) string) (string, error) {
 	var missing []string
 	out := varPattern.ReplaceAllStringFunc(in, func(m string) string {

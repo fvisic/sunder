@@ -112,26 +112,30 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("GET /{$}", s.limited(s.handleIndex))
-	mux.HandleFunc("GET /ui/{file}", s.limited(s.handleAsset))
-	mux.HandleFunc("GET /reference", s.limited(s.handleReference))
-	mux.HandleFunc("GET /reference/openapi.yaml", s.limited(s.handleSpec))
-	mux.HandleFunc("GET /ui/vendor/rapidoc-min.js", s.limited(s.handleVendorAsset))
-	mux.HandleFunc("GET /api/scenarios", s.limited(s.handleScenarios))
-	mux.HandleFunc("POST /api/run", s.limited(s.handleRun))
-	mux.HandleFunc("POST /api/reset", s.limited(s.handleReset))
+	mux.HandleFunc("GET /{$}", s.limited("ui", s.handleIndex))
+	mux.HandleFunc("GET /ui/{file}", s.limited("ui", s.handleAsset))
+	mux.HandleFunc("GET /reference", s.limited("ui", s.handleReference))
+	mux.HandleFunc("GET /reference/openapi.yaml", s.limited("ui", s.handleSpec))
+	mux.HandleFunc("GET /ui/vendor/rapidoc-min.js", s.limited("ui", s.handleVendorAsset))
+	mux.HandleFunc("GET /api/scenarios", s.limited("api", s.handleScenarios))
+	mux.HandleFunc("POST /api/run", s.limited("api", s.handleRun))
+	mux.HandleFunc("POST /api/reset", s.limited("api", s.handleReset))
 	// The erasure webhook receiver: Sunder posts here, not a browser, so it
 	// carries no session and is rate-limited under its own bucket.
-	mux.HandleFunc("POST /hooks/erasure", s.limited(s.handleWebhook))
-	mux.HandleFunc("GET /api/inbox", s.limited(s.handleInbox))
+	mux.HandleFunc("POST /hooks/erasure", s.limited("hook", s.handleWebhook))
+	mux.HandleFunc("GET /api/inbox", s.limited("api", s.handleInbox))
 	return mux
 }
 
-// limited applies the per-IP rate limit and the response headers every
-// playground route shares.
-func (s *Server) limited(next http.HandlerFunc) http.HandlerFunc {
+// limited applies a PER-BUCKET, per-IP rate limit plus the response headers
+// every playground route shares. Separate buckets because the webhook
+// receiver and the browser share a source address whenever the delivery
+// loop runs on the same host: one bucket let a burst of erasure deliveries
+// lock a visitor out of the UI, and a busy visitor delay the deliveries
+// they were waiting to see.
+func (s *Server) limited(bucket string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.limiter.Allow("pg:"+s.clientIP(r), s.cfg.RatePerMin) {
+		if !s.limiter.Allow("pg:"+bucket+":"+s.clientIP(r), s.cfg.RatePerMin) {
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
 			return
 		}
@@ -175,7 +179,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) *Session {
 		http.SetCookie(w, &http.Cookie{
 			Name: sessionCookie, Value: sess.ID, Path: "/",
 			HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode,
-			MaxAge: int((2 * time.Hour).Seconds()),
+			MaxAge: int(s.sessions.TTL().Seconds()),
 		})
 	}
 	return sess
