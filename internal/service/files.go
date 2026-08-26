@@ -35,8 +35,9 @@ import (
 	"github.com/fvisic/sunder/internal/storage"
 )
 
-// fileChunkSize keeps memory flat regardless of file size and bounds the
-// blast radius of a corrupted chunk.
+// fileChunkSize is the AEAD chunk granularity and bounds the blast radius
+// of a corrupted chunk. (It does not bound total upload memory - see the
+// note at the encrypt loop below.)
 const fileChunkSize = 4 << 20
 
 // Files is the vault service.
@@ -136,8 +137,13 @@ func (f *Files) UploadWithExpiry(ctx context.Context, client *auth.Client, cid, 
 	fileID := newRandomUUID()
 	storageKey := "f-" + fileID
 
-	// Stream-encrypt into the driver: chunk index in the AAD, running
-	// sha256 over the PLAINTEXT for integrity metadata.
+	// Encrypt chunk by chunk (chunk index in the AAD, running sha256 over the
+	// PLAINTEXT for integrity metadata). NOTE: the sealed bytes are buffered
+	// whole before Put - the S3 driver's single-PUT SigV4 needs the full
+	// body to sign, so true streaming would require multipart upload (a
+	// follow-up). Peak memory per upload is therefore bounded by MaxBytes
+	// (config, default 25 MiB; capped at 256 MiB on the s3 driver), enforced
+	// by the size guard below and the handler's MaxBytesReader.
 	enc := newChunkWriter(dek, fileID)
 	hasher := sha256.New()
 	var size int64

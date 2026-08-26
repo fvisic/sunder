@@ -187,24 +187,61 @@ func TestEraseWithCascadeFaultBranches(t *testing.T) {
 	}
 }
 
-// TestCascadeToleratesAlreadyErasedChild: a child erased in a prior request
-// is reported as cascaded, not a fatal error.
-func TestCascadeToleratesAlreadyErasedChild(t *testing.T) {
+// TestErasingOneEndRemovesTheLink: with S3, erasing the child first deletes
+// the link, so a later cascade-erase of the parent finds no linked child to
+// cascade to (the remnant no longer survives erasure - the point of S3).
+func TestErasingOneEndRemovesTheLink(t *testing.T) {
 	e, l, client, parent, child := linksEnv(t)
 	ctx := context.Background()
 	if err := l.Link(ctx, client, parent, child, "guardian"); err != nil {
 		t.Fatal(err)
 	}
-	// Erase the child first.
+	// Erase the child: this must delete the link that referenced it.
 	if _, _, err := e.gdpr.Erase(ctx, client, child); err != nil {
 		t.Fatal(err)
 	}
-	// Now cascade-erase the parent: the already-erased child must not fail.
+	// Cascade-erase the parent: the link is already gone, so nothing is
+	// listed or cascaded, and it must not error.
 	_, _, linked, err := e.gdpr.EraseWithCascade(ctx, client, parent, []string{"guardian"})
 	if err != nil {
-		t.Fatalf("cascade over an already-erased child must not fail: %v", err)
+		t.Fatalf("cascade over a person whose links died with an erased child must not fail: %v", err)
 	}
-	if len(linked) != 1 || !linked[0].Cascaded {
-		t.Fatalf("child should be reported cascaded: %+v", linked)
+	if len(linked) != 0 {
+		t.Fatalf("no linked child should remain after the child was erased: %+v", linked)
+	}
+}
+
+// TestS3_LinksDieWithThePerson reproduces the S3 finding: after erasing one
+// end of a link, the link must be gone (no leaked pseudonym via the survivor).
+func TestS3_LinksDieWithThePerson(t *testing.T) {
+	e, l, client, parent, child := linksEnv(t)
+	ctx := context.Background()
+	if err := l.Link(ctx, client, parent, child, "guardian"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.gdpr.Erase(ctx, client, parent); err != nil {
+		t.Fatal(err)
+	}
+	// No person_links row references the erased parent any more.
+	var parentPID string
+	// The parent cid still resolves to its (tombstoned) person id via the row.
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT person_id FROM cids WHERE cid=$1`, parent).Scan(&parentPID); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM person_links WHERE parent_person=$1 OR child_person=$1`, parentPID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("erasure must delete links referencing the erased person, %d left", n)
+	}
+	// The surviving child no longer sees the erased parent in its listing.
+	links, err := l.List(ctx, client, child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 0 {
+		t.Fatalf("survivor's link listing must not leak the erased pseudonym: %+v", links)
 	}
 }

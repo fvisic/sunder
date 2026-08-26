@@ -1,0 +1,11 @@
+-- S1 fix: a shared record is a delegated attribute read, so it must be
+-- bound to a purpose and gated by consent like every other read path.
+-- Previously a client with only shares.create could expose fields that
+-- GET /v1/contacts/{cid}/attributes/{name} would deny (no purpose, no
+-- consent check), and a share created after consent withdrawal still
+-- leaked. The purpose is checked at create (the creator must be allowed it
+-- and consent must be granted) and re-checked at every fetch.
+--
+-- Existing rows (pre-migration, short-lived by their TTL) get an empty
+-- purpose and simply age out.
+ALTER TABLE shared_records ADD COLUMN purpose TEXT NOT NULL DEFAULT '';

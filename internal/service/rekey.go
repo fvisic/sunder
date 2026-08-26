@@ -29,6 +29,7 @@ type RekeyStats struct {
 	Skipped              int64 // blobs that failed to decrypt (counted, not fatal)
 	ValueTokensRewrapped int64 // F4 value tokens re-sealed under the newest KEK (M5)
 	RecordKeysRewrapped  int64 // F5 per-person record keys re-wrapped (M5)
+	VersionsRewrapped    int64 // F6 attribute-version blobs re-encrypted (S5)
 }
 
 // Rekey sweeps all non-erased persons in id order.
@@ -86,7 +87,7 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 		}
 	}
 
-	if stats.TokensInserted > 0 || stats.BlobsReenc > 0 || stats.ValueTokensRewrapped > 0 || stats.RecordKeysRewrapped > 0 {
+	if stats.TokensInserted > 0 || stats.BlobsReenc > 0 || stats.ValueTokensRewrapped > 0 || stats.RecordKeysRewrapped > 0 || stats.VersionsRewrapped > 0 {
 		if err := audit.Append(ctx, c.Pool, audit.Entry{
 			ClientID: "system", Action: "keys.rekey",
 			Detail: map[string]any{
@@ -94,6 +95,7 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 				"blobs_reencrypted": stats.BlobsReenc, "blobs_skipped": stats.Skipped,
 				"value_tokens_rewrapped": stats.ValueTokensRewrapped,
 				"record_keys_rewrapped":  stats.RecordKeysRewrapped,
+				"versions_rewrapped":     stats.VersionsRewrapped,
 			},
 		}); err != nil {
 			return stats, err
@@ -328,6 +330,52 @@ func (c *Contacts) rekeyVaults(ctx context.Context, newestKEK string, stats *Rek
 			return err
 		}
 		stats.RecordKeysRewrapped++
+	}
+
+	// F6 version history is the same personal data one generation older
+	// (migration 0027), so a retired KEK must not keep decrypting it either
+	// (S5). Re-encrypt each version blob under the newest KEK. Version blobs
+	// are cids-shaped (bound to their cid), so go through PII, not the raw
+	// engine AAD path used for the wrapped keys above.
+	vrows, err := c.Pool.Query(ctx,
+		`SELECT cid, version_no, blob, key_id, alg FROM cid_blob_versions WHERE key_id <> $1`, newestKEK)
+	if err != nil {
+		return err
+	}
+	type vv struct {
+		cid, keyID, alg string
+		versionNo       int64
+		blob            []byte
+	}
+	var vvs []vv
+	for vrows.Next() {
+		var v vv
+		if err := vrows.Scan(&v.cid, &v.versionNo, &v.blob, &v.keyID, &v.alg); err != nil {
+			vrows.Close()
+			return err
+		}
+		vvs = append(vvs, v)
+	}
+	vrows.Close()
+	if err := vrows.Err(); err != nil {
+		return err
+	}
+	for _, v := range vvs {
+		attrs, err := c.PII.Decrypt(ctx, v.cid, v.blob, v.keyID, v.alg)
+		if err != nil {
+			stats.Skipped++
+			continue
+		}
+		fresh, err := c.PII.Encrypt(ctx, v.cid, newestKEK, attrs)
+		if err != nil {
+			return err
+		}
+		if _, err := c.Pool.Exec(ctx,
+			`UPDATE cid_blob_versions SET blob=$3, key_id=$4, alg=$5 WHERE cid=$1 AND version_no=$2`,
+			v.cid, v.versionNo, fresh, newestKEK, c.PII.Algorithm()); err != nil {
+			return err
+		}
+		stats.VersionsRewrapped++
 	}
 	return nil
 }

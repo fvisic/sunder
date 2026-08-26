@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -125,6 +126,11 @@ func (f *FileKeystore) ensureLocked(_ context.Context, name string) error {
 	if b, err := os.ReadFile(p); err == nil && len(b) == 32 {
 		return nil
 	}
+	// A brand-new key is normal at first bootstrap - but if this keystore was
+	// supposed to already hold it, the volume has been lost and every blob
+	// under the old key is now undecryptable. Never mint silently.
+	slog.Warn("keystore: minting NEW key material (empty keystore); if this key was expected to exist, its volume may be lost and existing data unrecoverable",
+		"name", name, "dir", f.Dir)
 	return f.writeKey(p)
 }
 
@@ -208,6 +214,8 @@ func (v *VaultKeystore) Ensure(ctx context.Context, name string) error {
 	if _, err := randRead(fresh); err != nil {
 		return err
 	}
+	slog.Warn("keystore: minting NEW key material in vault; if this key was expected to exist, the mount may be wrong and existing data unrecoverable",
+		"name", name, "mount", v.Mount)
 	// cas=0 makes the write fail if the secret appeared meanwhile; then the
 	// concurrent winner's key is authoritative.
 	body, _ := json.Marshal(map[string]any{

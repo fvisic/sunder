@@ -35,6 +35,7 @@ type ShareInput struct {
 	CID          string   `json:"cid"`
 	Fields       []string `json:"fields"`
 	PartnerLabel string   `json:"partner_label"`
+	Purpose      string   `json:"purpose"`
 	TTLSeconds   int64    `json:"ttl_seconds"`
 }
 
@@ -42,7 +43,11 @@ type ShareInput struct {
 // read every listed field (the F3 allowlist applies) - a share cannot leak
 // what its creator may not itself see.
 func (s *Shares) Create(ctx context.Context, client *auth.Client, in ShareInput) (string, time.Time, error) {
-	if !client.Can(auth.ActSharesCreate) {
+	// A share discloses attribute values, so minting one is a delegated
+	// read: the creator must be able to read (attributes.read) as well as
+	// mint shares (shares.create). shares.create alone must not become a
+	// way around the read gate.
+	if !client.Can(auth.ActSharesCreate) || !client.Can(auth.ActAttributesRead) {
 		return "", time.Time{}, ErrForbidden
 	}
 	if len(in.Fields) == 0 || len(in.Fields) > maxShareFields {
@@ -54,6 +59,12 @@ func (s *Shares) Create(ctx context.Context, client *auth.Client, in ShareInput)
 	if in.TTLSeconds <= 0 || in.TTLSeconds > 90*24*3600 {
 		return "", time.Time{}, fmt.Errorf("%w: ttl_seconds must be 1..90 days", ErrValidation)
 	}
+	if in.Purpose == "" {
+		return "", time.Time{}, fmt.Errorf("%w: purpose required", ErrValidation)
+	}
+	if !client.CanUse(in.Purpose) {
+		return "", time.Time{}, ErrPurposeNotAllowed
+	}
 	for _, f := range in.Fields {
 		if !client.CanReadAttribute(f) {
 			return "", time.Time{}, ErrForbidden
@@ -61,6 +72,13 @@ func (s *Shares) Create(ctx context.Context, client *auth.Client, in ShareInput)
 	}
 	if _, err := s.Contacts.personForClientCID(ctx, client, in.CID); err != nil {
 		return "", time.Time{}, err
+	}
+	// Consent is checked at create (a share for a withdrawn purpose must not
+	// be mintable) and again at every fetch below.
+	if denied, err := consentDenied(ctx, s.Pool, in.CID, in.Purpose); err != nil {
+		return "", time.Time{}, err
+	} else if denied {
+		return "", time.Time{}, ErrConsentDenied
 	}
 	id := newRandomUUID()
 	var expiresAt time.Time
@@ -70,9 +88,9 @@ func (s *Shares) Create(ctx context.Context, client *auth.Client, in ShareInput)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO shared_records (uuid, cid, scope, fields, partner_label, expires_at, created_by)
-		VALUES ($1,$2,$3,$4,$5, now() + make_interval(secs => $6), $7) RETURNING expires_at`,
-		id, in.CID, client.Scope, in.Fields, in.PartnerLabel, in.TTLSeconds, client.ID).Scan(&expiresAt); err != nil {
+		INSERT INTO shared_records (uuid, cid, scope, fields, partner_label, expires_at, created_by, purpose)
+		VALUES ($1,$2,$3,$4,$5, now() + make_interval(secs => $6), $7, $8) RETURNING expires_at`,
+		id, in.CID, client.Scope, in.Fields, in.PartnerLabel, in.TTLSeconds, client.ID, in.Purpose).Scan(&expiresAt); err != nil {
 		return "", time.Time{}, err
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
@@ -93,13 +111,13 @@ func (s *Shares) Create(ctx context.Context, client *auth.Client, in ShareInput)
 // partner label so a leak is attributable.
 func (s *Shares) Fetch(ctx context.Context, actor, uuid string) (map[string]string, error) {
 	var (
-		cid, scope, partner string
-		fields              []string
+		cid, scope, partner, purpose string
+		fields                       []string
 	)
 	err := s.Pool.QueryRow(ctx, `
-		SELECT cid, scope, fields, partner_label FROM shared_records
+		SELECT cid, scope, fields, partner_label, purpose FROM shared_records
 		 WHERE uuid=$1 AND revoked_at IS NULL AND expires_at > now()`,
-		uuid).Scan(&cid, &scope, &fields, &partner)
+		uuid).Scan(&cid, &scope, &fields, &partner, &purpose)
 	if err == pgx.ErrNoRows {
 		// A miss (absent, expired or revoked) is audited and indistinguishable.
 		_ = audit.ReadEvent(ctx, s.Pool, audit.Entry{
@@ -111,8 +129,15 @@ func (s *Shares) Fetch(ctx context.Context, actor, uuid string) (map[string]stri
 	if err != nil {
 		return nil, err
 	}
-	// Read the person's blob directly (no client - the share IS the
-	// authorization) and project only the listed fields.
+	// Re-check consent at fetch: a withdrawal after the share was minted
+	// must block it immediately, not only once the async revoke runs.
+	if denied, err := consentDenied(ctx, s.Pool, cid, purpose); err != nil {
+		return nil, err
+	} else if denied {
+		return nil, ErrNotFound
+	}
+	// Read the person's blob directly (the share plus its consent check IS
+	// the authorization) and project only the listed fields.
 	attrs, err := s.Contacts.decryptCID(ctx, cid)
 	if err != nil {
 		return nil, err

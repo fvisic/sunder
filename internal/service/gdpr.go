@@ -514,9 +514,11 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 	for _, q := range []string{
 		`DELETE FROM portal_sessions WHERE person_id=$1`,
 		`DELETE FROM portal_tokens WHERE person_id=$1`,
-		`DELETE FROM portal_outbox WHERE id IN (
-			SELECT o.id FROM portal_outbox o WHERE o.status IN ('PENDING','SENDING')
-			  AND EXISTS (SELECT 1 FROM portal_tokens t WHERE t.person_id=$1))`,
+		`DELETE FROM portal_outbox WHERE person_id=$1`,
+		// F7: a link referencing the erased person (as parent or child)
+		// would otherwise keep leaking their pseudonym through the surviving
+		// side's link listing, and could not be removed via the API.
+		`DELETE FROM person_links WHERE parent_person=$1 OR child_person=$1`,
 	} {
 		if _, err := tx.Exec(ctx, q, personID); err != nil {
 			return 0, 0, err

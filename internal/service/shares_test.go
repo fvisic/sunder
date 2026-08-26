@@ -14,12 +14,15 @@ func sharesEnv(t *testing.T) (*faultEnv, *service.Shares, *auth.Client, string) 
 	e := newFaultEnv(t)
 	sh := &service.Shares{Pool: e.admin.Pool, Contacts: e.svc}
 	client := &auth.Client{ID: "crm", Scope: "crm",
-		AllowedActions:  []string{auth.ActSharesCreate, auth.ActContactsRegister, auth.ActConsentManage, auth.ActDSRErase},
+		AllowedActions:  []string{auth.ActSharesCreate, auth.ActAttributesRead, auth.ActContactsRegister, auth.ActConsentManage, auth.ActDSRErase},
 		AllowedPurposes: []string{"support"}}
 	ctx := context.Background()
 	cid, err := e.svc.Register(ctx, client, service.RegisterInput{
 		Email: "ana@example.com", Attributes: map[string]string{"iban": "HR12", "tier": "gold"}})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.gdpr.SetConsent(ctx, client, cid, "support", true); err != nil {
 		t.Fatal(err)
 	}
 	return e, sh, client, cid
@@ -29,7 +32,7 @@ func TestShareLifecycle(t *testing.T) {
 	_, sh, client, cid := sharesEnv(t)
 	ctx := context.Background()
 	uuid, exp, err := sh.Create(ctx, client, service.ShareInput{
-		CID: cid, Fields: []string{"iban"}, PartnerLabel: "acme-bank", TTLSeconds: 3600})
+		CID: cid, Fields: []string{"iban"}, PartnerLabel: "acme-bank", Purpose: "support", TTLSeconds: 3600})
 	if err != nil || uuid == "" || exp.IsZero() {
 		t.Fatalf("create: %q %v", uuid, err)
 	}
@@ -55,12 +58,12 @@ func TestShareGuards(t *testing.T) {
 	ctx := context.Background()
 	// Permission.
 	noPerm := &auth.Client{ID: "np", Scope: "crm"}
-	if _, _, err := sh.Create(ctx, noPerm, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", TTLSeconds: 60}); !errors.Is(err, service.ErrForbidden) {
+	if _, _, err := sh.Create(ctx, noPerm, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", Purpose: "support", TTLSeconds: 60}); !errors.Is(err, service.ErrForbidden) {
 		t.Fatalf("create without action: %v", err)
 	}
 	// No fields, too many fields, no label, bad TTL.
 	bad := []service.ShareInput{
-		{CID: cid, Fields: nil, PartnerLabel: "x", TTLSeconds: 60},
+		{CID: cid, Fields: nil, PartnerLabel: "x", Purpose: "support", TTLSeconds: 60},
 		{CID: cid, Fields: []string{"iban"}, PartnerLabel: "", TTLSeconds: 60},
 		{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", TTLSeconds: 0},
 		{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", TTLSeconds: 100 * 24 * 3600},
@@ -73,11 +76,11 @@ func TestShareGuards(t *testing.T) {
 	// A narrowed client cannot share a field it may not read (F3 allowlist).
 	narrowed := &auth.Client{ID: "n", Scope: "crm",
 		AllowedActions: []string{auth.ActSharesCreate}, AllowedAttributes: []string{"tier"}}
-	if _, _, err := sh.Create(ctx, narrowed, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", TTLSeconds: 60}); !errors.Is(err, service.ErrForbidden) {
+	if _, _, err := sh.Create(ctx, narrowed, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", Purpose: "support", TTLSeconds: 60}); !errors.Is(err, service.ErrForbidden) {
 		t.Fatalf("sharing a forbidden field must be refused: %v", err)
 	}
 	// Unknown cid.
-	if _, _, err := sh.Create(ctx, client, service.ShareInput{CID: "CID-NO", Fields: []string{"iban"}, PartnerLabel: "x", TTLSeconds: 60}); !errors.Is(err, service.ErrNotFound) {
+	if _, _, err := sh.Create(ctx, client, service.ShareInput{CID: "CID-NO", Fields: []string{"iban"}, PartnerLabel: "x", Purpose: "support", TTLSeconds: 60}); !errors.Is(err, service.ErrNotFound) {
 		t.Fatalf("unknown cid: %v", err)
 	}
 	// Fetch of an unknown uuid is a miss.
@@ -93,7 +96,7 @@ func TestShareGuards(t *testing.T) {
 func TestShareExpiryIsAMiss(t *testing.T) {
 	e, sh, client, cid := sharesEnv(t)
 	ctx := context.Background()
-	uuid, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", TTLSeconds: 60})
+	uuid, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", Purpose: "support", TTLSeconds: 60})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +121,7 @@ func TestShareRevokedByErasureAndConsent(t *testing.T) {
 	ctx := context.Background()
 
 	// Consent withdrawal revokes standing shares.
-	u1, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "p1", TTLSeconds: 3600})
+	u1, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "p1", Purpose: "support", TTLSeconds: 3600})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +137,7 @@ func TestShareRevokedByErasureAndConsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u2, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid2, Fields: []string{"iban"}, PartnerLabel: "p2", TTLSeconds: 3600})
+	u2, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid2, Fields: []string{"iban"}, PartnerLabel: "p2", Purpose: "support", TTLSeconds: 3600})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,10 +152,10 @@ func TestShareRevokedByErasureAndConsent(t *testing.T) {
 func TestShareFailsClosed(t *testing.T) {
 	e := newFaultEnv(t, "shared_records")
 	sh := &service.Shares{Pool: e.svc.Pool, Contacts: e.svc}
-	client := &auth.Client{ID: "crm", Scope: "crm", AllowedActions: []string{auth.ActSharesCreate}}
+	client := &auth.Client{ID: "crm", Scope: "crm", AllowedActions: []string{auth.ActSharesCreate, auth.ActAttributesRead}, AllowedPurposes: []string{"support"}}
 	ctx := context.Background()
 	cid := e.register(t)
-	if _, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", TTLSeconds: 60}); err == nil {
+	if _, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", Purpose: "support", TTLSeconds: 60}); err == nil {
 		t.Fatal("create must fail when shared_records is denied")
 	}
 	if _, err := sh.Fetch(ctx, "p", "00000000-0000-4000-8000-000000000000"); err == nil {
@@ -166,7 +169,7 @@ func TestShareFailsClosed(t *testing.T) {
 func TestShareFetchDecryptFault(t *testing.T) {
 	e, sh, client, cid := sharesEnv(t)
 	ctx := context.Background()
-	uuid, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", TTLSeconds: 3600})
+	uuid, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "x", Purpose: "support", TTLSeconds: 3600})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +189,7 @@ func TestShareFieldCountCap(t *testing.T) {
 	for i := range many {
 		many[i] = "f"
 	}
-	if _, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: many, PartnerLabel: "x", TTLSeconds: 60}); !errors.Is(err, service.ErrValidation) {
+	if _, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: many, PartnerLabel: "x", Purpose: "support", TTLSeconds: 60}); !errors.Is(err, service.ErrValidation) {
 		t.Fatalf("over-cap fields must be rejected: %v", err)
 	}
 	// A long partner label is rejected too.
@@ -208,7 +211,7 @@ func TestShareEmptyBlobAndAuditFaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, _, err := sh.Create(ctx, client, service.ShareInput{CID: bare, Fields: []string{"iban"}, PartnerLabel: "x", TTLSeconds: 3600})
+	u, _, err := sh.Create(ctx, client, service.ShareInput{CID: bare, Fields: []string{"iban"}, PartnerLabel: "x", Purpose: "support", TTLSeconds: 3600})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,8 +234,66 @@ func TestShareEmptyBlobAndAuditFaults(t *testing.T) {
 		t.Fatal("fetch must fail closed when the read cannot be audited")
 	}
 	// Create must also fail closed when the chained audit cannot be written.
-	client2 := &auth.Client{ID: "crm", Scope: "crm", AllowedActions: []string{auth.ActSharesCreate}}
-	if _, _, err := sh2.Create(ctx, client2, service.ShareInput{CID: cid, Fields: []string{"x"}, PartnerLabel: "p", TTLSeconds: 60}); err == nil {
+	client2 := &auth.Client{ID: "crm", Scope: "crm", AllowedActions: []string{auth.ActSharesCreate, auth.ActAttributesRead}, AllowedPurposes: []string{"support"}}
+	if _, _, err := sh2.Create(ctx, client2, service.ShareInput{CID: cid, Fields: []string{"x"}, PartnerLabel: "p", Purpose: "support", TTLSeconds: 60}); err == nil {
 		t.Fatal("create must fail closed when the audit is denied")
+	}
+}
+
+// TestS1_ShareIsAConsentedPurposedRead reproduces the S1 finding: a share
+// must not bypass attributes.read, purpose, or consent.
+func TestS1_ShareIsAConsentedPurposedRead(t *testing.T) {
+	e, sh, client, cid := sharesEnv(t)
+	ctx := context.Background()
+
+	// (a) shares.create WITHOUT attributes.read cannot mint a share.
+	noRead := &auth.Client{ID: "nr", Scope: "crm",
+		AllowedActions: []string{auth.ActSharesCreate}, AllowedPurposes: []string{"support"}}
+	if _, _, err := sh.Create(ctx, noRead, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "p", Purpose: "support", TTLSeconds: 60}); !errors.Is(err, service.ErrForbidden) {
+		t.Fatalf("shares.create without attributes.read must be forbidden: %v", err)
+	}
+	// (b) a purpose is required.
+	if _, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "p", TTLSeconds: 60}); !errors.Is(err, service.ErrValidation) {
+		t.Fatalf("missing purpose must be a validation error: %v", err)
+	}
+	// (c) a purpose the client may not use is refused.
+	if _, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "p", Purpose: "marketing", TTLSeconds: 60}); !errors.Is(err, service.ErrPurposeNotAllowed) {
+		t.Fatalf("disallowed purpose must be refused: %v", err)
+	}
+	// (d) after consent withdrawal, a NEW share cannot be minted.
+	if err := e.gdpr.SetConsent(ctx, client, cid, "support", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "p", Purpose: "support", TTLSeconds: 60}); !errors.Is(err, service.ErrConsentDenied) {
+		t.Fatalf("a share for a withdrawn purpose must not be mintable: %v", err)
+	}
+}
+
+// TestS1_FetchRechecksConsent: a share minted under consent stops answering
+// the instant consent is withdrawn, WITHOUT waiting for the async revoke.
+func TestS1_FetchRechecksConsent(t *testing.T) {
+	e, sh, client, cid := sharesEnv(t)
+	ctx := context.Background()
+	uuid, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "p", Purpose: "support", TTLSeconds: 3600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sh.Fetch(ctx, "partner", uuid); err != nil {
+		t.Fatalf("fetch under consent: %v", err)
+	}
+	// Withdraw consent directly on the consents table so the standing-share
+	// auto-revoke does NOT run - the fetch must still miss on its own re-check.
+	if _, err := e.admin.Pool.Exec(ctx, `UPDATE consents SET granted=false WHERE cid=$1 AND purpose='support'`, cid); err != nil {
+		t.Fatal(err)
+	}
+	var revoked bool
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT revoked_at IS NOT NULL FROM shared_records WHERE uuid=$1`, uuid).Scan(&revoked); err != nil {
+		t.Fatal(err)
+	}
+	if revoked {
+		t.Fatal("precondition: share should NOT be auto-revoked in this test")
+	}
+	if _, err := sh.Fetch(ctx, "partner", uuid); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("fetch must re-check consent and miss after withdrawal: %v", err)
 	}
 }

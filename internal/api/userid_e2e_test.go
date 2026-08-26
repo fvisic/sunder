@@ -1122,7 +1122,7 @@ func TestSharesOverHTTP(t *testing.T) {
 	st := testutil.NewDB(t)
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
-		AllowedActions:  []string{auth.ActContactsRegister, auth.ActSharesCreate},
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActSharesCreate, auth.ActAttributesRead, auth.ActConsentManage},
 		AllowedPurposes: []string{"support"}, RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
@@ -1141,8 +1141,9 @@ func TestSharesOverHTTP(t *testing.T) {
 	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{
 		"email": "a@example.com", "attributes": map[string]string{"iban": "HR12"}})
 	cid := out["cid"]
+	e.do(t, cred, "POST", "/v1/consent", map[string]any{"cid": cid, "purpose": "support", "granted": true})
 	rec, o := e.do(t, cred, "POST", "/v1/shares", map[string]any{
-		"cid": cid, "fields": []string{"iban"}, "partner_label": "acme", "ttl_seconds": 3600})
+		"cid": cid, "fields": []string{"iban"}, "partner_label": "acme", "purpose": "support", "ttl_seconds": 3600})
 	if rec.Code != 201 || o["uuid"] == "" {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
@@ -1178,7 +1179,7 @@ func TestSharesPublicMode(t *testing.T) {
 	st := testutil.NewDB(t)
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
-		AllowedActions:  []string{auth.ActContactsRegister, auth.ActSharesCreate},
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActSharesCreate, auth.ActAttributesRead, auth.ActConsentManage},
 		AllowedPurposes: []string{"support"}, RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
@@ -1190,8 +1191,9 @@ func TestSharesPublicMode(t *testing.T) {
 	e := &e2eEnv{srv: srv, credCRM: cred}
 	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{
 		"email": "a@example.com", "attributes": map[string]string{"iban": "HR12"}})
+	e.do(t, cred, "POST", "/v1/consent", map[string]any{"cid": out["cid"], "purpose": "support", "granted": true})
 	rec, o := e.do(t, cred, "POST", "/v1/shares", map[string]any{
-		"cid": out["cid"], "fields": []string{"iban"}, "partner_label": "acme", "ttl_seconds": 3600})
+		"cid": out["cid"], "fields": []string{"iban"}, "partner_label": "acme", "purpose": "support", "ttl_seconds": 3600})
 	if rec.Code != 201 {
 		t.Fatalf("create: %d", rec.Code)
 	}
@@ -1216,7 +1218,7 @@ func TestShareHandlerErrorBranches(t *testing.T) {
 	st := testutil.NewDB(t)
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
-		AllowedActions:  []string{auth.ActContactsRegister, auth.ActSharesCreate},
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActSharesCreate, auth.ActAttributesRead, auth.ActConsentManage},
 		AllowedPurposes: []string{"support"}, RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
