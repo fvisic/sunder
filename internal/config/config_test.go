@@ -277,6 +277,14 @@ func TestVersioningConfig(t *testing.T) {
 	if _, err := FromEnv(); err == nil {
 		t.Fatal("versions keep over 1000 must be rejected")
 	}
+	t.Setenv("SUNDER_VERSIONS_KEEP", "-1")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("negative versions keep must be rejected")
+	}
+	t.Setenv("SUNDER_VERSIONS_KEEP", "notanumber")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("non-numeric versions keep must be rejected")
+	}
 }
 
 func TestFileVaultConfigValidation(t *testing.T) {
@@ -309,6 +317,10 @@ func TestFileVaultConfigValidation(t *testing.T) {
 	t.Setenv("SUNDER_FILES_MAX_MB", "0")
 	if _, err := FromEnv(); err == nil {
 		t.Fatal("max 0 must be rejected")
+	}
+	t.Setenv("SUNDER_FILES_MAX_MB", "nope")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("non-numeric max must be rejected")
 	}
 	// Bad versions TTL.
 	t.Setenv("SUNDER_FILES_MAX_MB", "25")
