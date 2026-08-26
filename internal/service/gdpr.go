@@ -444,6 +444,16 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Lock ORDER matters: every tombstone-guarded writer locks cids before
+	// persons (mergeIntoBlob's FOR UPDATE OF c, p) or persons only (tokens,
+	// files). Erasure must take the same c -> p order, or a writer holding a
+	// cids row while erasure holds the persons row is an ABBA deadlock -
+	// fail-safe (the writer is always the victim), but a legitimate request
+	// then stalls deadlock_timeout and dies with a 500.
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM cids WHERE person_id=$1 FOR UPDATE`, personID); err != nil {
+		return 0, 0, err
+	}
 	// Idempotency guard: a tombstone cannot be erased again (a second call
 	// would re-queue webhook deliveries for an already-forgotten person).
 	var alreadyErased bool
@@ -502,6 +512,21 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 	// it dies with the person.
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM cid_blob_versions WHERE cid IN (SELECT cid FROM cids WHERE person_id=$1)`, personID); err != nil {
+		return 0, 0, err
+	}
+	// F4: value tokens bound to one of this person's CIDs (S4). An
+	// unattributed token (cid NULL) belongs to no single subject and is left
+	// to its own expiry.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM value_tokens WHERE cid IN (SELECT cid FROM cids WHERE person_id=$1)`, personID); err != nil {
+		return 0, 0, err
+	}
+	// Consent STATE dies with the person: there is nothing left to gate, and
+	// the accountability record ("what was granted when") is the immutable
+	// consent.set trail in the audit chain, not this mutable table. Keeping
+	// the rows would only tie purposes to the tombstoned pseudonym.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM consents WHERE cid IN (SELECT cid FROM cids WHERE person_id=$1)`, personID); err != nil {
 		return 0, 0, err
 	}
 	// F8: DELETE the person's shares on erasure - not merely revoke - so the
@@ -773,6 +798,57 @@ func RunRetention(ctx context.Context, pool *pgxpool.Pool) (wiped int64, otiPrun
 		return 0, 0, err
 	}
 	wiped = int64(len(wipedCIDs))
+	if wiped > 0 {
+		// The retention sweep NULLs the blob but the contact was left fully
+		// resolvable: blob history (F6) still returned old values, and the
+		// per-person search tokens still resolved through POST /v1/lookup and
+		// handed out the CID (S6). Prune both here, inside the same tx as the
+		// wipe.
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM cid_blob_versions WHERE cid = ANY($1)`, wipedCIDs); err != nil {
+			return 0, 0, err
+		}
+		// Value tokens bound to a wiped CID are that scope's data about the
+		// person and age out with the contact (P3); unattributed tokens keep
+		// their own expiry.
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM value_tokens WHERE cid = ANY($1)`, wipedCIDs); err != nil {
+			return 0, 0, err
+		}
+		// person_tokens are keyed by person, not scope, and lookup is global,
+		// so a person's search tokens may only be dropped once NOTHING live
+		// remains anywhere: no attribute blob, no un-GC'd file, no standing
+		// share, no link. A blob-less CID minted by an OTI handoff can carry
+		// files and shares - a scope retaining those must keep resolving the
+		// person (F6). Only when the person's last datum is gone does the
+		// searchable identifier itself become the last datum, and then it
+		// goes too. All predicates read the just-wiped state (same tx).
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM person_tokens pt
+			 WHERE pt.person_id IN (SELECT person_id FROM cids WHERE cid = ANY($1))
+			   AND NOT EXISTS (
+				SELECT 1 FROM cids c2
+				 WHERE c2.person_id = pt.person_id AND c2.pii_encrypted IS NOT NULL)
+			   AND NOT EXISTS (
+				SELECT 1 FROM files f JOIN cids c3 ON c3.cid = f.cid
+				 WHERE c3.person_id = pt.person_id AND f.gc_at IS NULL
+				   AND (f.expires_at IS NULL OR f.expires_at > now()))
+			   AND NOT EXISTS (
+				SELECT 1 FROM shared_records sr JOIN cids c4 ON c4.cid = sr.cid
+				 WHERE c4.person_id = pt.person_id AND sr.revoked_at IS NULL
+				   AND sr.expires_at > now())
+			   AND NOT EXISTS (
+				SELECT 1 FROM person_links pl
+				 WHERE pl.parent_person = pt.person_id OR pl.child_person = pt.person_id)
+			   AND NOT EXISTS (
+				SELECT 1 FROM value_tokens vt JOIN cids c5 ON c5.cid = vt.cid
+				 WHERE c5.person_id = pt.person_id
+				   AND (vt.expires_final IS NULL OR vt.expires_final > now())
+				   AND (vt.sliding_seconds IS NULL OR vt.last_used + make_interval(secs => vt.sliding_seconds) > now()))`,
+			wipedCIDs); err != nil {
+			return 0, 0, err
+		}
+	}
 
 	tag, err := tx.Exec(ctx, `DELETE FROM oti WHERE expires_at < now() - interval '30 days'`)
 	if err != nil {

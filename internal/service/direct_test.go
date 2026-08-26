@@ -6,6 +6,7 @@ package service_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/service"
+	"github.com/fvisic/sunder/internal/storage"
 )
 
 func TestIssueScopedCidGuardsAndSuccess(t *testing.T) {
@@ -488,5 +490,179 @@ func TestShareIntoScopeShortCircuits(t *testing.T) {
 	}
 	if len(out2.Shared) != 0 {
 		t.Fatalf("an empty issuer blob must share nothing, shared %v", out2.Shared)
+	}
+}
+
+// TestS6_RetentionKillsLookupAndHistory: the retention sweep used to NULL
+// only the blob - the contact still resolved through lookup (person_tokens
+// untouched) and F6 history still returned values (S6). The sweep must prune
+// both, but search tokens are global per person, so they may only go once the
+// person's LAST live blob is gone.
+func TestS6_RetentionKillsLookupAndHistory(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	crm := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActLookup}}
+	erp := &auth.Client{ID: "erp", Scope: "erp",
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActLookup}}
+	cidCRM, err := e.svc.Register(ctx, crm, service.RegisterInput{
+		Email: "s6@example.com", Attributes: map[string]string{"iban": "HR12"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same email in a second scope: same person, second cid.
+	if _, err := e.svc.Register(ctx, erp, service.RegisterInput{Email: "s6@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	// A history row for the crm blob (as if versioning snapshotted it).
+	if _, err := e.admin.Pool.Exec(ctx, `
+		INSERT INTO cid_blob_versions (cid, version_no, blob, key_id, alg, written_by)
+		VALUES ($1, 1, '\x00'::bytea, 'v1', 'aes256gcm', 'test')`, cidCRM); err != nil {
+		t.Fatal(err)
+	}
+
+	// Retention hits ONLY crm; both cids are old.
+	if _, err := e.admin.Pool.Exec(ctx,
+		`INSERT INTO retention_policies (scope, contacts_ttl_days) VALUES ('crm', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE cids SET updated_at = now() - interval '10 days'`); err != nil {
+		t.Fatal(err)
+	}
+	wiped, _, err := service.RunRetention(ctx, e.admin.Pool)
+	if err != nil || wiped != 1 {
+		t.Fatalf("first sweep must wipe the crm blob: %d %v", wiped, err)
+	}
+	// History of the wiped blob is gone with it.
+	var hist int64
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM cid_blob_versions WHERE cid=$1`, cidCRM).Scan(&hist); err != nil {
+		t.Fatal(err)
+	}
+	if hist != 0 {
+		t.Fatalf("retention must prune the wiped blob's history, %d rows left", hist)
+	}
+	// The person still has a live blob in erp - search tokens MUST survive,
+	// or a lookup in the scope that retains the data would break.
+	if cid, err := e.svc.Lookup(ctx, erp, service.LookupInput{Email: "s6@example.com"}); err != nil || cid == "" {
+		t.Fatalf("erp lookup must still resolve while erp retains data: %q %v", cid, err)
+	}
+
+	// Now erp ages out too: the LAST live blob goes, and with it the tokens.
+	if _, err := e.admin.Pool.Exec(ctx,
+		`INSERT INTO retention_policies (scope, contacts_ttl_days) VALUES ('erp', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE cids SET updated_at = now() - interval '10 days'`); err != nil {
+		t.Fatal(err)
+	}
+	wiped, _, err = service.RunRetention(ctx, e.admin.Pool)
+	if err != nil || wiped != 1 {
+		t.Fatalf("second sweep must wipe the erp blob: %d %v", wiped, err)
+	}
+	var toks int64
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM person_tokens pt WHERE pt.person_id IN
+		   (SELECT person_id FROM cids WHERE cid=$1)`, cidCRM).Scan(&toks); err != nil {
+		t.Fatal(err)
+	}
+	if toks != 0 {
+		t.Fatalf("after the last live blob is wiped the search tokens must go, %d left", toks)
+	}
+	if _, err := e.svc.Lookup(ctx, crm, service.LookupInput{Email: "s6@example.com"}); err == nil {
+		t.Fatal("a fully retention-wiped contact must no longer resolve through lookup")
+	}
+}
+
+// TestS6_BlobLessCIDWithLiveDataKeepsLookup (review F6): a CID minted by an
+// OTI handoff carries no attribute blob but can hold live files and shares -
+// a retention wipe elsewhere must NOT delete the person's search tokens
+// while such data lives. Only a person whose last datum is gone (a bare CID
+// holds nothing) loses the searchable identifier too. Also covers P3: a
+// value token bound to the wiped CID ages out with the contact.
+func TestS6_BlobLessCIDWithLiveDataKeepsLookup(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	crm := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActLookup, auth.ActTokensCreate, auth.ActTokensRead, auth.ActFilesWrite},
+		AllowedPurposes: []string{"support"}}
+	cidCRM, err := e.svc.Register(ctx, crm, service.RegisterInput{
+		Email: "f6@example.com", Attributes: map[string]string{"iban": "HR12"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pid string
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT person_id FROM cids WHERE cid=$1`, cidCRM).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	// A blob-less CID in erp (what OTI verification mints), holding a live file.
+	if _, err := e.admin.Pool.Exec(ctx,
+		`INSERT INTO cids (cid, person_id, scope) VALUES ('CID-F6BARE', $1, 'erp')`, pid); err != nil {
+		t.Fatal(err)
+	}
+	erp := &auth.Client{ID: "erp", Scope: "erp",
+		AllowedActions: []string{auth.ActFilesWrite, auth.ActLookup}}
+	drv, err := storage.Open(storage.Config{Kind: "local", Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := &service.Files{Pool: e.admin.Pool, Eng: e.svc.PII.Engine(), Ring: e.svc.Ring,
+		Store: drv, Contacts: e.svc, MaxBytes: 1 << 20}
+	if _, err := files.Upload(ctx, erp, "CID-F6BARE", "doc.txt", "text/plain", strings.NewReader("x")); err != nil {
+		t.Fatal(err)
+	}
+	// P3 seed: a value token bound to the crm cid.
+	vt := &service.ValueTokens{Pool: e.admin.Pool, Eng: e.svc.PII.Engine(), Ring: e.svc.Ring, Tok: e.svc.Tok}
+	boundTok, err := vt.Tokenize(ctx, crm, service.TokenizeInput{Value: "HR-F6", CID: cidCRM})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// crm ages out; erp holds only the bare CID + the live file.
+	if _, err := e.admin.Pool.Exec(ctx,
+		`INSERT INTO retention_policies (scope, contacts_ttl_days) VALUES ('crm', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE cids SET updated_at = now() - interval '10 days'`); err != nil {
+		t.Fatal(err)
+	}
+	wiped, _, err := service.RunRetention(ctx, e.admin.Pool)
+	if err != nil || wiped != 1 {
+		t.Fatalf("sweep must wipe the crm blob: %d %v", wiped, err)
+	}
+	// The live file keeps the person findable in erp.
+	if cid, err := e.svc.Lookup(ctx, erp, service.LookupInput{Email: "f6@example.com"}); err != nil || cid != "CID-F6BARE" {
+		t.Fatalf("a scope holding live files must keep resolving the person: %q %v", cid, err)
+	}
+	// P3: the bound value token aged out with the crm contact.
+	if _, err := vt.Detokenize(ctx, crm, boundTok); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("a value token bound to a wiped cid must age out with it: %v", err)
+	}
+
+	// Contrast: a person whose only datum is the blob - after the wipe the
+	// bare identifier is the last datum and goes too.
+	cid2, err := e.svc.Register(ctx, crm, service.RegisterInput{Email: "f6-bare@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = cid2
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE cids SET updated_at = now() - interval '10 days'`); err != nil {
+		t.Fatal(err)
+	}
+	if wiped, _, err = service.RunRetention(ctx, e.admin.Pool); err != nil || wiped != 1 {
+		t.Fatalf("second sweep must wipe the new crm blob: %d %v", wiped, err)
+	}
+	if _, err := e.svc.Lookup(ctx, crm, service.LookupInput{Email: "f6-bare@example.com"}); err == nil {
+		t.Fatal("a person with no data left must not keep resolving")
+	}
+	// And the first person STILL resolves (their file lives on).
+	if _, err := e.svc.Lookup(ctx, erp, service.LookupInput{Email: "f6@example.com"}); err != nil {
+		t.Fatalf("the person with a live file must still resolve: %v", err)
 	}
 }

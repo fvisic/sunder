@@ -553,13 +553,19 @@ func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid, writtenBy 
 	// The tombstone predicate is in the SAME locking read: a
 	// check done earlier on the pool could be overtaken by an erasure that
 	// commits before this transaction writes, landing a fresh live blob on
-	// a forgotten person. FOR UPDATE OF c locks the cids row only - persons
-	// is joined for the predicate, not for update.
+	// a forgotten person. The lock must name BOTH relations: under READ
+	// COMMITTED, EvalPlanQual re-fetches only the tuples of FOR UPDATE
+	// targets, so "FOR UPDATE OF c" alone re-evaluates p.erased_at against
+	// a STALE persons tuple when this read blocks on the erasure's own cids
+	// update - exactly the race this predicate exists to close. The c lock
+	// is ALSO needed here (unlike tokens/files) to serialize concurrent
+	// merges on the same blob; the c -> p acquisition order matches
+	// erasePerson's, so the pair cannot ABBA-deadlock.
 	err := tx.QueryRow(ctx,
 		`SELECT c.pii_encrypted, COALESCE(c.pii_key_id,'v1'), COALESCE(c.pii_alg,'aes256gcm')
 		 FROM cids c JOIN persons p ON p.id = c.person_id
 		 WHERE c.cid=$1 AND p.erased_at IS NULL
-		 FOR UPDATE OF c`,
+		 FOR UPDATE OF c, p`,
 		cid).Scan(&oldBlob, &oldKeyID, &oldAlg)
 	if err == pgx.ErrNoRows {
 		// Erased (or vanished) between the caller's check and this write.

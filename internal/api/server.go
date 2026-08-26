@@ -144,7 +144,8 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 				return nil, fmt.Errorf("file storage: %w", err)
 			}
 			s.Files = &service.Files{Pool: st.Pool, Eng: eng, Ring: ring, Store: drv,
-				Contacts: s.Contacts, MaxBytes: cfg.FilesMaxMB << 20}
+				Contacts: s.Contacts, MaxBytes: cfg.FilesMaxMB << 20,
+				MaxConcurrentUploads: cfg.FilesMaxConcurrentUploads}
 		}
 
 		if cfg.RedisAddr != "" {
@@ -424,6 +425,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	if s.Portal != nil && s.Cfg.PortalListen == "" && s.Cfg.MTLSCA != "" {
 		s.Log.Warn("the portal is mounted on the mTLS-protected API listener: browsers cannot present a client certificate, so citizens will be refused - set SUNDER_PORTAL_LISTEN")
+	}
+	if s.Cfg.SharesPublic {
+		s.Log.Warn("SUNDER_SHARES_PUBLIC is on: GET /v1/shares/{uuid} answers WITHOUT any client credential (per-IP rate-limited, audited as \"public\") - every holder of a share UUID can read its fields until expiry or revocation")
 	}
 	s.Log.Info("listening", "addr", s.Cfg.Listen, "tls", s.Cfg.TLSCert != "",
 		"mtls", s.Cfg.MTLSCA != "", "portal", s.Portal != nil)

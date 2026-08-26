@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -121,14 +122,53 @@ type bucketRow struct {
 	LastSeen  string `json:"last_seen"`
 }
 
+// sortBuckets puts rows in the canonical digest order using Go's byte-wise
+// string comparison, NOT a SQL ORDER BY (H12): the digest must not depend on
+// the database's text collation, or a pg_dump/restore into a differently
+// collated cluster - or a glibc collation upgrade - would reorder the rows
+// and make every previously sealed hour report tampering. The primary key
+// (client_id, user_id, cid, action) is unique within an hour, so this order
+// is total.
+func sortBuckets(rows []bucketRow) {
+	sort.Slice(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		if a.ClientID != b.ClientID {
+			return a.ClientID < b.ClientID
+		}
+		if a.UserID != b.UserID {
+			return a.UserID < b.UserID
+		}
+		if a.CID != b.CID {
+			return a.CID < b.CID
+		}
+		return a.Action < b.Action
+	})
+}
+
 // hourDigest is the deterministic digest over one hour's buckets: a sha256
-// over the canonical JSON array of rows in primary-key order. Any edit to
-// any sealed bucket changes it, which is what the chained hourly row
+// over the canonical JSON array of rows in primary-key order. Callers must
+// sortBuckets first (the order is collation-independent, see above). Any edit
+// to any sealed bucket changes it, which is what the chained hourly row
 // proves against.
 func hourDigest(rows []bucketRow) string {
 	b, _ := json.Marshal(rows)
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// digestMatches accepts an hour if its recorded digest matches the buckets in
+// EITHER order: the canonical Go byte-wise order (every hour sealed since the
+// H12 fix), or the order the rows arrived from the verify query's ORDER BY -
+// the database's collation order, which is exactly how hours sealed BEFORE
+// the fix were digested. Without the fallback, upgrading on a database whose
+// collation disagrees with byte order (most en_* locales around '_', '-',
+// '.') would flip every previously sealed hour to "tampered". rows is
+// mutated (sorted); the legacy attempt uses a pre-sort copy.
+func digestMatches(want string, rows []bucketRow) bool {
+	legacy := make([]bucketRow, len(rows))
+	copy(legacy, rows)
+	sortBuckets(rows)
+	return hourDigest(rows) == want || hourDigest(legacy) == want
 }
 
 // CloseReadBuckets seals every finished hour: for each hour strictly older
@@ -174,11 +214,20 @@ func closeOneHour(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
 		return false, err
 	}
 
+	// Seal and digest in ONE statement (H11): the old code SELECTed the
+	// buckets, wrote the digest, then UPDATEd sealed_at in a separate
+	// statement. A ReadEvent upsert committing between the SELECT and the
+	// UPDATE - incrementing a count or inserting a new bucket for this hour -
+	// was caught by the UPDATE (sealed_at IS NULL) but NOT by the digest,
+	// leaving a sealed row the chained digest did not cover, so
+	// VerifyReadBuckets reported tampering forever. UPDATE ... RETURNING makes
+	// the sealed set and the digested set the same set: any ReadEvent that
+	// commits after this statement sees sealed_at IS NOT NULL and its
+	// conditional upsert falls back to a chained row instead.
 	rows, err := tx.Query(ctx, `
-		SELECT client_id, user_id, cid, action, count, first_seen, last_seen
-		  FROM audit_read_buckets
+		UPDATE audit_read_buckets SET sealed_at = now()
 		 WHERE sealed_at IS NULL AND bucket_start = $1
-		 ORDER BY client_id, user_id, cid, action`, hour)
+		 RETURNING client_id, user_id, cid, action, count, first_seen, last_seen`, hour)
 	if err != nil {
 		return false, err
 	}
@@ -205,6 +254,9 @@ func closeOneHour(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
 	if len(buckets) == 0 {
 		return false, nil
 	}
+	// Canonical order is computed in Go, never by the SQL RETURNING order
+	// (which is unspecified) nor a collation-sensitive ORDER BY (H12).
+	sortBuckets(buckets)
 
 	if err := AppendTx(ctx, tx, Entry{
 		ClientID: "_audit", Action: "audit.reads_hourly",
@@ -215,11 +267,6 @@ func closeOneHour(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
 			"digest":  hourDigest(buckets),
 		},
 	}); err != nil {
-		return false, err
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE audit_read_buckets SET sealed_at = now()
-		 WHERE sealed_at IS NULL AND bucket_start = $1`, hour); err != nil {
 		return false, err
 	}
 	return true, tx.Commit(ctx)
@@ -264,6 +311,16 @@ func VerifyReadBuckets(ctx context.Context, pool *pgxpool.Pool) (badHour string,
 	}
 
 	// Recompute per sealed hour from the buckets themselves.
+	// bucket_start (a timestamptz, collation-independent) groups rows into
+	// hours; the WITHIN-hour canonical order is applied in Go by sortBuckets,
+	// matching the sealer and independent of DB collation (H12). The
+	// secondary ORDER BY is kept ONLY to reproduce the legacy digest order:
+	// hours sealed before the Go-sort change were digested in the database's
+	// collation order, and an upgrade must not flip them to "tampered" - see
+	// the fallback in check(). (On a database RESTORED under a different
+	// collation those legacy hours may still fail - that is the original H12
+	// defect and cannot be repaired retroactively; hours sealed since are
+	// portable.)
 	hrows, err := pool.Query(ctx, `
 		SELECT bucket_start, client_id, user_id, cid, action, count, first_seen, last_seen
 		  FROM audit_read_buckets WHERE sealed_at IS NOT NULL
@@ -284,7 +341,7 @@ func VerifyReadBuckets(ctx context.Context, pool *pgxpool.Pool) (badHour string,
 			return key, "sealed buckets exist but the chained hourly row is missing"
 		}
 		delete(recorded, key)
-		if hourDigest(cur) != want {
+		if !digestMatches(want, cur) {
 			return key, "sealed buckets do not match the chained digest (bucket edited, added or removed)"
 		}
 		return "", ""

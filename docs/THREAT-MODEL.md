@@ -226,9 +226,15 @@ ciphertext.
   BIN; `unique` dedup is a keyed HMAC bound to scope+type, no cross-tenant
   probe. **Bulk create/read always require an unlock token** regardless of
   configuration - bulk is where quiet exfiltration lives.
+- **Erasure:** a token minted with a `cid` is bound to that person and is
+  DELETED by their Article 17 erasure; `unique` dedup keys on
+  (scope, cid, value-HMAC), so two people tokenizing the same value each
+  hold their own erasable token.
 - **Residual risk:** a stolen credential with `tokens.read` can redeem
   tokens it knows the handles for, at rate, audited. Bulk is gated behind
-  the unlock token and one chained intent record.
+  the unlock token and one chained intent record. A token minted WITHOUT a
+  `cid` belongs to no single subject and is reachable only by its own
+  expiry, never by erasure - bind tokens to a person whenever one exists.
 
 ### F5 file vault
 

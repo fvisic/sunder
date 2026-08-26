@@ -51,8 +51,19 @@ type ValueTokens struct {
 type TokenizeInput struct {
 	Type  string `json:"type"` // "string" (default) | "card"
 	Value string `json:"value"`
-	// Unique dedups by keyed HMAC: the same value returns the same token
-	// instead of breeding aliases, and a read refreshes sliding expiry.
+	// CID optionally binds this token to a person (a CID in the caller's
+	// scope), so erasure of that person deletes the token (S4). Empty leaves
+	// the token unattributed - reachable only by its own expiry, not by
+	// erasure - which is the right choice for a scope-wide value that belongs
+	// to no single subject.
+	CID string `json:"cid"`
+	// Unique dedups by keyed HMAC within one (scope, cid) slot: the same
+	// value returns the same token instead of breeding aliases, and a read
+	// refreshes sliding expiry. A cid-bearing call ADOPTS a live unattributed
+	// row for the same value (upgrade boundary), so the surviving token is
+	// the erasable one. Two different persons deliberately get two tokens -
+	// each must be erasable on its own - and a caller that mixes cid and
+	// no-cid tokenization of the same value creates one token per style.
 	Unique bool `json:"unique"`
 	// ExpiresFinal is a hard deadline (RFC3339); empty = none.
 	ExpiresFinal string `json:"expires_final"`
@@ -342,14 +353,48 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 	if err != nil {
 		return "", err
 	}
+	// A token bound to a person (S4) must name a CID in the caller's own
+	// scope - attributing it to a foreign-scope pseudonym would be wrong and
+	// would let one tenant's erasure reach another's token. The predicate
+	// lives IN the locking read, and the lock must be on PERSONS: under READ
+	// COMMITTED, EvalPlanQual re-fetches only FOR UPDATE targets, so locking
+	// cids alone re-evaluated erased_at against a STALE persons tuple and a
+	// tokenize racing an erasure landed an unerasable token. The persons row
+	// is the single serialization point with erasePerson (whose opening
+	// guard locks it before any delete): either the erasure waits for us and
+	// its value_tokens DELETE then removes our row, or we wait and the
+	// re-fetched tuple shows the tombstone. Deliberately NOT "OF c, p": the
+	// cids lock is not needed here, and taking it would invert the c -> p
+	// order erasure uses - an ABBA deadlock.
+	if in.CID != "" {
+		var live bool
+		err := tx.QueryRow(ctx, `
+			SELECT NOT p.erased_at IS NOT NULL FROM cids c JOIN persons p ON p.id = c.person_id
+			 WHERE c.cid=$1 AND c.scope=$2 FOR UPDATE OF p`,
+			in.CID, client.Scope).Scan(&live)
+		if err == pgx.ErrNoRows {
+			return "", fmt.Errorf("%w: cid not found in this scope", ErrValidation)
+		}
+		if err != nil {
+			return "", err
+		}
+		if !live {
+			// Indistinguishable from absent, like every CID-addressed path.
+			return "", ErrNotFound
+		}
+	}
+	// Dedup key includes the cid (COALESCE to '' for unattributed tokens), so
+	// two people tokenizing the same value each get their own erasable token
+	// while a no-cid caller keeps the old scope-wide dedup.
+	cidKey := in.CID
 	if in.Unique {
 		var existing string
 		err := tx.QueryRow(ctx, `
 			SELECT token FROM value_tokens
-			 WHERE scope=$1 AND unique_hash=$2
+			 WHERE scope=$1 AND COALESCE(cid,'')=$2 AND unique_hash=$3
 			   AND (expires_final IS NULL OR expires_final > now())
 			   AND (sliding_seconds IS NULL OR last_used + make_interval(secs => sliding_seconds) > now())`,
-			client.Scope, uniqueHash).Scan(&existing)
+			client.Scope, cidKey, uniqueHash).Scan(&existing)
 		if err == nil {
 			if _, err := tx.Exec(ctx, `UPDATE value_tokens SET last_used=now() WHERE token=$1`, existing); err != nil {
 				return "", err
@@ -359,12 +404,34 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 		if err != pgx.ErrNoRows {
 			return "", err
 		}
-		// No LIVE row, but an EXPIRED row may still hold this unique_hash in
-		// the partial unique index and would block the insert. It is dead;
-		// remove it so the fresh token can take the slot.
-		if _, err := tx.Exec(ctx, `DELETE FROM value_tokens WHERE scope=$1 AND unique_hash=$2`,
-			client.Scope, uniqueHash); err != nil {
+		// No LIVE row in our slot, but an EXPIRED row may still hold this
+		// unique_hash in the partial unique index. It is dead; remove it
+		// FIRST - both a fresh insert and an adoption below re-point the
+		// slot, and a dead row would fail either with a raw 23505 (N3).
+		if _, err := tx.Exec(ctx, `DELETE FROM value_tokens WHERE scope=$1 AND COALESCE(cid,'')=$2 AND unique_hash=$3`,
+			client.Scope, cidKey, uniqueHash); err != nil {
 			return "", err
+		}
+		// Upgrade boundary: a live UNATTRIBUTED row for the same value may
+		// exist from before tokens carried a cid. Minting a second token
+		// would breed an alias whose surviving copy erasure can never reach -
+		// ADOPT the row instead: bind it to this cid, so the pre-existing
+		// token becomes the person's erasable one. First claim wins; a second
+		// person tokenizing the same value gets their own fresh token.
+		if in.CID != "" {
+			var adopted string
+			err := tx.QueryRow(ctx, `
+				UPDATE value_tokens SET cid=$3, last_used=now()
+				 WHERE scope=$1 AND cid IS NULL AND unique_hash=$2
+				   AND (expires_final IS NULL OR expires_final > now())
+				   AND (sliding_seconds IS NULL OR last_used + make_interval(secs => sliding_seconds) > now())
+				RETURNING token`, client.Scope, uniqueHash, in.CID).Scan(&adopted)
+			if err == nil {
+				return adopted, nil
+			}
+			if err != pgx.ErrNoRows {
+				return "", err
+			}
 		}
 	}
 	for attempt := 0; attempt < 3; attempt++ {
@@ -382,9 +449,9 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 			return "", err
 		}
 		_, err = sp.Exec(ctx, `
-			INSERT INTO value_tokens (token, scope, token_type, ciphertext, key_id, alg, unique_hash, expires_final, sliding_seconds)
-			VALUES ($1,$2,$3,$4,$5,'aes256gcm',$6,$7,NULLIF($8,0))`,
-			token, client.Scope, tokenType, sealed, keyID, uniqueHash, expiresFinal, in.SlidingSeconds)
+			INSERT INTO value_tokens (token, scope, cid, token_type, ciphertext, key_id, alg, unique_hash, expires_final, sliding_seconds)
+			VALUES ($1,$2,NULLIF($3,''),$4,$5,$6,'aes256gcm',$7,$8,NULLIF($9,0))`,
+			token, client.Scope, in.CID, tokenType, sealed, keyID, uniqueHash, expiresFinal, in.SlidingSeconds)
 		if err == nil {
 			return token, sp.Commit(ctx)
 		}
