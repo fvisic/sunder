@@ -31,9 +31,26 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// F3 strict posture: fuzzy/partial lookups spend an unlock token. The
-	// consumption is atomic and single-use - replaying the same header on
-	// a second request fails it.
-	if s.Cfg.SearchUnlock && (in.PhoneSuffix != "" || (in.Name != "" && s.Cfg.SearchFuzzyName)) {
+	// gate is placed AFTER the permission and shape checks (review F4) so a
+	// request that would never search - no lookup action, a suffix on an
+	// instance where suffix search is disabled, a malformed suffix - does
+	// not burn a single-use token or write an "intent spent" audit row for
+	// a search that never happens. It only fires when the request will
+	// actually take a fuzzy or suffix path that this instance serves.
+	// A suffix must be well-formed (>= 8 digits) BEFORE the gate: this is
+	// the caller's own input, so validating it here leaks nothing, and it
+	// keeps a malformed suffix from burning a single-use token (review F4).
+	if in.PhoneSuffix != "" {
+		if countDigits(in.PhoneSuffix) < 8 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "validation", "detail": "phone_suffix needs at least 8 digits"})
+			return
+		}
+	}
+	usesFuzzy := in.PhoneSuffix != "" && s.Cfg.SearchPhoneSuffix
+	usesFuzzy = usesFuzzy || (in.Name != "" && in.PhoneSuffix == "" && s.Cfg.SearchFuzzyName &&
+		(in.Email != "" || in.Phone != ""))
+	if s.Cfg.SearchUnlock && usesFuzzy && client.Can(auth.ActLookup) {
 		if err := s.Unlock.Consume(r.Context(), client, "search", r.Header.Get("X-Sunder-Unlock")); err != nil {
 			if errors.Is(err, service.ErrUnlockRequired) {
 				writeJSON(w, http.StatusForbidden, map[string]string{
@@ -79,6 +96,15 @@ func (s *Server) warnLatch(clientID string) bool {
 // declaration of bulk intent, spent within 60 seconds or not at all.
 func (s *Server) handleAdminUnlock(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
+	// Mint writes a chained audit row (global advisory lock under sync
+	// sealing); rate-limit it like the other audit-writing endpoints
+	// (review F3) so one credential cannot serialize the instance or flood
+	// the never-pruned audit table.
+	if !s.Limiter.Allow(client.ID, client.RateLimit) {
+		s.Metrics.Inc(fmt.Sprintf(`sunder_ratelimited_total{client=%q}`, client.ID))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+		return
+	}
 	in, ok := decode[struct {
 		Purpose string `json:"purpose"`
 	}](w, r)
@@ -95,4 +121,15 @@ func (s *Server) handleAdminUnlock(w http.ResponseWriter, r *http.Request) {
 		"unlock_token": token,
 		"expires_at":   expiresAt.Format(time.RFC3339),
 	})
+}
+
+// countDigits counts ASCII digits, ignoring separators.
+func countDigits(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			n++
+		}
+	}
+	return n
 }

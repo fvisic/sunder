@@ -182,6 +182,52 @@ Cost when enabled: one extra HMAC and one extra index row per name word
 is untouched. The database stores only keyed HMACs of the derived values,
 never the values themselves.
 
+## Select security (F3)
+
+| Variable | Default | Description |
+|---|---|---|
+| `SUNDER_SEARCH_UNLOCK` | `false` | Strict posture: fuzzy and partial lookups additionally spend a 60-second single-use unlock token (`POST /v1/admin/unlock` with `{"purpose":"search"}`, sent as `X-Sunder-Unlock`). Default off: single-hit lookups are rate-limited and audited already, and a pre-flight round trip per caller-ID lookup kills that flow. Genuinely BULK surfaces (bulk tokenization) require an unlock token always, regardless of this switch. |
+
+Per-client narrowing lives on the client record, not in env: `sunder client
+create -attributes iban,tier` restricts which attribute names that
+credential can read (GetAttribute refuses, Export/Access filter); `-role
+readonly|service|admin` applies an action preset instead of `-actions`.
+
+## Value tokenization (F4)
+
+No configuration - the surface is gated by the `tokens.create` /
+`tokens.read` actions on the client. `POST /v1/tokens` swaps a value (max
+8 KB) for an opaque token, `type: "card"` returns a Luhn-valid,
+length-preserving, BIN-free digit token; `unique: true` dedups by keyed
+HMAC per scope; `expires_final` (RFC3339) and `sliding_seconds` bound the
+mapping's life; expired rows are swept by `sunder retention run`. Bulk
+endpoints (`/v1/tokens/bulk`, `/v1/tokens/bulk/read`, max 1000 items)
+always require an unlock token with purpose `bulk-tokens`.
+
+## File vault (F5)
+
+Off unless a storage driver is configured - files are a new data class,
+an upgrade must not silently start accepting them.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SUNDER_FILES_STORAGE` | `` (disabled) | `local` or `s3` |
+| `SUNDER_FILES_DIR` | `./filestore` | local driver directory |
+| `SUNDER_FILES_MAX_MB` | `25` | per-file cap, 1-4096 |
+| `SUNDER_FILES_S3_ENDPOINT` | | S3-compatible endpoint (AWS/MinIO/R2), https |
+| `SUNDER_FILES_S3_BUCKET` | | bucket name |
+| `SUNDER_FILES_S3_REGION` | `us-east-1` | SigV4 region |
+| `SUNDER_FILES_S3_ACCESS_KEY` / `_SECRET_KEY` | | credentials |
+| `SUNDER_FILES_S3_PATH_STYLE` | `false` | `true` for MinIO |
+
+Crypto chain: PII KEK wraps a per-person RECORD KEY, which wraps a
+per-file DEK, which encrypts content in 4 MiB AES-256-GCM chunks (chunk
+index in the AAD - chunks cannot be reordered or transplanted). Erasure
+deletes the record key row: every file of that person is unrecoverable at
+commit time (crypto-shredding), and `sunder retention run`
+garbage-collects the dead ciphertext. The storage driver only ever sees
+ciphertext.
+
 ## PostgreSQL sizing (P4.5)
 
 Stock Postgres defaults (128 MB `shared_buffers`) measure the defaults,

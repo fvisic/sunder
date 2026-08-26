@@ -350,3 +350,23 @@ func TestReadEventBucketsByDatabaseClock(t *testing.T) {
 		t.Fatal("bucket timestamps must come from the database clock, not the application clock")
 	}
 }
+
+func TestReadBucketFuncsSurfaceQueryErrors(t *testing.T) {
+	setReads(t, ReadsBucketed)
+	s := testPool(t)
+	ctx := context.Background()
+	// Break the buckets table so the Query in CloseReadBuckets and
+	// VerifyReadBuckets fails, exercising their error returns.
+	if _, err := s.Pool.Exec(ctx, `ALTER TABLE audit_read_buckets RENAME TO arb_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CloseReadBuckets(ctx, s.Pool); err == nil {
+		t.Fatal("close must surface the query error")
+	}
+	if _, _, _, err := VerifyReadBuckets(ctx, s.Pool); err == nil {
+		t.Fatal("verify must surface the query error")
+	}
+	if err := ReadEvent(ctx, s.Pool, Entry{ClientID: "c", Action: "lookup"}); err == nil {
+		t.Fatal("read event must surface the query error")
+	}
+}

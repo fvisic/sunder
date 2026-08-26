@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/testutil"
 )
@@ -133,6 +134,34 @@ func TestRunDispatchesOpsCommands(t *testing.T) {
 	t.Setenv("SUNDER_TSA_URL", "http://tsa.invalid/x")
 	if err := run("anchor", nil); err != nil {
 		t.Fatal(err)
+	}
+	// The Phase 3 additions dispatch through run() too. The sealer refuses
+	// under sync sealing (it seals inline), so only exercise it in async.
+	if audit.Mode() == audit.ModeAsync {
+		if err := run("sealer", []string{"-once"}); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := run("sealer", []string{"-once"}); err == nil {
+		t.Fatal("sealer must refuse under sync sealing")
+	}
+	if err := run("client", []string{"create", "-id", "grantme", "-name", "G", "-scope", "crm", "-actions", "lookup", "-purposes", "support"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("client", []string{"grant", "-id", "grantme", "-add-actions", "admin.unlock"}); err != nil {
+		t.Fatal(err)
+	}
+	// import from a small JSONL file via the dispatcher.
+	dir := t.TempDir()
+	jf := dir + "/c.jsonl"
+	if err := os.WriteFile(jf, []byte(`{"email":"run@example.com"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("import", []string{"-file", jf, "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+	// An unknown command is rejected without touching the database.
+	if err := run("nonsense-cmd", nil); err == nil {
+		t.Fatal("unknown command must error")
 	}
 }
 

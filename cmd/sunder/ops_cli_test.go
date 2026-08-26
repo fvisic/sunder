@@ -82,16 +82,16 @@ func TestWebhookCmdValidationAndList(t *testing.T) {
 func TestRetentionAndDSRCmds(t *testing.T) {
 	st := testutil.NewDB(t)
 	ctx := context.Background()
-	if err := retentionCmd(ctx, st, []string{"set", "-scope", "crm", "-days", "30"}); err != nil {
+	if err := retentionCmd(ctx, config.Config{}, st, []string{"set", "-scope", "crm", "-days", "30"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := retentionCmd(ctx, st, []string{"run"}); err != nil {
+	if err := retentionCmd(ctx, config.Config{}, st, []string{"run"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := retentionCmd(ctx, st, []string{"set", "-scope", "crm"}); err == nil {
+	if err := retentionCmd(ctx, config.Config{}, st, []string{"set", "-scope", "crm"}); err == nil {
 		t.Fatal("missing -days must error")
 	}
-	if err := retentionCmd(ctx, st, []string{"huh"}); err == nil {
+	if err := retentionCmd(ctx, config.Config{}, st, []string{"huh"}); err == nil {
 		t.Fatal("unknown subcommand must error")
 	}
 	if err := dsrCmd(ctx, config.Config{}, st, []string{"deliver"}); err != nil {
@@ -165,7 +165,7 @@ func TestCLIBranchSweep(t *testing.T) {
 	if err := webhookCmd(ctx, st, []string{"set", "-bogus"}); err == nil {
 		t.Fatal("webhook bad flag")
 	}
-	if err := retentionCmd(ctx, st, []string{"set", "-bogus"}); err == nil {
+	if err := retentionCmd(ctx, config.Config{}, st, []string{"set", "-bogus"}); err == nil {
 		t.Fatal("retention bad flag")
 	}
 	if err := keysCmd(ctx, cfg, st, []string{"retire", "-bogus"}); err == nil {
@@ -256,10 +256,10 @@ func TestOpsCmdsOnDeadPool(t *testing.T) {
 	if err := webhookCmd(ctx, st, []string{"set", "-scope", "s", "-url", "https://x/y"}); err == nil {
 		t.Fatal("webhook set on dead pool")
 	}
-	if err := retentionCmd(ctx, st, []string{"run"}); err == nil {
+	if err := retentionCmd(ctx, config.Config{}, st, []string{"run"}); err == nil {
 		t.Fatal("retention run on dead pool")
 	}
-	if err := retentionCmd(ctx, st, []string{"set", "-scope", "s", "-days", "1"}); err == nil {
+	if err := retentionCmd(ctx, config.Config{}, st, []string{"set", "-scope", "s", "-days", "1"}); err == nil {
 		t.Fatal("retention set on dead pool")
 	}
 	if err := dsrCmd(ctx, config.Config{}, st, []string{"deliver"}); err == nil {
@@ -518,7 +518,7 @@ func TestCLIRemainingBranches(t *testing.T) {
 	ctx := context.Background()
 
 	// retention run now also prunes envelopes and portal rows.
-	if err := retentionCmd(ctx, st, []string{"run"}); err != nil {
+	if err := retentionCmd(ctx, config.Config{}, st, []string{"run"}); err != nil {
 		t.Fatal(err)
 	}
 	// A wildcard issuer grant is explicit, and listing renders it.
@@ -602,7 +602,7 @@ func TestNewCommandsFailClosedOnDeadPool(t *testing.T) {
 	if err := clientCmd(ctx, st, []string{"rotate-secret", "-bogus"}); err == nil {
 		t.Fatal("rotate-secret bad flag")
 	}
-	if err := retentionCmd(ctx, st, []string{"run"}); err == nil {
+	if err := retentionCmd(ctx, config.Config{}, st, []string{"run"}); err == nil {
 		t.Fatal("retention run on a dead pool")
 	}
 }
@@ -880,5 +880,138 @@ func TestClientCreateRolesAndAttributes(t *testing.T) {
 	}
 	if len(attrs) != 2 {
 		t.Fatalf("allowlist must persist, got %v", attrs)
+	}
+}
+
+// TestReviewF2_ClientGrant: strict posture and F3 narrowing are enable-able
+// on a LIVE client without SQL - the F2 remedy.
+func TestReviewF2_ClientGrant(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	if err := clientCmd(ctx, st, []string{"create", "-id", "crm", "-name", "CRM", "-scope", "crm", "-actions", "lookup", "-purposes", "support"}); err != nil {
+		t.Fatal(err)
+	}
+	// Grant admin.unlock so the client can mint tokens for strict posture.
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "crm", "-add-actions", "admin.unlock"}); err != nil {
+		t.Fatal(err)
+	}
+	var acts []string
+	if err := st.Pool.QueryRow(ctx, `SELECT allowed_actions FROM clients WHERE client_id='crm'`).Scan(&acts); err != nil {
+		t.Fatal(err)
+	}
+	if !containsStr(acts, "lookup") || !containsStr(acts, "admin.unlock") {
+		t.Fatalf("grant must union, not replace: %v", acts)
+	}
+	// Set then clear an attribute allowlist.
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "crm", "-attributes", "iban"}); err != nil {
+		t.Fatal(err)
+	}
+	var attrs []string
+	if err := st.Pool.QueryRow(ctx, `SELECT allowed_attributes FROM clients WHERE client_id='crm'`).Scan(&attrs); err != nil {
+		t.Fatal(err)
+	}
+	if len(attrs) != 1 {
+		t.Fatalf("attributes: %v", attrs)
+	}
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "crm", "-clear-attributes"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT allowed_attributes FROM clients WHERE client_id='crm'`).Scan(&attrs); err != nil {
+		t.Fatal(err)
+	}
+	if attrs != nil {
+		t.Fatalf("clear must set NULL, got %v", attrs)
+	}
+	// Guards.
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "crm", "-add-actions", "bogus"}); err == nil {
+		t.Fatal("unknown action must be refused")
+	}
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "crm", "-role", "readonly", "-add-actions", "lookup"}); err == nil {
+		t.Fatal("role and add-actions are mutually exclusive")
+	}
+}
+
+func containsStr(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRetentionSweepAllQueues runs the sweep with the file vault enabled,
+// covering the storage-open + file-GC branch of retentionCmd.
+func TestRetentionSweepAllQueues(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	cfg.FilesStorage = "local"
+	cfg.FilesDir = t.TempDir()
+	if err := retentionCmd(ctx, cfg, st, []string{"run"}); err != nil {
+		t.Fatalf("retention run with the vault enabled: %v", err)
+	}
+	// Also exercise the value-token and unlock prune paths having rows.
+	if err := retentionCmd(ctx, config.Config{}, st, []string{"run"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientGrantErrorPaths(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	if err := clientCmd(ctx, st, []string{"create", "-id", "g1", "-name", "G", "-scope", "crm", "-actions", "lookup", "-purposes", "support"}); err != nil {
+		t.Fatal(err)
+	}
+	// Missing -id.
+	if err := clientCmd(ctx, st, []string{"grant", "-add-actions", "lookup"}); err == nil {
+		t.Fatal("grant without -id must error")
+	}
+	// Unknown role.
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "g1", "-role", "superuser"}); err == nil {
+		t.Fatal("unknown role must error")
+	}
+	// Bad flag.
+	if err := clientCmd(ctx, st, []string{"grant", "-bogus"}); err == nil {
+		t.Fatal("bad flag must error")
+	}
+	// Role grant replaces the action set.
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "g1", "-role", "service"}); err != nil {
+		t.Fatal(err)
+	}
+	var role string
+	if err := st.Pool.QueryRow(ctx, `SELECT role FROM clients WHERE client_id='g1'`).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if role != "service" {
+		t.Fatalf("role grant: %q", role)
+	}
+	// Privacy-officer role via create, then verify it has the DSR trio.
+	if err := clientCmd(ctx, st, []string{"create", "-id", "po", "-name", "PO", "-scope", "crm", "-role", "privacy-officer", "-purposes", "support"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientGrantQueryErrors(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	if err := clientCmd(ctx, st, []string{"create", "-id", "gq", "-name", "GQ", "-scope", "crm", "-actions", "lookup", "-purposes", "support"}); err != nil {
+		t.Fatal(err)
+	}
+	// Break clients so each grant variant's UPDATE hits a hard error.
+	if _, err := st.Pool.Exec(ctx, `ALTER TABLE clients RENAME TO clients_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "gq", "-role", "service"}); err == nil {
+		t.Fatal("role grant must surface the query error")
+	}
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "gq", "-add-actions", "lookup"}); err == nil {
+		t.Fatal("add-actions grant must surface the query error")
+	}
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "gq", "-attributes", "iban"}); err == nil {
+		t.Fatal("attributes grant must surface the query error")
+	}
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "gq", "-clear-attributes"}); err == nil {
+		t.Fatal("clear-attributes grant must surface the query error")
 	}
 }

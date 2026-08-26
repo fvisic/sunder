@@ -25,6 +25,7 @@ import (
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/service"
+	"github.com/fvisic/sunder/internal/storage"
 	"github.com/fvisic/sunder/internal/store"
 )
 
@@ -110,7 +111,7 @@ func run(cmd string, args []string) error {
 	case "webhook":
 		return webhookCmd(ctx, st, args)
 	case "retention":
-		return retentionCmd(ctx, st, args)
+		return retentionCmd(ctx, cfg, st, args)
 	case "dsr":
 		return dsrCmd(ctx, cfg, st, args)
 	case "issuer":
@@ -183,8 +184,83 @@ func webhookCmd(ctx context.Context, st *store.Store, args []string) error {
 	}
 }
 
+// clientGrantCmd adjusts an existing client's actions, attribute allowlist
+// or role - the supported path to enable strict search posture (grant
+// admin.unlock) or F3 narrowing on a live client without editing SQL.
+func clientGrantCmd(ctx context.Context, st *store.Store, args []string) error {
+	fs := flag.NewFlagSet("client grant", flag.ContinueOnError)
+	id := fs.String("id", "", "client id (required)")
+	role := fs.String("role", "", "replace actions with a preset: readonly|service|admin|privacy-officer")
+	addActions := fs.String("add-actions", "", "comma-separated actions to ADD to the current set")
+	attributes := fs.String("attributes", "", "replace the attribute allowlist (empty string clears it = all)")
+	clearAttrs := fs.Bool("clear-attributes", false, "remove the attribute allowlist (read all)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *id == "" {
+		return fmt.Errorf("-id is required")
+	}
+	if err := st.Migrate(ctx); err != nil {
+		return err
+	}
+	known := knownActions()
+	if *role != "" {
+		if *addActions != "" {
+			return fmt.Errorf("-role and -add-actions are mutually exclusive")
+		}
+		preset := auth.RoleActions(*role)
+		if preset == nil {
+			return fmt.Errorf("unknown role %q", *role)
+		}
+		if _, err := st.Pool.Exec(ctx,
+			`UPDATE clients SET role=$2, allowed_actions=$3 WHERE client_id=$1`,
+			*id, *role, preset); err != nil {
+			return err
+		}
+	} else if *addActions != "" {
+		add := splitCSV(*addActions)
+		for _, a := range add {
+			if !known[a] {
+				return fmt.Errorf("unknown action %q", a)
+			}
+		}
+		// Union the added actions into the current set; role becomes custom.
+		if _, err := st.Pool.Exec(ctx, `
+			UPDATE clients
+			   SET allowed_actions = (SELECT array_agg(DISTINCT a) FROM unnest(allowed_actions || $2::text[]) a),
+			       role = 'custom'
+			 WHERE client_id = $1`, *id, add); err != nil {
+			return err
+		}
+	}
+	if *clearAttrs {
+		if _, err := st.Pool.Exec(ctx, `UPDATE clients SET allowed_attributes=NULL WHERE client_id=$1`, *id); err != nil {
+			return err
+		}
+	} else if *attributes != "" {
+		if _, err := st.Pool.Exec(ctx, `UPDATE clients SET allowed_attributes=$2 WHERE client_id=$1`,
+			*id, splitCSV(*attributes)); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("client %q updated\n", *id)
+	return nil
+}
+
+// knownActions is the authoritative action allowlist for CLI validation.
+func knownActions() map[string]bool {
+	return map[string]bool{
+		auth.ActContactsRegister: true, auth.ActScopesIssue: true, auth.ActLookup: true,
+		auth.ActAttributesRead: true, auth.ActOTIIssue: true, auth.ActOTIVerify: true,
+		auth.ActConsentManage: true, auth.ActDSRAccess: true, auth.ActDSRErase: true,
+		auth.ActDSRExport: true, auth.ActClaimsExternal: true, auth.ActAdminUnlock: true,
+		auth.ActTokensCreate: true, auth.ActTokensRead: true,
+		auth.ActFilesWrite: true, auth.ActFilesRead: true,
+	}
+}
+
 // retentionCmd manages per-scope contact TTLs and runs the sweep.
-func retentionCmd(ctx context.Context, st *store.Store, args []string) error {
+func retentionCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: sunder retention set -scope <s> -days <n> | retention run")
 	}
@@ -227,8 +303,24 @@ func retentionCmd(ctx context.Context, st *store.Store, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned, %d consumed envelope(s) pruned, %d portal row(s) pruned, %d unlock token(s) pruned\n",
-			wiped, otiPruned, envelopes, portalRows, unlockRows)
+		valueRows, err := service.PruneValueTokens(ctx, st.Pool)
+		if err != nil {
+			return err
+		}
+		var filesReaped int64
+		if cfg.FilesStorage != "" {
+			drv, err := storage.Open(storage.Config{Kind: cfg.FilesStorage, Dir: cfg.FilesDir,
+				S3Endpoint: cfg.FilesS3Endpoint, S3Bucket: cfg.FilesS3Bucket, S3Region: cfg.FilesS3Region,
+				S3AccessKey: cfg.FilesS3AccessKey, S3SecretKey: cfg.FilesS3SecretKey, S3PathStyle: cfg.FilesS3PathStyle})
+			if err != nil {
+				return err
+			}
+			if filesReaped, err = service.RunFileGC(ctx, st.Pool, drv); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned, %d consumed envelope(s) pruned, %d portal row(s) pruned, %d unlock token(s) pruned, %d value token(s) pruned, %d file(s) garbage-collected\n",
+			wiped, otiPruned, envelopes, portalRows, unlockRows, valueRows, filesReaped)
 		fmt.Println("(audit rows are never pruned - the chain and its anchors are the tamper evidence)")
 		return nil
 	default:
@@ -522,6 +614,9 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 	if len(args) >= 1 && args[0] == "rotate-secret" {
 		return clientRotateCmd(ctx, st, args[1:])
 	}
+	if len(args) >= 1 && args[0] == "grant" {
+		return clientGrantCmd(ctx, st, args[1:])
+	}
 	if len(args) < 1 || args[0] != "create" {
 		return fmt.Errorf("usage: sunder client create -id <id> -name <name> -scope <scope> [-actions a,b] [-purposes p,q] [-rate n] [-ttl 90d] | client rotate-secret -id <id> [-ttl 90d]")
 	}
@@ -547,12 +642,7 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 	}
 	// Reject typo'd actions up front: a dead grant would surface much later
 	// as a confusing 403 in some integration.
-	known := map[string]bool{
-		auth.ActContactsRegister: true, auth.ActScopesIssue: true, auth.ActLookup: true,
-		auth.ActAttributesRead: true, auth.ActOTIIssue: true, auth.ActOTIVerify: true,
-		auth.ActConsentManage: true, auth.ActDSRAccess: true, auth.ActDSRErase: true,
-		auth.ActDSRExport: true, auth.ActClaimsExternal: true, auth.ActAdminUnlock: true,
-	}
+	known := knownActions()
 	acts := splitCSV(*actions)
 	for _, a := range acts {
 		if !known[a] {
@@ -860,7 +950,9 @@ func bootstrapCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 		ID: *id, Name: "Bootstrap admin", Scope: *scope,
 		AllowedActions: []string{auth.ActContactsRegister, auth.ActScopesIssue, auth.ActLookup,
 			auth.ActAttributesRead, auth.ActOTIIssue, auth.ActOTIVerify, auth.ActConsentManage,
-			auth.ActDSRAccess, auth.ActDSRErase, auth.ActDSRExport, auth.ActClaimsExternal},
+			auth.ActDSRAccess, auth.ActDSRErase, auth.ActDSRExport, auth.ActClaimsExternal,
+			auth.ActAdminUnlock, auth.ActTokensCreate, auth.ActTokensRead,
+			auth.ActFilesWrite, auth.ActFilesRead},
 		AllowedPurposes:     splitCSV(*purposes),
 		RateLimit:           600,
 		CredentialExpiresAt: expiresAt,

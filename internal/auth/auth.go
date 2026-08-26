@@ -35,10 +35,14 @@ const (
 	// DSR actions (docs/DESIGN.md, GDPR layer). dsr.access and dsr.erase are org-wide,
 	// linkage-capable privileges for the privacy-officer client only;
 	// dsr.export is scope-local portability.
-	ActAdminUnlock = "admin.unlock"
-	ActDSRAccess   = "dsr.access"
-	ActDSRErase    = "dsr.erase"
-	ActDSRExport   = "dsr.export"
+	ActAdminUnlock  = "admin.unlock"
+	ActTokensCreate = "tokens.create"
+	ActTokensRead   = "tokens.read"
+	ActFilesWrite   = "files.write"
+	ActFilesRead    = "files.read"
+	ActDSRAccess    = "dsr.access"
+	ActDSRErase     = "dsr.erase"
+	ActDSRExport    = "dsr.export"
 )
 
 // Client is an authenticated caller (one row in the clients table).
@@ -64,10 +68,11 @@ type Client struct {
 // Roles a client can be created with. Presets expand to action sets at
 // creation; "custom" is explicit -actions (and every pre-F12 client).
 const (
-	RoleReadonly = "readonly"
-	RoleService  = "service"
-	RoleAdmin    = "admin"
-	RoleCustom   = "custom"
+	RoleReadonly       = "readonly"
+	RoleService        = "service"
+	RoleAdmin          = "admin"
+	RolePrivacyOfficer = "privacy-officer"
+	RoleCustom         = "custom"
 )
 
 // RoleActions returns the preset action set, or nil for custom/unknown.
@@ -77,12 +82,19 @@ func RoleActions(role string) []string {
 		return []string{ActLookup, ActAttributesRead}
 	case RoleService:
 		return []string{ActLookup, ActAttributesRead, ActContactsRegister,
-			ActOTIIssue, ActOTIVerify, ActConsentManage}
+			ActOTIIssue, ActOTIVerify, ActConsentManage,
+			ActTokensCreate, ActTokensRead, ActFilesWrite, ActFilesRead}
 	case RoleAdmin:
+		// Operational admin: the full integration set plus unlock, value
+		// tokens and files - but NOT the org-wide, cross-scope DSR
+		// privileges (review F5: those stay deliberately opt-in and go to
+		// the privacy-officer preset or explicit -actions).
 		return []string{ActLookup, ActAttributesRead, ActContactsRegister,
 			ActScopesIssue, ActOTIIssue, ActOTIVerify, ActConsentManage,
-			ActClaimsExternal, ActDSRAccess, ActDSRErase, ActDSRExport,
-			ActAdminUnlock}
+			ActClaimsExternal, ActAdminUnlock, ActTokensCreate, ActTokensRead,
+			ActFilesWrite, ActFilesRead}
+	case RolePrivacyOfficer:
+		return []string{ActDSRAccess, ActDSRErase, ActDSRExport, ActConsentManage}
 	}
 	return nil
 }
@@ -92,7 +104,14 @@ func (c *Client) Can(action string) bool { return slices.Contains(c.AllowedActio
 // CanReadAttribute applies the F3 allowlist: nil = every attribute its
 // purposes allow (pre-F3 behaviour), a list = exactly those names.
 func (c *Client) CanReadAttribute(name string) bool {
-	return c.AllowedAttributes == nil || slices.Contains(c.AllowedAttributes, name)
+	// nil OR empty = unrestricted: an empty non-nil list is what a stray
+	// "-attributes ," produces, and silently denying every read is a worse
+	// failure than ignoring an empty filter (review F7). A real narrowing
+	// always has at least one name.
+	if len(c.AllowedAttributes) == 0 {
+		return true
+	}
+	return slices.Contains(c.AllowedAttributes, name)
 }
 func (c *Client) CanUse(purpose string) bool {
 	return slices.Contains(c.AllowedPurposes, purpose)

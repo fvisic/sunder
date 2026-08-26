@@ -18,7 +18,7 @@ ALTER TABLE clients ADD COLUMN role TEXT NOT NULL DEFAULT 'custom';
 -- explicit intent. Stored hashed - the raw token is shown exactly once.
 CREATE TABLE unlock_tokens (
     token_hash  BYTEA PRIMARY KEY,
-    client_id   TEXT NOT NULL REFERENCES clients(client_id),
+    client_id   TEXT NOT NULL REFERENCES clients(client_id) ON DELETE CASCADE,
     purpose     TEXT NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at  TIMESTAMPTZ NOT NULL,

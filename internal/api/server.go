@@ -23,25 +23,28 @@ import (
 	"github.com/fvisic/sunder/internal/metrics"
 	"github.com/fvisic/sunder/internal/ratelimit"
 	"github.com/fvisic/sunder/internal/service"
+	"github.com/fvisic/sunder/internal/storage"
 	"github.com/fvisic/sunder/internal/store"
 )
 
 // Server holds shared dependencies for all handlers.
 type Server struct {
-	Cfg        config.Config
-	Portal     *service.Portal
-	Store      *store.Store
-	Metrics    *metrics.Registry
-	Log        *slog.Logger
-	Contacts   *service.Contacts
-	OTI        *service.OTI
-	GDPR       *service.GDPR
-	Auth       *auth.Authenticator
-	Unlock     *service.Unlock
-	Limiter    ratelimit.Allower
-	Detector   ratelimit.MissCounter
-	enumWarned sync.Map // client id -> last enumeration warning (F3 latch)
-	mux        *http.ServeMux
+	Cfg         config.Config
+	Portal      *service.Portal
+	Store       *store.Store
+	Metrics     *metrics.Registry
+	Log         *slog.Logger
+	Contacts    *service.Contacts
+	OTI         *service.OTI
+	GDPR        *service.GDPR
+	Auth        *auth.Authenticator
+	Unlock      *service.Unlock
+	ValueTokens *service.ValueTokens
+	Files       *service.Files
+	Limiter     ratelimit.Allower
+	Detector    ratelimit.MissCounter
+	enumWarned  sync.Map // client id -> last enumeration warning (F3 latch)
+	mux         *http.ServeMux
 	// closerInterval overrides the bucket-closer cadence in tests; zero
 	// means the production minute.
 	closerInterval time.Duration
@@ -127,6 +130,17 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		}
 		s.Auth = &auth.Authenticator{Pool: st.Pool}
 		s.Unlock = &service.Unlock{Pool: st.Pool}
+		s.ValueTokens = &service.ValueTokens{Pool: st.Pool, Eng: eng, Ring: ring, Tok: s.Contacts.Tok}
+		if cfg.FilesStorage != "" {
+			drv, err := storage.Open(storage.Config{Kind: cfg.FilesStorage, Dir: cfg.FilesDir,
+				S3Endpoint: cfg.FilesS3Endpoint, S3Bucket: cfg.FilesS3Bucket, S3Region: cfg.FilesS3Region,
+				S3AccessKey: cfg.FilesS3AccessKey, S3SecretKey: cfg.FilesS3SecretKey, S3PathStyle: cfg.FilesS3PathStyle})
+			if err != nil {
+				return nil, fmt.Errorf("file storage: %w", err)
+			}
+			s.Files = &service.Files{Pool: st.Pool, Eng: eng, Ring: ring, Store: drv,
+				Contacts: s.Contacts, MaxBytes: cfg.FilesMaxMB << 20}
+		}
 
 		if cfg.RedisAddr != "" {
 			// Multi-replica deployments share windows via Redis; the same
@@ -147,6 +161,17 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("GET /v1/contacts/{cid}/attributes/{name}", s.handleAttributeGet)
 		v1.HandleFunc("POST /v1/lookup", s.handleLookup)
 		v1.HandleFunc("POST /v1/admin/unlock", s.handleAdminUnlock)
+		v1.HandleFunc("POST /v1/tokens", s.handleTokenCreate)
+		v1.HandleFunc("GET /v1/tokens/{token}", s.handleTokenRead)
+		v1.HandleFunc("DELETE /v1/tokens/{token}", s.handleTokenDelete)
+		v1.HandleFunc("POST /v1/tokens/bulk", s.handleTokenBulkCreate)
+		v1.HandleFunc("POST /v1/tokens/bulk/read", s.handleTokenBulkRead)
+		if s.Files != nil {
+			v1.HandleFunc("POST /v1/contacts/{cid}/files", s.handleFileUpload)
+			v1.HandleFunc("GET /v1/contacts/{cid}/files", s.handleFileList)
+			v1.HandleFunc("GET /v1/files/{id}", s.handleFileDownload)
+			v1.HandleFunc("DELETE /v1/files/{id}", s.handleFileDelete)
+		}
 		v1.HandleFunc("POST /v1/oti", s.handleOTIIssue)
 		v1.HandleFunc("POST /v1/oti/verify", s.handleOTIVerify)
 		v1.HandleFunc("POST /v1/claims/external", s.handleExternalClaims)
