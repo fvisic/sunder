@@ -1,0 +1,89 @@
+# F11 multi-jurisdiction example: two INDEPENDENT Sunder instances, one per
+# jurisdiction (EU and US), each with its own database, its own keystore and
+# its own audit chain. There is NO data-plane federation in the product -
+# the only thing that crosses the border is a one-time identifier (OTI)
+# carrying explicitly shared attributes. The US instance never stores an
+# EU-resident's identifiers; it receives, at most, the fields the EU side
+# chose to share for one handoff.
+#
+# Run:  docker compose -f examples/multi-jurisdiction/docker-compose.yml up --build
+# Then: examples/multi-jurisdiction/handoff.sh   (an EU -> US handoff walk-through)
+
+services:
+  # --- EU jurisdiction -------------------------------------------------------
+  eu-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: sunder
+      POSTGRES_USER: sunder
+      POSTGRES_PASSWORD: eu-dev-only
+    volumes:
+      - eu-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sunder"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  eu-sunder:
+    build:
+      context: ../..
+      target: runtime
+    environment:
+      SUNDER_DB_URL: postgres://sunder:eu-dev-only@eu-postgres:5432/sunder
+      SUNDER_LISTEN: ":8080"
+      SUNDER_KEYSTORE: file
+      SUNDER_KEYSTORE_PATH: /keystore
+      # Scopes carry a jurisdiction prefix BY CONVENTION - the product does
+      # not parse it, but it makes cross-border data obvious in every audit
+      # line and every credential.
+      SUNDER_BOOTSTRAP_SCOPE: eu-crm
+    volumes:
+      - eu-keystore:/keystore
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      eu-postgres:
+        condition: service_healthy
+
+  # --- US jurisdiction -------------------------------------------------------
+  us-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: sunder
+      POSTGRES_USER: sunder
+      POSTGRES_PASSWORD: us-dev-only
+    volumes:
+      - us-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sunder"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  us-sunder:
+    build:
+      context: ../..
+      target: runtime
+    environment:
+      SUNDER_DB_URL: postgres://sunder:us-dev-only@us-postgres:5432/sunder
+      SUNDER_LISTEN: ":8080"
+      SUNDER_KEYSTORE: file
+      SUNDER_KEYSTORE_PATH: /keystore
+      SUNDER_BOOTSTRAP_SCOPE: us-crm
+    volumes:
+      - us-keystore:/keystore
+    ports:
+      - "127.0.0.1:8081:8080"
+    depends_on:
+      us-postgres:
+        condition: service_healthy
+
+# Two separate keystores and two separate databases: neither instance can
+# read the other's key material or data. Losing the EU host cannot expose a
+# single US record and vice versa - that separation IS the compliance story.
+volumes:
+  eu-keystore:
+  eu-pgdata:
+  us-keystore:
+  us-pgdata:
