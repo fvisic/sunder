@@ -40,6 +40,10 @@ func TestBlobVersioning(t *testing.T) {
 	if len(versions) != 3 {
 		t.Fatalf("want 3 versions, got %d", len(versions))
 	}
+	// F6-1: the version author is the real client id, not a literal.
+	if versions[0].WrittenBy != "crm" {
+		t.Fatalf("version author must be the client id, got %q", versions[0].WrittenBy)
+	}
 	// The newest version holds the value that was live just before the
 	// last write ("gold").
 	newest := versions[0].VersionNo

@@ -19,7 +19,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -82,9 +81,7 @@ func (f *Files) recordKey(ctx context.Context, personID string) ([]byte, error) 
 		return nil, err
 	}
 	fresh := make([]byte, 32)
-	if _, err := rand.Read(fresh); err != nil {
-		return nil, err
-	}
+	mustRand(fresh)
 	sealed, err := f.Eng.Seal(ctx, crypto.KeyPIIKEK+"/"+kek, "aes256gcm", recordKeyAAD(personID), fresh)
 	if err != nil {
 		return nil, err
@@ -135,13 +132,8 @@ func (f *Files) UploadWithExpiry(ctx context.Context, client *auth.Client, cid, 
 	}
 
 	dek := make([]byte, 32)
-	if _, err := rand.Read(dek); err != nil {
-		return nil, err
-	}
-	fileID, err := newRandomUUID()
-	if err != nil {
-		return nil, err
-	}
+	mustRand(dek)
+	fileID := newRandomUUID()
 	storageKey := "f-" + fileID
 
 	// Stream-encrypt into the driver: chunk index in the AAD, running
@@ -178,10 +170,7 @@ func (f *Files) UploadWithExpiry(ctx context.Context, client *auth.Client, cid, 
 	}
 
 	// Wrap the DEK under the record key, bound to this file id.
-	dekWrapped, err := gcmSeal(recordKey, dekAAD(fileID, cid), dek)
-	if err != nil {
-		return nil, err
-	}
+	dekWrapped := gcmSeal(recordKey, dekAAD(fileID, cid), dek)
 	sum := hex.EncodeToString(hasher.Sum(nil))
 
 	tx, err := f.Pool.Begin(ctx)
@@ -469,9 +458,7 @@ func newChunkWriter(dek []byte, fileID string) *chunkWriter {
 
 func (c *chunkWriter) writeChunk(w io.Writer, plain []byte) error {
 	nonce := make([]byte, c.gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return err
-	}
+	mustRand(nonce)
 	sealed := c.gcm.Seal(nonce, nonce, plain, fileAAD(c.fileID, c.idx))
 	c.idx++
 	var lenHdr [4]byte
@@ -515,13 +502,11 @@ func decryptChunks(dek []byte, fileID string, r io.Reader, w io.Writer) (int64, 
 	}
 }
 
-func gcmSeal(key, aad, plain []byte) ([]byte, error) {
+func gcmSeal(key, aad, plain []byte) []byte {
 	gcm := mustGCM(key)
 	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
-	return gcm.Seal(nonce, nonce, plain, aad), nil
+	mustRand(nonce)
+	return gcm.Seal(nonce, nonce, plain, aad)
 }
 
 func gcmOpen(key, aad, sealed []byte) ([]byte, error) {
@@ -533,14 +518,12 @@ func gcmOpen(key, aad, sealed []byte) ([]byte, error) {
 }
 
 // newRandomUUID mirrors the stdlib-only UUIDv4 generator used elsewhere.
-func newRandomUUID() (string, error) {
+func newRandomUUID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
+	mustRand(b[:])
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // Peek runs the FULL download pre-flight (permission, purpose, ownership,

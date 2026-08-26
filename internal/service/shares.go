@@ -62,10 +62,7 @@ func (s *Shares) Create(ctx context.Context, client *auth.Client, in ShareInput)
 	if _, err := s.Contacts.personForClientCID(ctx, client, in.CID); err != nil {
 		return "", time.Time{}, err
 	}
-	id, err := newRandomUUID()
-	if err != nil {
-		return "", time.Time{}, err
-	}
+	id := newRandomUUID()
 	var expiresAt time.Time
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {

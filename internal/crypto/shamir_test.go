@@ -307,3 +307,32 @@ func TestShamirRandomizedSplit(t *testing.T) {
 		}
 	}
 }
+
+func TestShamirGfInvZeroPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("gfInv(0) must panic")
+		}
+	}()
+	_ = gfInv(0)
+}
+
+func TestShamirCombineSharesPlain(t *testing.T) {
+	secret := []byte("recover-me-32-bytes-of-secret!!!")
+	shares, err := SplitSecret(secret, 5, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Plain CombineShares (no checksum) reconstructs from any 3.
+	got, err := CombineShares([][]byte{shares[1], shares[3], shares[4]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(secret) {
+		t.Fatal("plain combine mismatch")
+	}
+	// Duplicate X coordinate is rejected.
+	if _, err := CombineShares([][]byte{shares[0], shares[0]}); err == nil {
+		t.Fatal("duplicate X must be rejected")
+	}
+}

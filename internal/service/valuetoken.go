@@ -177,6 +177,14 @@ func (v *ValueTokens) Delete(ctx context.Context, client *auth.Client, token str
 	return tx.Commit(ctx)
 }
 
+// mustRand fills b with CSPRNG bytes, panicking on failure - the kernel
+// CSPRNG failing is not a recoverable state (same stance as newUUID).
+func mustRand(b []byte) {
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+}
+
 // isUniqueViolation reports a Postgres 23505.
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
@@ -202,9 +210,7 @@ func newValueToken(tokenType, value string) (string, error) {
 		return luhnToken(len(digitsOf(value)))
 	}
 	var raw [20]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
-	}
+	mustRand(raw[:])
 	return "VT-" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw[:]), nil
 }
 

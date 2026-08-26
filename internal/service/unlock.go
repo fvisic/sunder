@@ -16,7 +16,6 @@ package service
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
 	"fmt"
@@ -53,9 +52,7 @@ func (u *Unlock) Issue(ctx context.Context, client *auth.Client, purpose string)
 		return "", time.Time{}, fmt.Errorf("%w: purpose must be 1-64 chars", ErrValidation)
 	}
 	var raw [20]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", time.Time{}, err
-	}
+	mustRand(raw[:])
 	token = base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw[:])
 	sum := sha256.Sum256([]byte(token))
 
