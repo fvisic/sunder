@@ -1,0 +1,121 @@
+{
+  "id": "lookup-handoff",
+  "title": "Lookup and one-time handoff",
+  "summary": "A customer calls the CRM, is found by phone, and is handed to the ERP with a one-time identifier. The two systems end up with two different, unlinkable pseudonyms for the same person.",
+  "panel": "handoff",
+  "doc": "concepts/oti-handoff.md",
+  "roles": [
+    {
+      "name": "crm",
+      "label": "CRM (support desk)",
+      "scope": "crm",
+      "actions": ["contacts.register", "lookup", "attributes.read", "oti.issue"],
+      "purposes": ["support", "create_order"]
+    },
+    {
+      "name": "erp",
+      "label": "ERP (order system)",
+      "scope": "erp",
+      "actions": ["oti.verify"],
+      "purposes": ["create_order"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "CRM registers the contact",
+      "note": "The agent captures name, email, phone and a loyalty tier. Sunder normalizes the identifiers, stores everything encrypted in the CRM's own scope, and returns a stable pseudonym (CID). Nothing searchable by PII lands in the CRM database.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {
+        "email": "{{demo_email}}",
+        "phone": "{{demo_phone}}",
+        "name": "{{demo_name}}",
+        "attributes": {"loyalty_tier": "gold"}
+      },
+      "expect": 201,
+      "capture": {"crm_cid": "cid"}
+    },
+    {
+      "label": "Agent looks her up by phone - hit",
+      "note": "The agent types the number from caller ID. Sunder HMAC-tokenizes it and matches against the token index: no plaintext identifier is compared or stored on this path, and the lookup lands in the audit chain. LOOKUP != AUTHENTICATION - a hit never proves the caller is that person.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"phone": "{{demo_phone}}"},
+      "expect": 200,
+      "capture": {"lookup_cid": "cid"},
+      "assert": [
+        {
+          "kind": "equals",
+          "left": "crm_cid",
+          "right": "lookup_cid",
+          "message": "The lookup returned the same pseudonym as the registration - the agent found the right record."
+        }
+      ]
+    },
+    {
+      "label": "Read one field, with a stated purpose",
+      "note": "Field-level access: exactly one decrypted value, only under a purpose this client is allowed to use (here: support), and the read is audited. There is no endpoint that returns the whole record.",
+      "actor": "crm",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/attributes/email?purpose=support",
+      "expect": 200
+    },
+    {
+      "label": "Lookup by name alone is refused",
+      "note": "A name is a narrowing key, never an identifier. 'Find me every Ana Horvat' is exactly the enumeration a breached CRM enables today, so it is a 400 - a name only works as a second factor next to an email or a phone.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"name": "{{demo_name}}"},
+      "expect": 400
+    },
+    {
+      "label": "A miss is a 404, and it is counted",
+      "note": "An unknown identifier returns 404 not_found. Every miss is audited and feeds the enumeration detector (alert and metric at 100 misses in 10 minutes); past the per-client rate limit the answer becomes 429.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"email": "{{miss_email}}"},
+      "expect": 404
+    },
+    {
+      "label": "CRM issues a one-time identifier for the ERP",
+      "note": "The order has to move to the ERP, but the CRM's pseudonym must not cross the scope boundary. The CRM asks for a one-time identifier: five minutes, one use, one audience (erp), one purpose (create_order).",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/oti",
+      "body": {"cid": "{{crm_cid}}", "purpose": "create_order", "audience": "erp"},
+      "expect": 201,
+      "capture": {"oti_token": "token"}
+    },
+    {
+      "label": "ERP redeems it and gets its OWN pseudonym",
+      "note": "The ERP receives a CID in the ERP scope. Two different pseudonyms for the same person: neither system can join its records against the other's, even if both databases leak. The issuer never learns the ERP's CID.",
+      "actor": "erp",
+      "method": "POST",
+      "path": "/v1/oti/verify",
+      "body": {"token": "{{oti_token}}", "purpose": "create_order", "audience": "erp"},
+      "expect": 200,
+      "capture": {"erp_cid": "cid"},
+      "assert": [
+        {
+          "kind": "differs",
+          "left": "crm_cid",
+          "right": "erp_cid",
+          "message": "The two systems hold different pseudonyms - the leaked databases would not correlate."
+        }
+      ]
+    },
+    {
+      "label": "Replaying the token is a 409",
+      "note": "Single use is an atomic VALID -> USED database transition, not just a signature check: the second redemption of the same token fails even if the signature is perfect.",
+      "actor": "erp",
+      "method": "POST",
+      "path": "/v1/oti/verify",
+      "body": {"token": "{{oti_token}}", "purpose": "create_order", "audience": "erp"},
+      "expect": 409
+    }
+  ]
+}

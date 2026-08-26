@@ -1,0 +1,95 @@
+{
+  "id": "consent-gate",
+  "title": "Consent enforced on reads",
+  "summary": "A withdrawn consent is not a flag in a spreadsheet: the next read of that person, for that purpose, is refused by the vault itself - and so is the handoff that would have carried the data out.",
+  "panel": "consent",
+  "doc": "gdpr/rights-and-consent.md",
+  "roles": [
+    {
+      "name": "crm",
+      "label": "CRM (support desk)",
+      "scope": "crm",
+      "actions": ["contacts.register", "attributes.read", "oti.issue", "consent.manage"],
+      "purposes": ["support", "create_order"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "The person exists and support may read them",
+      "note": "Registration first, so there is a record to govern. Absence of a consent row means 'not consent-governed' - the read works because nobody has withdrawn anything yet.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {
+        "email": "{{demo_email}}",
+        "phone": "{{demo_phone}}",
+        "name": "{{demo_name}}",
+        "attributes": {"loyalty_tier": "gold"}
+      },
+      "expect": 201,
+      "capture": {"crm_cid": "cid"}
+    },
+    {
+      "label": "Read the email for support - allowed",
+      "note": "The baseline: one field, one stated purpose, 200.",
+      "actor": "crm",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/attributes/email?purpose=support",
+      "expect": 200
+    },
+    {
+      "label": "The person withdraws consent for support",
+      "note": "One record of a decision, stored next to the data it governs. In production this call comes from the privacy portal the person used, or from the desk on their request.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/consent",
+      "body": {"cid": "{{crm_cid}}", "purpose": "support", "granted": false},
+      "expect": 200,
+      "capture": {"consent_support": "granted"}
+    },
+    {
+      "label": "The same read is now a 403",
+      "note": "Nothing changed in the caller: the same client, the same credential, the same purpose. The vault refuses because the person said no. This is the difference between a policy and an enforcement point.",
+      "actor": "crm",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/attributes/email?purpose=support",
+      "expect": 403
+    },
+    {
+      "label": "And the handoff for that purpose is refused too",
+      "note": "Consent is checked when an identifier is minted, not only when a field is read - otherwise a system could take the data out through a token issued a second before the withdrawal took effect.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/oti",
+      "body": {"cid": "{{crm_cid}}", "purpose": "support", "audience": "erp"},
+      "expect": 403
+    },
+    {
+      "label": "An unrelated purpose is unaffected",
+      "note": "Withdrawal is per purpose, not a global switch: order fulfilment still works because that is a different lawful basis and a different decision.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/oti",
+      "body": {"cid": "{{crm_cid}}", "purpose": "create_order", "audience": "erp"},
+      "expect": 201
+    },
+    {
+      "label": "The person changes their mind",
+      "note": "Re-granting restores access immediately - and the decision list keeps both records, because 'when did they consent' is a question you will be asked.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/consent",
+      "body": {"cid": "{{crm_cid}}", "purpose": "support", "granted": true},
+      "expect": 200,
+      "capture": {"consent_support": "granted"}
+    },
+    {
+      "label": "Reading works again, and the decisions are on the record",
+      "note": "The consent list is what an auditor asks for: which purposes, granted or withdrawn, and when.",
+      "actor": "crm",
+      "method": "GET",
+      "path": "/v1/consent/{{crm_cid}}",
+      "expect": 200
+    }
+  ]
+}

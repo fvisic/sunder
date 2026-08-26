@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Sunder API reference</title>
+<script type="module" src="/ui/vendor/rapidoc-min.js"></script>
+<style>html, body { margin: 0; height: 100%; }</style>
+</head>
+<body>
+<!-- The reference lives in its own document, embedded as an iframe by the
+     playground: RapiDoc styles its shadow DOM inline, which needs a looser
+     style-src than the walkthrough UI deserves. Keeping it separate means
+     the strict CSP over the app itself stays strict.
+
+     allow-try is OFF: executing calls belongs in the walkthroughs, where the
+     credential stays on the server. A browser-side "try it" here would have
+     no credential, no CORS grant, and would only teach a failure. -->
+<rapi-doc
+  spec-url="/reference/openapi.yaml"
+  render-style="read"
+  show-header="false"
+  allow-try="false"
+  allow-server-selection="false"
+  allow-authentication="false"
+  theme="light"
+  regular-font="system-ui, -apple-system, Segoe UI, sans-serif"
+  primary-color="#1a1a1a">
+</rapi-doc>
+</body>
+</html>

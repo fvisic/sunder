@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Sunder playground</title>
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<header>
+  <div>
+    <strong>Sunder playground</strong>
+    <span class="muted" id="instance"></span>
+  </div>
+  <div class="head-actions">
+    <div class="tabs" role="tablist">
+      <button id="tab-walk" class="tab" type="button" role="tab" aria-selected="true">Walkthroughs</button>
+      <button id="tab-ref" class="tab" type="button" role="tab" aria-selected="false">API reference</button>
+    </div>
+    <span class="muted" id="identity"></span>
+    <button id="btn-reset" class="ghost" type="button">Start over</button>
+  </div>
+</header>
+
+<main>
+  <nav id="nav" aria-label="Scenarios"></nav>
+
+  <section id="stage">
+    <p class="muted" id="loading">Loading scenarios&hellip;</p>
+  </section>
+
+  <section id="reference" hidden>
+    <iframe id="reference-frame" title="Sunder API reference" src=""></iframe>
+  </section>
+</main>
+
+<footer class="muted">
+  Every step runs against a real Sunder instance. Credentials stay on the
+  server: the Authorization header you see is masked on purpose.
+</footer>
+
+<script src="/ui/app.js"></script>
+</body>
+</html>

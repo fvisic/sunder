@@ -5,6 +5,8 @@ keystore/
 !internal/audit/testdata/*.tsr
 .env
 dist/
+# MkDocs build output (regenerable).
+docs-site/site/
 node_modules/
 __pycache__/
 *.pyc

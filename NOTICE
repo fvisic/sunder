@@ -3,3 +3,9 @@ Copyright (c) 2026 Filip Visic
 
 This product includes software developed as part of the Sunder project
 (https://github.com/fvisic/sunder).
+
+The interactive playground (internal/playground) bundles RapiDoc 9.3.8
+(https://github.com/rapi-doc/RapiDoc), Copyright (c) 2022 Mrinmoy Majumdar,
+used under the MIT License to render the OpenAPI reference tab. Its license
+text is kept next to the bundle in
+internal/playground/ui/vendor/rapidoc-LICENSE.txt.

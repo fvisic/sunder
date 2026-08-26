@@ -43,6 +43,15 @@ identity to an ERP via a single-use token, reads one attribute under a
 declared purpose, and then erases the person GDPR-style - printing every
 HTTP request as it goes.
 
+Prefer clicking to reading? The same stories, plus a consent gate, the
+erasure webhook inbox and the audit chain, as an interactive playground:
+
+```sh
+docker compose -f deploy/docker-compose.yml \
+               -f deploy/docker-compose.playground.yml up --build -d
+open http://localhost:8081
+```
+
 ## Why not just use ...?
 
 | | Sunder | Databunker | HashiCorp Vault | DIY encryption |
@@ -114,6 +123,7 @@ carries both runs, the measured lock contention, and the design options.
 | `api/` | OpenAPI 3.1 contract (also served at `/openapi.yaml`) + Postman collection |
 | `sdks/` | the six SDKs (Go, TypeScript, Python, PHP, Java, .NET), each with a mock-server test suite |
 | `demo/` | narrated demos: lookup + one-time handoff, escalation e-mail handoff |
+| `examples/playground/`, `cmd/playground` | the interactive demo: guide scenarios as clickable walkthroughs, with the HTTP wire view, over a real instance |
 | `benchmark/`, `loadtest/` | Databunker head-to-head + k6 latency targets |
 | `migrate/databunker/` | migration tool: Databunker records to Sunder contacts |
 | `deploy/` | Docker Compose + Helm chart (TLS/mTLS, Vault, signer sidecar, NetworkPolicy, anchor/retention cron jobs) + per-customer provisioning script |

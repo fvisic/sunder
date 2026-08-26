@@ -20,6 +20,11 @@ cosign verify-blob --signature SHA256SUMS.sig --certificate SHA256SUMS.pem \
 shasum -a 256 -c SHA256SUMS
 ```
 
+The playground (`cmd/playground`) is deliberately **not** part of a
+release: it is a demo tool that holds client credentials, built only as the
+`playground` Dockerfile target for the compose overlay. Nothing from it
+belongs in the artifacts an operator deploys.
+
 ## SDK releases
 
 Bump the version in the SDK manifests, then run the `release-sdks` workflow

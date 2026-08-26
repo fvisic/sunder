@@ -179,6 +179,27 @@ jobs:
       - name: Verify audit chain
         run: docker compose -f deploy/docker-compose.yml exec sunder /sunder verify-audit
 
+  e2e-playground:
+    # Boots the stack WITH the playground overlay and drives every
+    # walkthrough through the playground's own API, exactly as a visitor
+    # clicking "Run every step" would. A scenario whose expected status the
+    # service no longer returns fails here - which is what keeps the demo
+    # from quietly drifting away from the product.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Boot stack with the playground
+        run: |
+          docker compose -f deploy/docker-compose.yml \
+                         -f deploy/docker-compose.playground.yml up --build -d --wait
+      - name: Run every walkthrough
+        run: python3 ops/playground_e2e.py
+      - name: Playground logs on failure
+        if: failure()
+        run: |
+          docker compose -f deploy/docker-compose.yml \
+                         -f deploy/docker-compose.playground.yml logs --tail=100 seed playground deliver
+
   docs-site:
     runs-on: ubuntu-latest
     steps:
