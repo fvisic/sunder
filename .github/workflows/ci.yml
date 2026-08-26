@@ -54,9 +54,17 @@ jobs:
         run: CGO_ENABLED=0 go build -mod=readonly ./...
       - name: Vet
         run: go vet ./...
-      - name: Test with coverage gate
+      # Race detection and the coverage gate are separate concerns. The
+      # race detector reschedules goroutines aggressively, which makes the
+      # coverage of concurrency branches (sealer, outbox worker) vary run to
+      # run - so measuring the gate under -race produced a jittery number
+      # right at the threshold. Run the detector for correctness, then a
+      # deterministic non-race pass for the coverage number.
+      - name: Race detector
+        run: go test -race ./...
+      - name: Coverage gate
         run: |
-          go test -race -coverprofile=cover.out -coverpkg=./internal/...,./cmd/... ./...
+          go test -coverprofile=cover.out -coverpkg=./internal/...,./cmd/... ./...
           TOTAL=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
           echo "total coverage: ${TOTAL}%"
           awk -v t="$TOTAL" 'BEGIN { exit (t >= 90.0 ? 0 : 1) }' || {

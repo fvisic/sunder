@@ -1,6 +1,8 @@
 package ratelimit
 
 import (
+	"bufio"
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -86,4 +88,14 @@ func TestRedisFailOpenAndClosed(t *testing.T) {
 	if closed.Allow("x", 5) {
 		t.Fatal("fail-closed must block when redis is unreachable")
 	}
+}
+
+func TestRedisDoWriteFailsOnClosedConn(t *testing.T) {
+	c1, c2 := net.Pipe()
+	c2.Close() // peer gone -> writes fail
+	rc := &respConn{c: c1, rd: bufio.NewReader(c1)}
+	if _, err := (&RedisClient{}).do(rc, "PING"); err == nil {
+		t.Fatal("do() over a closed connection must error")
+	}
+	c1.Close()
 }

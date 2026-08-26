@@ -495,3 +495,25 @@ func TestDrainIgnoresClockSkew(t *testing.T) {
 		t.Fatalf("after skewed drain: broken=%d pending=%d err=%v (%s)", broken, pending, err, reason)
 	}
 }
+
+func TestSealBatchAndVerifyErrorBranches(t *testing.T) {
+	s := testPool(t)
+	ctx := context.Background()
+	// sealBatch with a non-positive batch is rejected up front.
+	if _, err := sealBatch(ctx, s.Pool, 0, 0, false); err == nil {
+		t.Fatal("sealBatch with batch<=0 must error")
+	}
+	// Verify surfaces a query error when the audit table is missing.
+	if _, err := s.Pool.Exec(ctx, `ALTER TABLE audit RENAME TO audit_hidden`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := Verify(ctx, s.Pool); err == nil {
+		t.Fatal("Verify must surface a query error")
+	}
+	if _, err := sealBatch(ctx, s.Pool, 10, 0, false); err == nil {
+		t.Fatal("sealBatch must surface a query error on a missing table")
+	}
+	if _, err := s.Pool.Exec(ctx, `ALTER TABLE audit_hidden RENAME TO audit`); err != nil {
+		t.Fatal(err)
+	}
+}

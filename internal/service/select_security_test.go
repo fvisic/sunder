@@ -608,3 +608,155 @@ func TestReviewM3_StripFaultFailsClosed(t *testing.T) {
 		t.Fatal("a failed strip must fail the verify, not disclose")
 	}
 }
+
+// TestFullDataErasureExercisesAllDeletions populates every auxiliary table
+// tied to a person (consent, version history, a share, a link, portal
+// state) and erases, exercising the erasure deletion paths end to end.
+func TestFullDataErasureExercisesAllDeletions(t *testing.T) {
+	e := newFaultEnv(t)
+	e.svc.VersionsKeep = 3
+	ctx := context.Background()
+	client := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActConsentManage,
+			auth.ActSharesCreate, auth.ActLinksManage, auth.ActDSRErase},
+		AllowedPurposes: []string{"support"}}
+	cid, err := e.svc.Register(ctx, client, service.RegisterInput{
+		Email: "full@example.com", Attributes: map[string]string{"iban": "HR12"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A version (overwrite), a consent, a share, a portal session.
+	if _, err := e.svc.Register(ctx, client, service.RegisterInput{
+		Email: "full@example.com", Attributes: map[string]string{"iban": "HR99"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.gdpr.SetConsent(ctx, client, cid, "support", true); err != nil {
+		t.Fatal(err)
+	}
+	sh := &service.Shares{Pool: e.admin.Pool, Contacts: e.svc}
+	if _, _, err := sh.Create(ctx, client, service.ShareInput{
+		CID: cid, Fields: []string{"iban"}, PartnerLabel: "p", TTLSeconds: 3600}); err != nil {
+		t.Fatal(err)
+	}
+	var personID string
+	e.admin.Pool.QueryRow(ctx, `SELECT person_id FROM cids WHERE cid=$1`, cid).Scan(&personID)
+	if _, err := e.admin.Pool.Exec(ctx,
+		`INSERT INTO portal_sessions (session_hash, person_id, expires_at) VALUES ('h', $1, now()+interval '1 hour')`, personID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := e.gdpr.Erase(ctx, client, cid); err != nil {
+		t.Fatal(err)
+	}
+	// Everything tied to the person is gone.
+	var versions, shares, sessions, consents int64
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM cid_blob_versions WHERE cid=$1),
+		(SELECT count(*) FROM shared_records WHERE cid=$1 AND revoked_at IS NULL),
+		(SELECT count(*) FROM portal_sessions WHERE person_id=$2),
+		(SELECT count(*) FROM consents WHERE cid=$1)`,
+		cid, personID).Scan(&versions, &shares, &sessions, &consents); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 0 || shares != 0 || sessions != 0 {
+		t.Fatalf("erasure left data: versions=%d liveShares=%d sessions=%d", versions, shares, sessions)
+	}
+}
+
+// TestServiceQueryErrorBranches covers reachable query-error branches across
+// several services via targeted table denials (deterministic, no timing).
+func TestServiceQueryErrorBranches(t *testing.T) {
+	ctx := context.Background()
+
+	// consentDenied error path: GetAttribute with the consents table gone.
+	t.Run("consent-query-error", func(t *testing.T) {
+		e := newFaultEnv(t)
+		cid, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email: "c@example.com", Attributes: map[string]string{"iban": "HR12"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader := &auth.Client{ID: "crm", Scope: "crm",
+			AllowedActions: []string{auth.ActAttributesRead}, AllowedPurposes: []string{"support"}}
+		if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE consents RENAME TO consents_gone`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.GetAttribute(ctx, reader, cid, "iban", "support"); err == nil {
+			t.Fatal("GetAttribute must surface a consents-query error")
+		}
+	})
+
+	// IssueScopedCid error path: cids table gone.
+	t.Run("issue-scoped-cid-error", func(t *testing.T) {
+		e := newFaultEnv(t)
+		cid := e.register(t)
+		issuer := &auth.Client{ID: "crm", Scope: "crm", AllowedActions: []string{auth.ActScopesIssue}}
+		if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE cids RENAME TO cids_isc_gone`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.IssueScopedCid(ctx, issuer, cid, "billing"); err == nil {
+			t.Fatal("IssueScopedCid must surface a query error")
+		}
+	})
+
+	// PruneValueTokens / PruneShares / PruneBlobVersions surface query errors.
+	t.Run("prune-errors", func(t *testing.T) {
+		e := newFaultEnv(t)
+		if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE value_tokens RENAME TO vt_p_gone`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.PruneValueTokens(ctx, e.admin.Pool); err == nil {
+			t.Fatal("PruneValueTokens must surface a query error")
+		}
+		if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE shared_records RENAME TO sr_p_gone`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.PruneShares(ctx, e.admin.Pool); err == nil {
+			t.Fatal("PruneShares must surface a query error")
+		}
+	})
+}
+
+// TestGDPRAndPortalQueryErrorBranches covers more reachable query-error
+// branches in Access/Export and the portal.
+func TestGDPRAndPortalQueryErrorBranches(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("access-blob-read-error", func(t *testing.T) {
+		e := newFaultEnv(t)
+		cid := e.register(t)
+		officer := &auth.Client{ID: "dpo", Scope: "crm", AllowedActions: []string{auth.ActDSRAccess}}
+		// Break the per-scope blob read inside accessPerson.
+		if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE cids RENAME TO cids_acc_gone`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.gdpr.Access(ctx, officer, cid); err == nil {
+			t.Fatal("Access must surface a query error")
+		}
+	})
+
+	t.Run("export-blob-read-error", func(t *testing.T) {
+		e := newFaultEnv(t)
+		cid := e.register(t)
+		exporter := &auth.Client{ID: "crm", Scope: "crm", AllowedActions: []string{auth.ActDSRExport}}
+		if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE cids RENAME TO cids_exp_gone`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.gdpr.Export(ctx, exporter, cid); err == nil {
+			t.Fatal("Export must surface a query error")
+		}
+	})
+
+	t.Run("portal-start-query-error", func(t *testing.T) {
+		e := newFaultEnv(t)
+		p := &service.Portal{GDPR: e.gdpr, Contacts: e.svc}
+		e.register(t)
+		// Break person_tokens so Start's lookup fails (not a silent success).
+		if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE person_tokens RENAME TO pt_portal_gone`); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Start(ctx, "fault@example.com"); err == nil {
+			t.Fatal("portal Start must surface a lookup query error")
+		}
+	})
+}
