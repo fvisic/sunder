@@ -487,12 +487,14 @@ func (s *Server) startAuditSealing(ctx context.Context) error {
 		if s.Metrics != nil {
 			s.Metrics.Set("sunder_audit_unsealed_rows", 0)
 		}
+		s.startUnsealedGauge(ctx)
 		if !s.Cfg.AuditSealExternal {
 			s.startBucketCloser(ctx)
 		}
 		return nil
 	}
 
+	s.startUnsealedGauge(ctx)
 	sealsHere := !s.Cfg.AuditSealExternal
 	s.Log.Info("audit sealing", "mode", "async",
 		"interval", s.sealInterval().String(), "delay", s.sealDelay().String(),
@@ -584,6 +586,33 @@ func userIDMiddleware(next http.Handler) http.Handler {
 // through the normal write path of whichever mode is active. A minute
 // cadence bounds how long a finished hour stays unsummarized; the try-lock
 // inside CloseReadBuckets makes N replicas cheap.
+// startUnsealedGauge refreshes sunder_audit_unsealed_rows periodically in
+// EVERY sealing mode. It was previously set only inside the in-process async
+// seal loop - so under SUNDER_AUDIT_SEAL_EXTERNAL (the recommended
+// hardening) the documented stalled-sealer alarm was emitted nowhere, and in
+// sync mode a backlog created by a mode switch without a drain was
+// invisible. This process is where /metrics lives, so this is where the
+// gauge must be fed.
+func (s *Server) startUnsealedGauge(ctx context.Context) {
+	if s.Metrics == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if n, err := audit.UnsealedCount(ctx, s.Store.Pool); err == nil {
+					s.Metrics.Set("sunder_audit_unsealed_rows", float64(n))
+				}
+			}
+		}
+	}()
+}
+
 func (s *Server) startBucketCloser(ctx context.Context) {
 	if audit.ReadsMode() != audit.ReadsBucketed {
 		return

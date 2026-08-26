@@ -51,6 +51,9 @@ func (s *Server) handleLinkDelete(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLinkList(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
+	if !s.allow(w, client) {
+		return
+	}
 	out, err := s.Links.List(r.Context(), client, r.PathValue("cid"))
 	if err != nil {
 		s.logErr(r, err)

@@ -98,6 +98,9 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
+	if !s.allow(w, client) {
+		return
+	}
 	purpose := r.URL.Query().Get("purpose")
 	// Validate everything that can fail BEFORE writing any header - once
 	// the 200 and Content-Length are out, a later error can only truncate
@@ -124,7 +127,10 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	out, err := s.Files.List(r.Context(), client, r.PathValue("cid"))
+	if !s.allow(w, client) {
+		return
+	}
+	out, err := s.Files.List(r.Context(), client, r.PathValue("cid"), r.URL.Query().Get("purpose"))
 	if err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)
@@ -135,6 +141,9 @@ func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
+	if !s.allow(w, client) {
+		return
+	}
 	if err := s.Files.Delete(r.Context(), client, r.PathValue("id")); err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)
@@ -184,6 +193,9 @@ func fmtSscan(str string, out *int64) (int, error) {
 
 func (s *Server) handleVersionList(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
+	if !s.allow(w, client) {
+		return
+	}
 	out, err := s.Contacts.ListVersions(r.Context(), client, r.PathValue("cid"))
 	if err != nil {
 		s.logErr(r, err)
@@ -195,6 +207,9 @@ func (s *Server) handleVersionList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleVersionAttribute(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
+	if !s.allow(w, client) {
+		return
+	}
 	var versionNo int64
 	if _, err := fmtSscan(r.PathValue("version"), &versionNo); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": "version must be a number"})

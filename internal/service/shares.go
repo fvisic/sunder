@@ -193,13 +193,13 @@ func (s *Shares) Revoke(ctx context.Context, client *auth.Client, uuid string) e
 	return tx.Commit(ctx)
 }
 
-// revokeSharesForCID revokes every standing share of a person on CONSENT
-// withdrawal - the row is kept (consent can be re-granted) but blocked.
-// Runs inside the caller's transaction.
-func revokeSharesForCID(ctx context.Context, tx pgx.Tx, personID string) error {
+// revokeShares revokes the standing shares a consent withdrawal governs:
+// exactly this cid's shares for exactly this purpose. Broader cleanup
+// belongs to erasure (deleteSharesForCID), never to a consent flip.
+func revokeShares(ctx context.Context, tx pgx.Tx, cid, purpose string) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE shared_records SET revoked_at = now()
-		 WHERE revoked_at IS NULL AND cid IN (SELECT cid FROM cids WHERE person_id=$1)`, personID)
+		 WHERE revoked_at IS NULL AND cid = $1 AND purpose = $2`, cid, purpose)
 	return err
 }
 

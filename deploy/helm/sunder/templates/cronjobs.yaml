@@ -83,3 +83,56 @@ spec:
               args: ["retention", "run"]
               env: {{- include "sunder.env" . | nindent 16 }}
 {{- end }}
+{{- if .Values.audit.verify.enabled }}
+---
+# Daily tamper-evidence verification: the chain, the read buckets and the
+# stored TSA anchors are recomputed and checked; a break exits non-zero, so
+# alert on failures of this job. With anchoring on it also cross-checks the
+# exported .tsr files against the database.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-sunder-verify-audit
+  labels: {{- include "sunder.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.audit.verify.schedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: verify-audit
+              image: "{{ .Values.image.repository }}:{{ .Values.image.opsTag }}"
+              {{- if .Values.anchor.enabled }}
+              args: ["verify-audit", "-anchors", "/anchors", "-ca", {{ .Values.anchor.caPath | quote }}]
+              {{- else }}
+              args: ["verify-audit"]
+              {{- end }}
+              env:
+                - name: SUNDER_DB_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.database.existingSecret }}
+                      key: SUNDER_DB_URL
+                {{- include "sunder.auditEnv" . | nindent 16 }}
+              {{- if .Values.anchor.enabled }}
+              volumeMounts:
+                - {name: anchors, mountPath: /anchors, readOnly: true}
+                {{- if .Values.anchor.caSecretName }}
+                - {name: tsa-ca, mountPath: /etc/sunder/tsa-ca, readOnly: true}
+                {{- end }}
+              {{- end }}
+          {{- if .Values.anchor.enabled }}
+          volumes:
+            - name: anchors
+              persistentVolumeClaim:
+                claimName: {{ .Release.Name }}-sunder-anchors
+            {{- if .Values.anchor.caSecretName }}
+            - name: tsa-ca
+              secret:
+                secretName: {{ .Values.anchor.caSecretName }}
+            {{- end }}
+          {{- end }}
+{{- end }}

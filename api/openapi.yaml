@@ -764,6 +764,596 @@ paths:
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/Internal'}
 
+  /v1/admin/unlock:
+    post:
+      tags: [admin]
+      operationId: adminUnlock
+      summary: Mint a single-use unlock token
+      description: |
+        Action `admin.unlock`. Mints a 60-second single-use token
+        (returned once, never stored in the clear) that gates bulk value
+        tokenization always, and fuzzy/partial lookups under the strict
+        posture (`SUNDER_SEARCH_UNLOCK=true`). Sent as `X-Sunder-Unlock`.
+        Rate-limited and audited as a chained record.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [purpose]
+              properties:
+                purpose: {type: string, description: 'e.g. "bulk-tokens" or "search"'}
+      responses:
+        '201':
+          description: Token minted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unlock_token: {type: string}
+                  expires_at: {type: string, format: date-time}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/tokens:
+    post:
+      tags: [tokens]
+      operationId: tokenize
+      summary: Swap a sensitive value for an opaque token (F4)
+      description: |
+        Action `tokens.create`. Seals the value (max 8 KB) under the PII
+        KEK, scope-bound; `type: "card"` returns a Luhn-valid,
+        length-preserving digit token with a random BIN. `unique: true`
+        dedups per (scope, cid): the same value returns the same token. A
+        `cid` binds the token to a person in the caller's scope, so their
+        Article 17 erasure (and the scope's retention wipe) deletes it - a
+        tombstoned or foreign CID is refused. Without a `cid` the token is
+        unattributed and reachable only by its own expiry. Audited as a
+        chained record.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenizeInput'
+      responses:
+        '201':
+          description: Token minted (or the deduplicated existing one).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: {type: string}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/tokens/{token}:
+    get:
+      tags: [tokens]
+      operationId: detokenize
+      summary: Redeem a token for its value
+      description: |
+        Action `tokens.read`, caller-scope only. A read refreshes the
+        sliding expiry window. Absent, foreign-scope and expired tokens are
+        one indistinguishable miss; every redemption (hit or miss) is
+        audited as a read event.
+      parameters:
+        - {name: token, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: The sealed value.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  value: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+    delete:
+      tags: [tokens]
+      operationId: tokenDelete
+      summary: Destroy a token (unrecoverable)
+      description: |
+        Action `tokens.delete` (deliberately in no service preset - the row
+        is the only copy of the sealed value). Caller-scope only. Audited
+        as a chained record carrying the token handle and who minted it.
+      parameters:
+        - {name: token, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, enum: [deleted]}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/tokens/bulk:
+    post:
+      tags: [tokens]
+      operationId: tokenizeBulk
+      summary: Tokenize up to 1000 values in one transaction
+      description: |
+        Action `tokens.create` PLUS a single-use unlock token
+        (`X-Sunder-Unlock`, purpose `bulk-tokens`) - always, regardless of
+        configuration: bulk is where quiet exfiltration lives. The batch is
+        atomic (a bad item rolls everything back) and lands as ONE chained
+        audit record carrying the count.
+      parameters:
+        - {name: X-Sunder-Unlock, in: header, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  maxItems: 1000
+                  items: {$ref: '#/components/schemas/TokenizeInput'}
+      responses:
+        '201':
+          description: Tokens in input order.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens:
+                    type: array
+                    items: {type: string}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/tokens/bulk/read:
+    post:
+      tags: [tokens]
+      operationId: detokenizeBulk
+      summary: Redeem up to 1000 tokens
+      description: |
+        Action `tokens.read` PLUS a single-use unlock token
+        (`X-Sunder-Unlock`, purpose `bulk-tokens`). Misses come back as
+        empty strings at their positions - a bulk reader learns which of
+        ITS OWN tokens are gone, nothing about why. One chained audit
+        record carries the count; each redemption is also a read event.
+      parameters:
+        - {name: X-Sunder-Unlock, in: header, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tokens]
+              properties:
+                tokens:
+                  type: array
+                  maxItems: 1000
+                  items: {type: string}
+      responses:
+        '200':
+          description: Values in input order; empty string = miss.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  values:
+                    type: array
+                    items: {type: string}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/contacts/{cid}/files:
+    post:
+      tags: [files]
+      operationId: fileUpload
+      summary: Upload a file into the vault (F5)
+      description: |
+        Action `files.write`; mounted only when `SUNDER_FILES_STORAGE` is
+        configured. Multipart body with one `file` part, STREAMED (nothing
+        is spooled); capped at `SUNDER_FILES_MAX_MB`. Content is encrypted
+        in 4 MiB AES-256-GCM chunks under a per-file DEK wrapped by the
+        person's record key - erasure crypto-shreds every file at commit. A
+        truncated body is refused with nothing stored. Optional
+        `X-Sunder-File-Expiry` (RFC3339) makes the file age out. Audited.
+      parameters:
+        - {$ref: '#/components/parameters/Cid'}
+        - {name: X-Sunder-File-Expiry, in: header, required: false, schema: {type: string, format: date-time}}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        '201':
+          description: Stored file metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileMeta'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+    get:
+      tags: [files]
+      operationId: fileList
+      summary: List a contact's files (metadata only)
+      description: |
+        Action `files.read` with a `purpose` the caller may use - metadata
+        IS disclosure (filenames are often the sensitive part), so listing
+        is purpose-bound, consent-gated and audited like a download.
+        Expired and deleted files are hidden.
+      parameters:
+        - {$ref: '#/components/parameters/Cid'}
+        - {name: purpose, in: query, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: File metadata, never content.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items: {$ref: '#/components/schemas/FileMeta'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/files/{id}:
+    get:
+      tags: [files]
+      operationId: fileDownload
+      summary: Download and decrypt a file
+      description: |
+        Action `files.read` with a `purpose` the caller may use;
+        consent-gated and audited BEFORE the first byte streams. Chunk
+        indexes ride in the AEAD associated data, so reordered, dropped or
+        transplanted chunks fail the decrypt.
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: purpose, in: query, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: The decrypted content (Content-Disposition carries the stored name).
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+    delete:
+      tags: [files]
+      operationId: fileDelete
+      summary: Delete a file
+      description: |
+        Action `files.write`, caller-scope only. The row is marked for
+        garbage collection with its name and content hash redacted
+        immediately; the ciphertext is reaped by the retention sweep (or
+        eagerly when the driver confirms). Audited.
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, enum: [deleted]}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/contacts/{cid}/versions:
+    get:
+      tags: [contacts]
+      operationId: versionList
+      summary: List attribute-blob versions (F6)
+      description: |
+        Action `attributes.history`; caller-scope only. Metadata only -
+        version number, writer, time. History exists when
+        `SUNDER_VERSIONS_KEEP` is on; it is pruned by count/TTL, dies with
+        the person's erasure and with a retention wipe of the contact.
+      parameters:
+        - {$ref: '#/components/parameters/Cid'}
+      responses:
+        '200':
+          description: Version metadata, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  versions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        version_no: {type: integer, format: int64}
+                        written_by: {type: string}
+                        written_at: {type: string, format: date-time}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/contacts/{cid}/versions/{version}/attributes/{name}:
+    get:
+      tags: [contacts]
+      operationId: versionAttribute
+      summary: Read one attribute from a historical version
+      description: |
+        Action `attributes.history` with a `purpose` the caller may use -
+        history is the same personal data one generation older, so the read
+        carries the full gate set (purpose, consent, attribute allowlist,
+        scope, tombstone) and is audited BEFORE the value is released.
+      parameters:
+        - {$ref: '#/components/parameters/Cid'}
+        - {name: version, in: path, required: true, schema: {type: integer, format: int64}}
+        - {name: name, in: path, required: true, schema: {type: string}}
+        - {name: purpose, in: query, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: The historical value.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  value: {type: string}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/links:
+    post:
+      tags: [links]
+      operationId: linkCreate
+      summary: Link two persons (F7)
+      description: |
+        Action `links.manage`; both CIDs must belong to the caller's scope
+        (a link can never cross scopes). link_type is one of guardian,
+        member, owner. Links die with either person's erasure; erasure of a
+        parent cascades to children only when explicitly requested. Audited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parent_cid, child_cid, link_type]
+              properties:
+                parent_cid: {type: string}
+                child_cid: {type: string}
+                link_type: {type: string, enum: [guardian, member, owner]}
+      responses:
+        '201':
+          description: Linked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, enum: [linked]}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+    delete:
+      tags: [links]
+      operationId: linkDelete
+      summary: Remove a link
+      description: |
+        Action `links.manage`, caller-scope only. Audited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parent_cid, child_cid]
+              properties:
+                parent_cid: {type: string}
+                child_cid: {type: string}
+      responses:
+        '200':
+          description: Unlinked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, enum: [unlinked]}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/contacts/{cid}/links:
+    get:
+      tags: [links]
+      operationId: linkList
+      summary: List a contact's links
+      description: |
+        Action `links.manage`, caller-scope only: each entry is the OTHER
+        end's caller-scope pseudonym plus the link type and direction.
+      parameters:
+        - {$ref: '#/components/parameters/Cid'}
+      responses:
+        '200':
+          description: Linked pseudonyms.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  links:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        cid: {type: string}
+                        link_type: {type: string}
+                        role: {type: string, enum: [child, parent]}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/shares:
+    post:
+      tags: [shares]
+      operationId: shareCreate
+      summary: Mint an expiring shared record (F8)
+      description: |
+        Actions `shares.create` AND `attributes.read` - a share is a
+        DELEGATED read, so it also requires a `purpose` the caller may use
+        and is refused when consent for that purpose is withdrawn. The
+        returned UUID serves exactly the named attribute fields until
+        expiry or revocation; consent withdrawal for the purpose revokes
+        the cid's standing shares, and erasure deletes them. Audited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cid, fields, purpose, ttl_seconds]
+              properties:
+                cid: {type: string}
+                fields:
+                  type: array
+                  items: {type: string}
+                partner_label: {type: string}
+                purpose: {type: string}
+                ttl_seconds: {type: integer, format: int64}
+      responses:
+        '201':
+          description: Share minted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uuid: {type: string}
+                  expires_at: {type: string, format: date-time}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
+  /v1/shares/{uuid}:
+    get:
+      tags: [shares]
+      operationId: shareFetch
+      summary: Fetch a shared record
+      description: |
+        Default mode: any valid client credential. With
+        `SUNDER_SHARES_PUBLIC` the route is public - the UUID is the only
+        credential - and per-IP rate-limited. Consent is RE-CHECKED at
+        every fetch; a withdrawn purpose, an expired or revoked share and
+        an unknown UUID are one indistinguishable miss. Every fetch (hit or
+        miss) is audited.
+      security: []
+      parameters:
+        - {name: uuid, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: The shared fields.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fields:
+                    type: object
+                    additionalProperties: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+    delete:
+      tags: [shares]
+      operationId: shareRevoke
+      summary: Revoke a share
+      description: |
+        Action `shares.create` (the minter's scope). Immediate: the UUID
+        stops answering. Audited.
+      parameters:
+        - {name: uuid, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, enum: [revoked]}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/Internal'}
+
   /healthz:
     get:
       tags: [ops]
@@ -855,6 +1445,47 @@ components:
         $ref: '#/components/schemas/Cid'
 
   schemas:
+    TokenizeInput:
+      type: object
+      required: [value]
+      properties:
+        type:
+          type: string
+          enum: [string, card]
+          default: string
+        value:
+          type: string
+          maxLength: 8192
+        cid:
+          type: string
+          description: |
+            Binds the token to a person in the caller's scope so erasure
+            (and the scope's retention wipe) deletes it. A tombstoned or
+            foreign CID is refused. Omit only for a scope-wide value that
+            belongs to no single subject.
+        unique:
+          type: boolean
+          description: Dedup per (scope, cid) - the same value returns the same token.
+        expires_final:
+          type: string
+          format: date-time
+          description: Hard deadline; decided by the DATABASE clock.
+        sliding_seconds:
+          type: integer
+          format: int64
+          description: Life extension on every read; 0 = none.
+
+    FileMeta:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        content_type: {type: string}
+        size_bytes: {type: integer, format: int64}
+        sha256: {type: string, description: Hex digest of the PLAINTEXT, for client-side integrity checks.}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+
     Cid:
       type: string
       description: A scoped pseudonym. Different scopes hold different, unlinkable CIDs for the same person.

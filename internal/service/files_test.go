@@ -57,7 +57,7 @@ func TestFileVaultRoundTrip(t *testing.T) {
 	}
 
 	// Listing is metadata only.
-	list, err := f.List(ctx, client, cid)
+	list, err := f.List(ctx, client, cid, "support")
 	if err != nil || len(list) != 1 || list[0].Name != "dopis.txt" {
 		t.Fatalf("list: %+v %v", list, err)
 	}
@@ -212,7 +212,7 @@ func TestFileVaultConsentAndFaults(t *testing.T) {
 		t.Fatalf("Peek wrong purpose: %v", err)
 	}
 	// List permission guard and foreign scope.
-	if _, err := f.List(ctx, noPerm, cid); !errors.Is(err, service.ErrForbidden) {
+	if _, err := f.List(ctx, noPerm, cid, "support"); !errors.Is(err, service.ErrForbidden) {
 		t.Fatalf("list without action: %v", err)
 	}
 	// Delete permission guard and missing file.
@@ -265,7 +265,7 @@ func TestFileVaultFailsClosedUnderDeniedTables(t *testing.T) {
 	if _, err := f.Upload(ctx, client, cid, "a.txt", "", bytes.NewReader([]byte("data"))); err == nil {
 		t.Fatal("upload without record-key rights must error")
 	}
-	if _, err := f.List(ctx, client, cid); err == nil {
+	if _, err := f.List(ctx, client, cid, "support"); err == nil {
 		t.Fatal("list without files rights must error")
 	}
 	var out bytes.Buffer
@@ -523,7 +523,7 @@ func TestFileVaultListDeleteQueryErrors(t *testing.T) {
 	if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE files RENAME TO files_gone`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.List(ctx, client, cid); err == nil {
+	if _, err := f.List(ctx, client, cid, "support"); err == nil {
 		t.Fatal("list must surface the query error")
 	}
 	if err := f.Delete(ctx, client, meta.ID); err == nil {
@@ -774,5 +774,73 @@ func TestH9_OrphanReapedWhenRequestContextDies(t *testing.T) {
 			left = append(left, en.Name())
 		}
 		t.Fatalf("the reap must survive the request context, ciphertext left: %v", left)
+	}
+}
+
+// TestFileListIsAPurposedConsentedAuditedRead (review medium): listing
+// metadata IS disclosure (filenames are often the sensitive part), so it
+// carries the same purpose + consent gate and audit trail as a download,
+// and hides expired files like every other read path.
+func TestFileListIsAPurposedConsentedAuditedRead(t *testing.T) {
+	e, f, client, cid := filesEnv(t)
+	ctx := context.Background()
+	if _, err := f.Upload(ctx, client, cid, "tajni-ugovor.pdf", "application/pdf",
+		strings.NewReader("x")); err != nil {
+		t.Fatal(err)
+	}
+	// No purpose -> validation; unknown purpose -> forbidden.
+	if _, err := f.List(ctx, client, cid, ""); !errors.Is(err, service.ErrValidation) {
+		t.Fatalf("purposeless list: %v", err)
+	}
+	if _, err := f.List(ctx, client, cid, "marketing"); !errors.Is(err, service.ErrForbidden) {
+		t.Fatalf("unauthorized purpose: %v", err)
+	}
+	// Withdrawn consent blocks the listing.
+	gdprSvc := &service.GDPR{Pool: e.admin.Pool, Contacts: e.svc}
+	consentClient := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActConsentManage}, AllowedPurposes: []string{"support"}}
+	if err := gdprSvc.SetConsent(ctx, consentClient, cid, "support", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.List(ctx, client, cid, "support"); !errors.Is(err, service.ErrConsentDenied) {
+		t.Fatalf("withdrawn consent must block the listing: %v", err)
+	}
+	if err := gdprSvc.SetConsent(ctx, consentClient, cid, "support", true); err != nil {
+		t.Fatal(err)
+	}
+	// An expired file is invisible.
+	past := time.Now().Add(-time.Hour)
+	if _, err := f.UploadWithExpiry(ctx, client, cid, "stari.pdf", "application/pdf",
+		&past, strings.NewReader("y")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := f.List(ctx, client, cid, "support")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Name != "tajni-ugovor.pdf" {
+		t.Fatalf("expired files must be hidden from the listing: %+v", out)
+	}
+}
+
+// TestGCRedactsMetadata (review medium): the plaintext filename and sha256
+// survived crypto-shredding until the GC sweep got to the row - a content
+// confirmation oracle for any guessable document. Every path that marks
+// gc_at now redacts both.
+func TestGCRedactsMetadata(t *testing.T) {
+	e, f, client, cid := filesEnv(t)
+	ctx := context.Background()
+	meta, err := f.Upload(ctx, client, cid, "oporuka.pdf", "application/pdf", strings.NewReader("z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Delete(ctx, client, meta.ID); err != nil {
+		t.Fatal(err)
+	}
+	var name, sum string
+	err = e.admin.Pool.QueryRow(ctx,
+		`SELECT name, sha256 FROM files WHERE id=$1`, meta.ID).Scan(&name, &sum)
+	if err == nil && (name != "" || sum != "") {
+		t.Fatalf("gc-marked row must carry no plaintext metadata: name=%q sha256=%q", name, sum)
 	}
 }

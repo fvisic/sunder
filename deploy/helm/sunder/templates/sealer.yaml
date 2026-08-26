@@ -1,0 +1,36 @@
+{{- if .Values.audit.sealer.enabled }}
+# Dedicated audit sealer (SUNDER_AUDIT_SEAL_EXTERNAL): exactly one replica
+# chains unsealed rows and closes read-bucket hours, so the API pods never
+# take the chain lock and their database role needs no UPDATE on audit.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-sunder-sealer
+  labels: {{- include "sunder.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sunder-sealer
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sunder-sealer
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: sealer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          args: ["sealer"]
+          env:
+            - name: SUNDER_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: SUNDER_DB_URL
+            {{- include "sunder.auditEnv" . | nindent 12 }}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 128Mi}
+{{- end }}

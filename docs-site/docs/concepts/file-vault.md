@@ -63,7 +63,8 @@ curl -X POST "$SUNDER_URL/v1/contacts/$CID/files" \
   -H "X-Sunder-File-Expiry: 2027-01-01T00:00:00Z" \
   -F "file=@mandate.pdf"                                   # action files.write
 
-curl "$SUNDER_URL/v1/contacts/$CID/files" -H "Authorization: Bearer $CRED"   # metadata only
+curl "$SUNDER_URL/v1/contacts/$CID/files?purpose=support" \
+  -H "Authorization: Bearer $CRED"   # metadata only - purposed, consent-gated and audited like a download
 
 curl "$SUNDER_URL/v1/files/$FILE_ID?purpose=support" \
   -H "Authorization: Bearer $CRED" -o mandate.pdf         # action files.read

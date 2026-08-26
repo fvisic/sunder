@@ -78,6 +78,15 @@ func (g *GDPR) SetConsent(ctx context.Context, client *auth.Client, cid, purpose
 	if _, err := g.Contacts.personForClientCID(ctx, client, cid); err != nil {
 		return err
 	}
+	// The purpose must be one the CLIENT may operate under, like every other
+	// purposed call (GetAttribute, shares.Create): without this, a client
+	// could manage consent - and through the revoke below, kill standing
+	// shares - for purposes entirely outside its own remit. Checked AFTER
+	// cid resolution so an unknown/foreign cid stays a plain 404, never a
+	// purpose-dependent 403 oracle.
+	if !client.CanUse(purpose) {
+		return ErrForbidden
+	}
 	tx, err := g.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -89,15 +98,14 @@ func (g *GDPR) SetConsent(ctx context.Context, client *auth.Client, cid, purpose
 		cid, purpose, granted); err != nil {
 		return err
 	}
-	// F8: withdrawing consent revokes this person's standing shares - a
-	// partner UUID must not keep answering after consent is pulled. Scoped
-	// to the person behind this cid.
+	// F8: withdrawing consent revokes the standing shares this withdrawal
+	// actually governs - THIS cid, THIS purpose. Shares carry a purpose
+	// (S1) and their fetch re-checks consent per (cid, purpose), so a
+	// person-wide revoke was both redundant and a cross-scope hammer: a
+	// client in scope A with only consent.manage could kill every scope's
+	// shares for every purpose.
 	if !granted {
-		var personID string
-		if err := tx.QueryRow(ctx, `SELECT person_id FROM cids WHERE cid=$1`, cid).Scan(&personID); err != nil {
-			return err
-		}
-		if err := revokeSharesForCID(ctx, tx, personID); err != nil {
+		if err := revokeShares(ctx, tx, cid, purpose); err != nil {
 			return err
 		}
 	}

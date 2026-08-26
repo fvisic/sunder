@@ -318,3 +318,43 @@ func TestSharesDeletedNotJustRevokedOnErasure(t *testing.T) {
 		t.Fatalf("erasure must delete the person's shares (row must not linger), %d left", n)
 	}
 }
+
+// TestConsentRevokeIsCidAndPurposeScoped (review medium): withdrawing
+// consent used to revoke EVERY standing share of the person - every scope,
+// every purpose - so a client in scope A with only consent.manage could kill
+// scope B's shares. The revoke now covers exactly what the withdrawal
+// governs: this cid, this purpose.
+func TestConsentRevokeIsCidAndPurposeScoped(t *testing.T) {
+	e, sh, client, cid := sharesEnv(t)
+	ctx := context.Background()
+	// A second consented purpose with its own share.
+	client.AllowedPurposes = append(client.AllowedPurposes, "billing")
+	if err := e.gdpr.SetConsent(ctx, client, cid, "billing", true); err != nil {
+		t.Fatal(err)
+	}
+	uSupport, _, err := sh.Create(ctx, client, service.ShareInput{
+		CID: cid, Fields: []string{"iban"}, PartnerLabel: "p", Purpose: "support", TTLSeconds: 3600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uBilling, _, err := sh.Create(ctx, client, service.ShareInput{
+		CID: cid, Fields: []string{"iban"}, PartnerLabel: "p", Purpose: "billing", TTLSeconds: 3600})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Withdraw ONLY support: its share dies, billing's survives.
+	if err := e.gdpr.SetConsent(ctx, client, cid, "support", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sh.Fetch(ctx, "partner", uSupport); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("the withdrawn purpose's share must be dead: %v", err)
+	}
+	if fields, err := sh.Fetch(ctx, "partner", uBilling); err != nil || fields["iban"] == "" {
+		t.Fatalf("the other purpose's share must survive: %v %v", fields, err)
+	}
+	// A purpose outside the client's remit is refused outright.
+	if err := e.gdpr.SetConsent(ctx, client, cid, "espionage", false); !errors.Is(err, service.ErrForbidden) {
+		t.Fatalf("consent for an unauthorized purpose must be forbidden: %v", err)
+	}
+}

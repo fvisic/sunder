@@ -25,7 +25,7 @@ func gdprEnv(t *testing.T) (e *e2eEnv, credDPO string) {
 	ctx := context.Background()
 	if _, err := e.srv.Store.Pool.Exec(ctx,
 		`UPDATE clients SET allowed_actions = allowed_actions || '{consent.manage,lookup,oti.issue,dsr.export}',
-		                    allowed_purposes = allowed_purposes || '{create_order}'
+		                    allowed_purposes = allowed_purposes || '{create_order,analytics}'
 		 WHERE client_id='crm'`); err != nil {
 		t.Fatal(err)
 	}

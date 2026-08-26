@@ -83,6 +83,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: SUNDER_DELIVER_INTERVAL
   value: {{ .Values.tunables.deliverInterval | quote }}
 {{- end }}
+{{- include "sunder.auditEnv" . }}
+{{- if .Values.audit.sealer.enabled }}
+- name: SUNDER_AUDIT_SEAL_EXTERNAL
+  value: "true"
+{{- end }}
 {{- if .Values.metrics.existingSecret }}
 - name: SUNDER_METRICS_TOKEN
   valueFrom:
@@ -116,5 +121,35 @@ app.kubernetes.io/instance: {{ .Release.Name }}
     secretKeyRef:
       name: {{ .Values.keystore.vault.existingSecret }}
       key: SUNDER_VAULT_TOKEN
+{{- end }}
+{{- end }}
+
+{{/* The audit posture, shared VERBATIM by every workload that reads it: the
+API pods, the dedicated sealer (which must run with the same tunables the
+operator set - not hard-coded defaults) and the verify-audit CronJob (whose
+verdict branches on the sealing/read mode: a job seeing "async" under a sync
+posture would skip the stranded-rows hard failure and report success where a
+hand-run verify reports BROKEN). SEAL_EXTERNAL is deliberately NOT here - it
+is an API-pod statement about who seals, appended separately. */}}
+{{- define "sunder.auditEnv" -}}
+{{- with .Values.audit.sealing }}
+- name: SUNDER_AUDIT_SEALING
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.audit.reads }}
+- name: SUNDER_AUDIT_READS
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.audit.sealInterval }}
+- name: SUNDER_AUDIT_SEAL_INTERVAL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.audit.sealDelay }}
+- name: SUNDER_AUDIT_SEAL_DELAY
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.audit.sealBatch }}
+- name: SUNDER_AUDIT_SEAL_BATCH
+  value: {{ . | quote }}
 {{- end }}
 {{- end }}

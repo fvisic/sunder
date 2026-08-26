@@ -29,7 +29,7 @@ FID=$(jget id)
 say "file id: $FID  (stored as AEAD ciphertext; the driver never sees plaintext)"
 
 step "List files (metadata only)"
-api GET "/v1/contacts/$CID/files" "$C"
+api GET "/v1/contacts/$CID/files?purpose=support" "$C"
 expect 200 "list"
 
 step "Download needs a purpose"

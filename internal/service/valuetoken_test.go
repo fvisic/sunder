@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -652,11 +653,11 @@ func TestS4_ValueTokensDieWithThePerson(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "x", CID: erpCID}); !errors.Is(err, service.ErrValidation) {
-		t.Fatalf("foreign-scope cid must be refused: %v", err)
+	if _, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "x", CID: erpCID}); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("foreign-scope cid must be an indistinguishable miss: %v", err)
 	}
-	if _, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "x", CID: "CID-NOPE"}); !errors.Is(err, service.ErrValidation) {
-		t.Fatalf("unknown cid must be refused: %v", err)
+	if _, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "x", CID: "CID-NOPE"}); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("unknown cid must be an indistinguishable miss: %v", err)
 	}
 
 	if _, _, err := e.gdpr.Erase(ctx, reg, cid); err != nil {
@@ -925,5 +926,76 @@ func TestS4_AdoptionSurvivesDeadRowInTargetSlot(t *testing.T) {
 	}
 	if got != free {
 		t.Fatalf("must adopt the live unattributed row: got %q want %q", got, free)
+	}
+}
+
+// TestConcurrentUniqueTokenizeConverges (review medium): a unique_hash
+// collision from a CONCURRENT tokenize of the same value used to be retried
+// by minting a fresh random token - which can never satisfy the constraint -
+// and after three raw 23505s surfaced as a 500 (in bulk with the unlock
+// token already burned). The retry now inspects the constraint and returns
+// the winner's token.
+func TestConcurrentUniqueTokenizeConverges(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+
+	const workers = 8
+	tokens := make([]string, workers)
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			tokens[i], errs[i] = v.Tokenize(ctx, client, service.TokenizeInput{Value: "RACE-ME", Unique: true})
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d: concurrent unique tokenize must never error: %v", i, err)
+		}
+		if tokens[i] != tokens[0] {
+			t.Fatalf("all workers must converge on ONE token: %q vs %q", tokens[i], tokens[0])
+		}
+	}
+	var n int64
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM value_tokens WHERE scope='crm'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("exactly one row may exist, found %d", n)
+	}
+}
+
+// TestTokenDeleteIsAttributed (review medium): tokens.delete used to audit an
+// EMPTY detail - destroying the only copy of a sealed value left no trace of
+// what was destroyed or who had minted it.
+func TestTokenDeleteIsAttributed(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	tok, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "GONE-SOON"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createdBy string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT COALESCE(created_by,'') FROM value_tokens WHERE token=$1`, tok).Scan(&createdBy); err != nil {
+		t.Fatal(err)
+	}
+	if createdBy != "crm" {
+		t.Fatalf("mint must record its client: %q", createdBy)
+	}
+	if err := v.Delete(ctx, client, tok); err != nil {
+		t.Fatal(err)
+	}
+	var detail string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT detail FROM audit WHERE action='tokens.delete' ORDER BY seq DESC LIMIT 1`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(detail, tok) || !strings.Contains(detail, `"created_by":"crm"`) {
+		t.Fatalf("the delete audit must attribute what was destroyed: %s", detail)
 	}
 }

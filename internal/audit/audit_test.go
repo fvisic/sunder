@@ -2,8 +2,12 @@ package audit
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fvisic/sunder/internal/store"
 	"github.com/fvisic/sunder/internal/testutil"
@@ -200,5 +204,94 @@ func TestConcurrentAppendsKeepChainIntact(t *testing.T) {
 	}
 	if broken != 0 || pending != 0 {
 		t.Fatalf("chain broken at %d (pending %d) after concurrent appends: %s", broken, pending, reason)
+	}
+}
+
+// TestUserIDIsTamperEvident (review medium): user_id was the ONE audited
+// field a database attacker could edit without tripping verification - the
+// field that says who did it. It is now inside the v2 canonical tuple; rows
+// sealed before the change (hash_v=1) keep verifying under the old tuple.
+func TestUserIDIsTamperEvident(t *testing.T) {
+	setMode(t, "sync")
+	s := testPool(t)
+	ctx := context.Background()
+
+	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "attributes.read",
+		CID: "CID-U", UserID: "agent-7", Detail: map[string]any{"k": "v"}}); err != nil {
+		t.Fatal(err)
+	}
+	if broken, why, _, err := Verify(ctx, s.Pool); err != nil || broken != 0 {
+		t.Fatalf("fresh chain must verify: %d %s %v", broken, why, err)
+	}
+
+	// The database attacker edits WHO did it (trigger disabled, as every
+	// tamper simulation here does).
+	if _, err := s.Pool.Exec(ctx, `ALTER TABLE audit DISABLE TRIGGER audit_no_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `UPDATE audit SET user_id='someone-else' WHERE user_id='agent-7'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `ALTER TABLE audit ENABLE TRIGGER audit_no_update`); err != nil {
+		t.Fatal(err)
+	}
+	broken, why, _, err := Verify(ctx, s.Pool)
+	if err != nil || broken == 0 || !strings.Contains(why, "does not match its hash") {
+		t.Fatalf("an edited user_id must break verification: %d %q %v", broken, why, err)
+	}
+}
+
+// TestV1RowsKeepVerifying: a row sealed BEFORE 0033 was hashed WITHOUT
+// user_id (hash_v=1). Verification must recompute it under its own tuple
+// version, or the upgrade itself would flip every existing chain to
+// "tampered" - the exact failure mode the H12 grandfathering exists for.
+func TestV1RowsKeepVerifying(t *testing.T) {
+	setMode(t, "sync")
+	s := testPool(t)
+	ctx := context.Background()
+
+	// Hand-seal a v1 row: hash over the OLD tuple (no user_id), hash_v=1 -
+	// byte-identical to what a pre-0033 deployment left behind.
+	ts := time.Now().UTC().Truncate(time.Microsecond)
+	e := Entry{ClientID: "crm", Action: "lookup", CID: "CID-OLD"}
+	detail := []byte(`{"legacy":true}`)
+	sum := sha256.Sum256([]byte(canonical(1, "", ts, e, detail)))
+	if _, err := s.Pool.Exec(ctx, `
+		INSERT INTO audit (ts, client_id, action, cid, detail, prev_hash, hash, chain_seq, user_id, hash_v)
+		VALUES ($1,'crm','lookup','CID-OLD',$2,NULL,$3,1,'legacy-agent',1)`,
+		ts, string(detail), hex.EncodeToString(sum[:])); err != nil {
+		t.Fatal(err)
+	}
+	// A v2 row chains on top through the normal path.
+	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "lookup",
+		CID: "CID-NEW", UserID: "agent-9"}); err != nil {
+		t.Fatal(err)
+	}
+	if broken, why, _, err := Verify(ctx, s.Pool); err != nil || broken != 0 {
+		t.Fatalf("a mixed v1+v2 chain must verify: %d %s %v", broken, why, err)
+	}
+}
+
+// TestSealerSurvivesAppClockAhead (review medium): the sealer's age filter
+// compared the APP-stamped ts to the DATABASE clock, so an app clock ahead
+// by more than the delay stalled sealing silently. The filter now uses
+// db_ts (database clock at insert): a row whose app ts is an hour in the
+// future still seals once its DB age passes the delay.
+func TestSealerSurvivesAppClockAhead(t *testing.T) {
+	setMode(t, "async")
+	s := testPool(t)
+	ctx := context.Background()
+
+	if _, err := s.Pool.Exec(ctx, `
+		INSERT INTO audit (ts, client_id, action, detail, db_ts)
+		VALUES (now() + interval '1 hour', 'crm', 'lookup', '{}', now() - interval '1 minute')`); err != nil {
+		t.Fatal(err)
+	}
+	n, err := SealOnce(ctx, s.Pool, 100, 2*time.Second)
+	if err != nil || n != 1 {
+		t.Fatalf("a DB-old row must seal regardless of its app timestamp: sealed=%d err=%v", n, err)
+	}
+	if broken, why, pending, err := Verify(ctx, s.Pool); err != nil || broken != 0 || pending != 0 {
+		t.Fatalf("chain after skewed seal: %d %s pending=%d err=%v", broken, why, pending, err)
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/fvisic/sunder/internal/store"
 )
 
 // setReads pins the read-audit mode for one test and restores the
@@ -13,6 +15,24 @@ func setReads(t *testing.T, m string) {
 	old := ReadsMode()
 	SetReadsMode(m)
 	t.Cleanup(func() { SetReadsMode(old) })
+}
+
+// insertSealedRow plants an ALREADY-SEALED bucket row directly - the forgery
+// the audit_read_buckets_open_insert guard exists to refuse - by disabling
+// that guard around the statement, the way other tests simulate a
+// database-level attacker.
+func insertSealedRow(t *testing.T, s *store.Store, sql string, args ...any) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.Pool.Exec(ctx, `ALTER TABLE audit_read_buckets DISABLE TRIGGER audit_read_buckets_open_insert`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, sql, args...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `ALTER TABLE audit_read_buckets ENABLE TRIGGER audit_read_buckets_open_insert`); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestReadEventBucketsAndCounts(t *testing.T) {
@@ -150,11 +170,9 @@ func TestLateEventForSealedHourFallsBackToChain(t *testing.T) {
 	// A sealed bucket already exists for the CURRENT hour (as if the
 	// closer raced a clock anomaly) - the conditional upsert would match
 	// zero rows.
-	if _, err := s.Pool.Exec(ctx, `
+	insertSealedRow(t, s, `
 		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count, sealed_at)
-		VALUES ('crm','agent-7','CID-A','lookup', date_trunc('hour', now()), 2, now())`); err != nil {
-		t.Fatal(err)
-	}
+		VALUES ('crm','agent-7','CID-A','lookup', date_trunc('hour', now()), 2, now())`)
 	if err := ReadEvent(ctx, s.Pool, Entry{
 		ClientID: "crm", Action: "lookup", CID: "CID-A", UserID: "agent-7"}); err != nil {
 		t.Fatal(err)
@@ -203,11 +221,9 @@ func TestVerifyReadBucketsDetectsMissingAndOrphanHours(t *testing.T) {
 	ctx := context.Background()
 
 	// Sealed buckets WITHOUT their chained hourly row: broken.
-	if _, err := s.Pool.Exec(ctx, `
+	insertSealedRow(t, s, `
 		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count, sealed_at)
-		VALUES ('crm','','CID-A','lookup', date_trunc('hour', now() - interval '2 hours'), 1, now())`); err != nil {
-		t.Fatal(err)
-	}
+		VALUES ('crm','','CID-A','lookup', date_trunc('hour', now() - interval '2 hours'), 1, now())`)
 	bad, why, _, err := VerifyReadBuckets(ctx, s.Pool)
 	if err != nil || bad == "" || !strings.Contains(why, "missing") {
 		t.Fatalf("sealed buckets without an hourly row must be detected: %q (%s) err=%v", bad, why, err)
@@ -477,11 +493,9 @@ func TestSealDigestCoversExactlyTheSealedRows(t *testing.T) {
 	// Simulate the race's aftermath: a row that is sealed but was never in
 	// the digest (the trigger allows INSERT, so a database attacker - or the
 	// old racy close - can produce exactly this). Verification must flag it.
-	if _, err := s.Pool.Exec(ctx, `
+	insertSealedRow(t, s, `
 		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count, sealed_at)
-		VALUES ('crm','','CID-H11-EXTRA','lookup', date_trunc('hour', now() - interval '2 hours'), 1, now())`); err != nil {
-		t.Fatal(err)
-	}
+		VALUES ('crm','','CID-H11-EXTRA','lookup', date_trunc('hour', now() - interval '2 hours'), 1, now())`)
 	bad, why, _, err := VerifyReadBuckets(ctx, s.Pool)
 	if err != nil || bad == "" || !strings.Contains(why, "do not match") {
 		t.Fatalf("a sealed row outside the digest must be reported: %q (%s) err=%v", bad, why, err)
@@ -520,5 +534,75 @@ func TestDigestMatchesGrandfathersLegacyOrder(t *testing.T) {
 	// And a genuinely wrong digest still fails.
 	if digestMatches("deadbeef", arrived2) {
 		t.Fatal("a digest matching neither order must be reported")
+	}
+}
+
+// TestForgedSealedBucketInsertRefused (review medium): the guard triggers
+// covered UPDATE/DELETE/TRUNCATE but not INSERT - and INSERT is exactly the
+// privilege the API role holds, so one forged SEALED row poisoned bucket
+// verification permanently. Legitimate inserts are always open.
+func TestForgedSealedBucketInsertRefused(t *testing.T) {
+	s := testPool(t)
+	ctx := context.Background()
+	_, err := s.Pool.Exec(ctx, `
+		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count, sealed_at)
+		VALUES ('evil','','CID-X','lookup', date_trunc('hour', now() - interval '3 hours'), 1, now())`)
+	if err == nil || !strings.Contains(err.Error(), "inserted OPEN") {
+		t.Fatalf("a pre-sealed bucket insert must be refused: %v", err)
+	}
+	// An OPEN insert (what ReadEvent does) still works.
+	if _, err := s.Pool.Exec(ctx, `
+		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count)
+		VALUES ('ok','','CID-X','lookup', date_trunc('hour', now()), 1)`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCloserSkipsAlreadySummarizedHour (review medium): open rows landing in
+// an hour whose chained hourly row already exists must NOT be summarized
+// again - a second audit.reads_hourly row is a permanent "hour summarized
+// twice" verification poison. They stay unsealed (visible in the pending
+// count) and every other hour keeps closing.
+func TestCloserSkipsAlreadySummarizedHour(t *testing.T) {
+	setReads(t, ReadsBucketed)
+	setMode(t, "sync")
+	s := testPool(t)
+	ctx := context.Background()
+
+	// A legitimately closed hour.
+	if _, err := s.Pool.Exec(ctx, `
+		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count)
+		VALUES ('crm','','CID-A','lookup', date_trunc('hour', now() - interval '3 hours'), 2)`); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := CloseReadBuckets(ctx, s.Pool); err != nil || n != 1 {
+		t.Fatalf("close: %d %v", n, err)
+	}
+	// A forged/late OPEN row lands in that same closed hour, and a normal
+	// open row in a DIFFERENT past hour.
+	if _, err := s.Pool.Exec(ctx, `
+		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count)
+		VALUES ('late','','CID-B','lookup', date_trunc('hour', now() - interval '3 hours'), 1),
+		       ('crm','','CID-C','lookup', date_trunc('hour', now() - interval '2 hours'), 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := CloseReadBuckets(ctx, s.Pool); err != nil || n != 1 {
+		t.Fatalf("only the fresh hour must close: %d %v", n, err)
+	}
+	var hourly int64
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit WHERE action='audit.reads_hourly'`).Scan(&hourly); err != nil {
+		t.Fatal(err)
+	}
+	if hourly != 2 {
+		t.Fatalf("the poisoned hour must NOT be summarized twice: %d hourly rows", hourly)
+	}
+	// Verification stays clean; the stranded row shows as pending, loudly.
+	bad, why, pending, err := VerifyReadBuckets(ctx, s.Pool)
+	if err != nil || bad != "" {
+		t.Fatalf("verify must stay clean: %q (%s) %v", bad, why, err)
+	}
+	if pending != 1 {
+		t.Fatalf("the stranded hour must be pending: %d", pending)
 	}
 }
