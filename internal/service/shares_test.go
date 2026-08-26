@@ -297,3 +297,24 @@ func TestS1_FetchRechecksConsent(t *testing.T) {
 		t.Fatalf("fetch must re-check consent and miss after withdrawal: %v", err)
 	}
 }
+
+// TestSharesDeletedNotJustRevokedOnErasure: an erased person's shares must
+// be DELETED (row gone), not left as revoked rows still holding the
+// pseudonym.
+func TestSharesDeletedNotJustRevokedOnErasure(t *testing.T) {
+	e, sh, client, cid := sharesEnv(t)
+	ctx := context.Background()
+	if _, _, err := sh.Create(ctx, client, service.ShareInput{CID: cid, Fields: []string{"iban"}, PartnerLabel: "p", Purpose: "support", TTLSeconds: 3600}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.gdpr.Erase(ctx, client, cid); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM shared_records WHERE cid=$1`, cid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("erasure must delete the person's shares (row must not linger), %d left", n)
+	}
+}
