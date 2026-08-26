@@ -618,7 +618,7 @@ func TestFullDataErasureExercisesAllDeletions(t *testing.T) {
 	ctx := context.Background()
 	client := &auth.Client{ID: "crm", Scope: "crm",
 		AllowedActions: []string{auth.ActContactsRegister, auth.ActConsentManage,
-			auth.ActSharesCreate, auth.ActLinksManage, auth.ActDSRErase},
+			auth.ActSharesCreate, auth.ActAttributesRead, auth.ActLinksManage, auth.ActDSRErase},
 		AllowedPurposes: []string{"support"}}
 	cid, err := e.svc.Register(ctx, client, service.RegisterInput{
 		Email: "full@example.com", Attributes: map[string]string{"iban": "HR12"}})
@@ -635,7 +635,7 @@ func TestFullDataErasureExercisesAllDeletions(t *testing.T) {
 	}
 	sh := &service.Shares{Pool: e.admin.Pool, Contacts: e.svc}
 	if _, _, err := sh.Create(ctx, client, service.ShareInput{
-		CID: cid, Fields: []string{"iban"}, PartnerLabel: "p", TTLSeconds: 3600}); err != nil {
+		CID: cid, Fields: []string{"iban"}, PartnerLabel: "p", Purpose: "support", TTLSeconds: 3600}); err != nil {
 		t.Fatal(err)
 	}
 	var personID string

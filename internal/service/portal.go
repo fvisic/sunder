@@ -144,7 +144,7 @@ func (p *Portal) Start(ctx context.Context, email string) error {
 		hashToken(token), personID, expires); err != nil {
 		return err
 	}
-	if err := p.enqueueMail(ctx, tx, "login", normalized, token, expires); err != nil {
+	if err := p.enqueueMail(ctx, tx, personID, "login", normalized, token, expires); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -193,7 +193,7 @@ type mailPayload struct {
 // .
 const maxMailAttempts = 5
 
-func (p *Portal) enqueueMail(ctx context.Context, tx pgx.Tx, kind, email, token string, expires time.Time) error {
+func (p *Portal) enqueueMail(ctx context.Context, tx pgx.Tx, personID, kind, email, token string, expires time.Time) error {
 	plain, err := json.Marshal(mailPayload{Email: email, Token: token})
 	if err != nil {
 		return err
@@ -207,8 +207,8 @@ func (p *Portal) enqueueMail(ctx context.Context, tx pgx.Tx, kind, email, token 
 		return err
 	}
 	_, err = tx.Exec(ctx,
-		`INSERT INTO portal_outbox (kind, payload, key_id, alg, expires_at) VALUES ($1,$2,$3,$4,$5)`,
-		kind, sealed, keyID, p.Contacts.PII.Algorithm(), expires)
+		`INSERT INTO portal_outbox (kind, payload, key_id, alg, expires_at, person_id) VALUES ($1,$2,$3,$4,$5,$6)`,
+		kind, sealed, keyID, p.Contacts.PII.Algorithm(), expires, personID)
 	return err
 }
 
@@ -539,7 +539,7 @@ func (p *Portal) RequestErase(ctx context.Context, personID string) error {
 		hashToken(token), personID, expires); err != nil {
 		return err
 	}
-	if err := p.enqueueMail(ctx, tx, "erase_confirm", email, token, expires); err != nil {
+	if err := p.enqueueMail(ctx, tx, personID, "erase_confirm", email, token, expires); err != nil {
 		return err
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{

@@ -294,7 +294,14 @@ func newS3(cfg Config) (Driver, error) {
 		return nil, fmt.Errorf("storage: invalid s3 bucket name %q", cfg.S3Bucket)
 	}
 	return &s3Driver{
-		client:    &http.Client{Timeout: 60 * time.Second},
+		client: &http.Client{
+			Timeout: 60 * time.Second,
+			// Never follow redirects: a SigV4 request is signed for one
+			// host, and following a 3xx would replay the (unsigned-for-the-
+			// new-host) request - carrying the object body - at an
+			// attacker- or misconfig-chosen target.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		endpoint:  u,
 		bucket:    cfg.S3Bucket,
 		region:    cfg.S3Region,

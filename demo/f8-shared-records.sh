@@ -16,8 +16,12 @@ api POST /v1/contacts "$C" '{"email":"share-demo@example.com","name":"Ana Horvat
 expect 201 "register"
 CID=$(jget cid)
 
+step "Grant consent for the purpose the share will carry"
+api POST /v1/consent "$C" "{\"cid\":\"$CID\",\"purpose\":\"support\",\"granted\":true}"
+expect 200 "grant consent"
+
 step "Create a share exposing ONLY name (not the IBAN) for a partner"
-api POST /v1/shares "$C" "{\"cid\":\"$CID\",\"fields\":[\"name\"],\"partner_label\":\"acme-logistics\",\"ttl_seconds\":3600}"
+api POST /v1/shares "$C" "{\"cid\":\"$CID\",\"fields\":[\"name\"],\"partner_label\":\"acme-logistics\",\"purpose\":\"support\",\"ttl_seconds\":3600}"
 expect 201 "create share"
 UUID=$(jget uuid)
 say "share uuid: $UUID"

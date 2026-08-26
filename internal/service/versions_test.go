@@ -247,3 +247,50 @@ func TestVersionReadAuditDenied(t *testing.T) {
 		t.Fatal("history read must fail closed when audit is denied")
 	}
 }
+
+// TestS5_RekeyRewrapsVersionHistory reproduces S5: keys rekey must
+// re-encrypt attribute-version blobs under the newest KEK, so retiring a
+// leaked KEK stops it decrypting old history too.
+func TestS5_RekeyRewrapsVersionHistory(t *testing.T) {
+	e := newFaultEnv(t)
+	e.svc.VersionsKeep = 3
+	ctx := context.Background()
+	cid, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+		Email: "s5@example.com", Attributes: map[string]string{"tier": "bronze"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+		Email: "s5@example.com", Attributes: map[string]string{"tier": "gold"}}); err != nil {
+		t.Fatal(err)
+	}
+	// A version row exists under the current KEK.
+	var vKeyBefore string
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT key_id FROM cid_blob_versions WHERE cid=$1 LIMIT 1`, cid).Scan(&vKeyBefore); err != nil {
+		t.Fatal(err)
+	}
+	newKEK, err := e.svc.Ring.Rotate(ctx, e.svc.PII.Engine(), "pii-kek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := e.svc.Rekey(ctx, true, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.VersionsRewrapped < 1 {
+		t.Fatalf("rekey must re-wrap version history: %+v", stats)
+	}
+	var vKeyAfter string
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT key_id FROM cid_blob_versions WHERE cid=$1 LIMIT 1`, cid).Scan(&vKeyAfter); err != nil {
+		t.Fatal(err)
+	}
+	if vKeyAfter != newKEK || vKeyAfter == vKeyBefore {
+		t.Fatalf("version blob still under the old KEK: before=%s after=%s newest=%s", vKeyBefore, vKeyAfter, newKEK)
+	}
+	// And the history still reads correctly under the new wrapping.
+	hist := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActAttributesHistory}, AllowedPurposes: []string{"support"}}
+	if v, err := e.svc.GetVersionAttribute(ctx, hist, cid, 1, "tier", "support"); err != nil || v != "bronze" {
+		t.Fatalf("version still readable after rekey: %q %v", v, err)
+	}
+}

@@ -670,3 +670,36 @@ func TestPortalMailDeliveredSuccessfully(t *testing.T) {
 		t.Fatalf("chain must record the delivery, got %d", sent)
 	}
 }
+
+// TestS2_PortalOutboxDeletedOnErasure reproduces the S2 finding: a queued
+// login/erase mail for the erased person must not survive erasure (the old
+// cleanup deleted nothing).
+func TestS2_PortalOutboxDeletedOnErasure(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	cid := e.register(t) // registers fault@example.com
+	p := &service.Portal{GDPR: e.gdpr, Contacts: e.svc}
+	// Start enqueues a login mail into portal_outbox tagged with person_id.
+	if err := p.Start(ctx, "fault@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	var personID string
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT person_id FROM cids WHERE cid=$1`, cid).Scan(&personID); err != nil {
+		t.Fatal(err)
+	}
+	var before int64
+	e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM portal_outbox WHERE person_id=$1`, personID).Scan(&before)
+	if before == 0 {
+		t.Fatal("precondition: Start should have queued a mail with the person_id")
+	}
+	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err != nil {
+		t.Fatal(err)
+	}
+	var after int64
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM portal_outbox WHERE person_id=$1`, personID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != 0 {
+		t.Fatalf("erasure must delete the person's queued mail, %d left", after)
+	}
+}
