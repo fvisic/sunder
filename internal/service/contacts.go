@@ -524,6 +524,25 @@ func (c *Contacts) GetAttribute(ctx context.Context, client *auth.Client, cid, n
 // ACTIVE pii-kek and the configured algorithm - rotation and algorithm
 // migration complete on touch, old rows stay decryptable via their stored
 // pii_key_id/pii_alg.
+// decryptCID reads and decrypts one cid's attribute blob with no client
+// context - used where the authorization is external to a client credential
+// (F8 shares carry their own authorization). Returns an empty map for a cid
+// with no blob yet.
+func (c *Contacts) decryptCID(ctx context.Context, cid string) (map[string]string, error) {
+	var blob []byte
+	var keyID, alg string
+	err := c.Pool.QueryRow(ctx,
+		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1`,
+		cid).Scan(&blob, &keyID, &alg)
+	if err != nil {
+		return nil, err
+	}
+	if len(blob) == 0 {
+		return map[string]string{}, nil
+	}
+	return c.PII.Decrypt(ctx, cid, blob, keyID, alg)
+}
+
 func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid string, attrs map[string]string) error {
 	var oldBlob []byte
 	var oldKeyID, oldAlg string

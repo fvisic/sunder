@@ -43,6 +43,7 @@ const (
 	ActFilesRead         = "files.read"
 	ActAttributesHistory = "attributes.history"
 	ActLinksManage       = "links.manage"
+	ActSharesCreate      = "shares.create"
 	ActDSRAccess         = "dsr.access"
 	ActDSRErase          = "dsr.erase"
 	ActDSRExport         = "dsr.export"
@@ -95,7 +96,7 @@ func RoleActions(role string) []string {
 		return []string{ActLookup, ActAttributesRead, ActContactsRegister,
 			ActScopesIssue, ActOTIIssue, ActOTIVerify, ActConsentManage,
 			ActClaimsExternal, ActAdminUnlock, ActTokensCreate, ActTokensRead, ActTokensDelete,
-			ActFilesWrite, ActFilesRead, ActAttributesHistory, ActLinksManage}
+			ActFilesWrite, ActFilesRead, ActAttributesHistory, ActLinksManage, ActSharesCreate}
 	case RolePrivacyOfficer:
 		return []string{ActDSRAccess, ActDSRErase, ActDSRExport, ActConsentManage}
 	}

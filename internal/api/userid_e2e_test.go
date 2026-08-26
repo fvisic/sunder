@@ -1114,3 +1114,169 @@ func TestLinkHandlerErrorBranches(t *testing.T) {
 		t.Fatalf("link unknown cids: %d", rec.Code)
 	}
 }
+
+// TestSharesOverHTTP drives F8 create/fetch/revoke in the default (authed
+// fetch) mode.
+func TestSharesOverHTTP(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActSharesCreate},
+		AllowedPurposes: []string{"support"}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partner, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "partner", Name: "P", Scope: "partner",
+		AllowedActions: []string{auth.ActLookup}, AllowedPurposes: []string{}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{
+		"email": "a@example.com", "attributes": map[string]string{"iban": "HR12"}})
+	cid := out["cid"]
+	rec, o := e.do(t, cred, "POST", "/v1/shares", map[string]any{
+		"cid": cid, "fields": []string{"iban"}, "partner_label": "acme", "ttl_seconds": 3600})
+	if rec.Code != 201 || o["uuid"] == "" {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	uuid := o["uuid"]
+	// Default mode: any valid credential (the partner) can fetch.
+	rec, of := e.do(t, partner, "GET", "/v1/shares/"+uuid, nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "HR12") {
+		t.Fatalf("authed fetch: %d %s", rec.Code, rec.Body.String())
+	}
+	_ = of
+	// No credential is rejected by the auth middleware in default mode.
+	req := httptest.NewRequest("GET", "/v1/shares/"+uuid, nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 401 {
+		t.Fatalf("default mode must require a credential: %d", rr.Code)
+	}
+	// Revoke.
+	rec, _ = e.do(t, cred, "DELETE", "/v1/shares/"+uuid, nil)
+	if rec.Code != 200 {
+		t.Fatalf("revoke: %d", rec.Code)
+	}
+	rec, _ = e.do(t, partner, "GET", "/v1/shares/"+uuid, nil)
+	if rec.Code != 404 {
+		t.Fatalf("revoked share fetch: %d", rec.Code)
+	}
+}
+
+// TestSharesPublicMode: with SUNDER_SHARES_PUBLIC the fetch needs no
+// credential.
+func TestSharesPublicMode(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActSharesCreate},
+		AllowedPurposes: []string{"support"}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(), SharesPublic: true}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{
+		"email": "a@example.com", "attributes": map[string]string{"iban": "HR12"}})
+	rec, o := e.do(t, cred, "POST", "/v1/shares", map[string]any{
+		"cid": out["cid"], "fields": []string{"iban"}, "partner_label": "acme", "ttl_seconds": 3600})
+	if rec.Code != 201 {
+		t.Fatalf("create: %d", rec.Code)
+	}
+	// Credential-less fetch works in public mode.
+	req := httptest.NewRequest("GET", "/v1/shares/"+o["uuid"], nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "HR12") {
+		t.Fatalf("public fetch: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestShareHandlerErrorBranches(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActSharesCreate},
+		AllowedPurposes: []string{"support"}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	weak, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "weak", Name: "W", Scope: "crm",
+		AllowedActions: []string{auth.ActLookup}, AllowedPurposes: []string{}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	// Create without action: 403.
+	rec, _ := e.do(t, weak, "POST", "/v1/shares", map[string]any{"cid": "x", "fields": []string{"a"}, "partner_label": "p", "ttl_seconds": 60})
+	if rec.Code != 403 {
+		t.Fatalf("create without action: %d", rec.Code)
+	}
+	// Revoke without action: 403.
+	rec, _ = e.do(t, weak, "DELETE", "/v1/shares/00000000-0000-4000-8000-000000000000", nil)
+	if rec.Code != 403 {
+		t.Fatalf("revoke without action: %d", rec.Code)
+	}
+	// Malformed create body: 400.
+	req := httptest.NewRequest("POST", "/v1/shares", strings.NewReader(`{bad`))
+	req.Header.Set("Authorization", "Bearer "+cred)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 400 {
+		t.Fatalf("bad create body: %d", rr.Code)
+	}
+	// Fetch a nonexistent share (authed default mode): 404.
+	rec, _ = e.do(t, cred, "GET", "/v1/shares/00000000-0000-4000-8000-000000000000", nil)
+	if rec.Code != 404 {
+		t.Fatalf("unknown share fetch: %d", rec.Code)
+	}
+}
+
+func TestShareCreateRateLimited(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActSharesCreate},
+		AllowedPurposes: []string{"support"}, RateLimit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{"email": "a@example.com", "attributes": map[string]string{"iban": "HR12"}})
+	cid := out["cid"]
+	got429 := false
+	for i := 0; i < 10; i++ {
+		rec, _ := e.do(t, cred, "POST", "/v1/shares", map[string]any{"cid": cid, "fields": []string{"iban"}, "partner_label": "p", "ttl_seconds": 60})
+		if rec.Code == 429 {
+			got429 = true
+			break
+		}
+	}
+	if !got429 {
+		t.Fatal("share creation must be rate limited")
+	}
+}
