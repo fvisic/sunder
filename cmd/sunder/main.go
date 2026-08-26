@@ -259,7 +259,7 @@ func knownActions() map[string]bool {
 		auth.ActConsentManage: true, auth.ActDSRAccess: true, auth.ActDSRErase: true,
 		auth.ActDSRExport: true, auth.ActClaimsExternal: true, auth.ActAdminUnlock: true,
 		auth.ActTokensCreate: true, auth.ActTokensRead: true, auth.ActTokensDelete: true,
-		auth.ActFilesWrite: true, auth.ActFilesRead: true, auth.ActLinksManage: true,
+		auth.ActFilesWrite: true, auth.ActFilesRead: true, auth.ActLinksManage: true, auth.ActSharesCreate: true,
 	}
 }
 
@@ -315,6 +315,10 @@ func retentionCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 		if err != nil {
 			return err
 		}
+		shareRows, err := service.PruneShares(ctx, st.Pool)
+		if err != nil {
+			return err
+		}
 		var filesReaped int64
 		if cfg.FilesStorage != "" {
 			drv, err := storage.Open(storage.Config{Kind: cfg.FilesStorage, Dir: cfg.FilesDir,
@@ -327,8 +331,8 @@ func retentionCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 				return err
 			}
 		}
-		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned, %d consumed envelope(s) pruned, %d portal row(s) pruned, %d unlock token(s) pruned, %d value token(s) pruned, %d version(s) pruned, %d file(s) garbage-collected\n",
-			wiped, otiPruned, envelopes, portalRows, unlockRows, valueRows, versionRows, filesReaped)
+		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned, %d consumed envelope(s) pruned, %d portal row(s) pruned, %d unlock token(s) pruned, %d value token(s) pruned, %d version(s) pruned, %d share(s) pruned, %d file(s) garbage-collected\n",
+			wiped, otiPruned, envelopes, portalRows, unlockRows, valueRows, versionRows, shareRows, filesReaped)
 		fmt.Println("(audit rows are never pruned - the chain and its anchors are the tamper evidence)")
 		return nil
 	default:

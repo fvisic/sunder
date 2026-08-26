@@ -113,6 +113,11 @@ type Config struct {
 	// (GDPR), hence off by default.
 	VersionsKeep int           // SUNDER_VERSIONS_KEEP
 	VersionsTTL  time.Duration // SUNDER_VERSIONS_TTL: prune history older than this (0 = only the count cap)
+
+	// SharesPublic enables credential-less fetch of F8 shared records (for
+	// cross-org partners who hold only the UUID). Off by default: the
+	// stronger default requires any valid client credential.
+	SharesPublic bool // SUNDER_SHARES_PUBLIC=true
 }
 
 func getenv(key, def string) string {
@@ -249,6 +254,7 @@ func FromEnvNoDB() (Config, error) {
 	c.FilesS3AccessKey = os.Getenv("SUNDER_FILES_S3_ACCESS_KEY")
 	c.FilesS3SecretKey = os.Getenv("SUNDER_FILES_S3_SECRET_KEY")
 	c.FilesS3PathStyle = os.Getenv("SUNDER_FILES_S3_PATH_STYLE") == "true"
+	c.SharesPublic = os.Getenv("SUNDER_SHARES_PUBLIC") == "true"
 	rawVK := getenv("SUNDER_VERSIONS_KEEP", "0")
 	if c.VersionsKeep, err = strconv.Atoi(rawVK); err != nil || c.VersionsKeep < 0 || c.VersionsKeep > 1000 {
 		return c, fmt.Errorf("SUNDER_VERSIONS_KEEP: %q must be 0-1000", rawVK)

@@ -42,6 +42,7 @@ type Server struct {
 	ValueTokens *service.ValueTokens
 	Files       *service.Files
 	Links       *service.Links
+	Shares      *service.Shares
 	Limiter     ratelimit.Allower
 	Detector    ratelimit.MissCounter
 	enumWarned  sync.Map // client id -> last enumeration warning (F3 latch)
@@ -134,6 +135,7 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		s.Unlock = &service.Unlock{Pool: st.Pool}
 		s.ValueTokens = &service.ValueTokens{Pool: st.Pool, Eng: eng, Ring: ring, Tok: s.Contacts.Tok}
 		s.Links = &service.Links{Pool: st.Pool, Contacts: s.Contacts}
+		s.Shares = &service.Shares{Pool: st.Pool, Contacts: s.Contacts}
 		if cfg.FilesStorage != "" {
 			drv, err := storage.Open(storage.Config{Kind: cfg.FilesStorage, Dir: cfg.FilesDir,
 				S3Endpoint: cfg.FilesS3Endpoint, S3Bucket: cfg.FilesS3Bucket, S3Region: cfg.FilesS3Region,
@@ -187,9 +189,20 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("POST /v1/links", s.handleLinkCreate)
 		v1.HandleFunc("DELETE /v1/links", s.handleLinkDelete)
 		v1.HandleFunc("GET /v1/contacts/{cid}/links", s.handleLinkList)
+		v1.HandleFunc("POST /v1/shares", s.handleShareCreate)
+		v1.HandleFunc("DELETE /v1/shares/{uuid}", s.handleShareRevoke)
+		if !cfg.SharesPublic {
+			// Default: fetch needs any valid credential - inside the guard.
+			v1.HandleFunc("GET /v1/shares/{uuid}", s.handleShareFetchAuthed)
+		}
 		v1.HandleFunc("GET /v1/dsr/export", s.handleDSRExport)
 		s.Auth.Limiter = s.Limiter
 		s.mux.Handle("/v1/", s.Auth.Middleware(userIDMiddleware(capturePattern(v1))))
+		if cfg.SharesPublic {
+			// Credential-less partner fetch: a more specific pattern than the
+			// /v1/ guard, so it bypasses auth by design (the UUID is the bearer).
+			s.mux.HandleFunc("GET /v1/shares/{uuid}", s.handleShareFetchPublic)
+		}
 		// The portal is only mounted on the main listener when it has no
 		// dedicated one: with mTLS on the API, citizens could never present
 		// a client certificate.
