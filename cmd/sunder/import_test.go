@@ -413,3 +413,37 @@ func TestImportBatchTableDenied(t *testing.T) {
 		t.Fatal("import must fail when a target table is missing")
 	}
 }
+
+func TestImportMalformedLinesAndDeniedKeys(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	cfg.SearchFuzzyName = true
+	cfg.SearchPhoneSuffix = true
+
+	// A malformed phone number must fail the batch with a line error.
+	bad := filepath.Join(t.TempDir(), "bad.jsonl")
+	if err := os.WriteFile(bad, []byte(`{"phone":"not-a-phone!!!"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", bad, "-scope", "crm"}); err == nil {
+		t.Fatal("a malformed phone must fail the import")
+	}
+
+	// A good line with name+phone+fuzzy exercises the token minting paths.
+	good := filepath.Join(t.TempDir(), "good.jsonl")
+	if err := os.WriteFile(good, []byte(`{"email":"a@example.com","phone":"+385911234567","name":"Ana Anić"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", good, "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Denying the keys table makes the up-front Newest lookups fail.
+	if _, err := st.Pool.Exec(ctx, `ALTER TABLE keys RENAME TO keys_import_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", good, "-scope", "crm"}); err == nil {
+		t.Fatal("import must fail when key versions cannot be read")
+	}
+}

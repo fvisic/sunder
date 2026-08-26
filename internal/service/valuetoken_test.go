@@ -605,3 +605,18 @@ func TestRekeyFailsWhenKeysUnavailable(t *testing.T) {
 		t.Fatal("rekey must fail when key versions cannot be read")
 	}
 }
+
+func TestBulkUniqueDedupHit(t *testing.T) {
+	_, v, client := tokenEnv(t)
+	ctx := context.Background()
+	// A bulk with the SAME unique value twice: the second dedups to the
+	// first within the batch transaction.
+	toks, err := v.TokenizeBulk(ctx, client, []service.TokenizeInput{
+		{Value: "SAME", Unique: true}, {Value: "SAME", Unique: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if toks[0] != toks[1] {
+		t.Fatalf("bulk unique dedup must return the same token: %v", toks)
+	}
+}

@@ -206,7 +206,7 @@ func (c *Contacts) ExternalClaims(ctx context.Context, client *auth.Client, cid,
 		}
 		return nil, err
 	}
-	if err := c.mergeIntoBlob(ctx, tx, cid, attrs); err != nil {
+	if err := c.mergeIntoBlob(ctx, tx, cid, client.ID, attrs); err != nil {
 		return nil, err
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{

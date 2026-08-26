@@ -329,7 +329,7 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet
 		return "", err
 	}
 
-	if err := c.mergeIntoBlob(ctx, tx, cid, attrs); err != nil {
+	if err := c.mergeIntoBlob(ctx, tx, cid, client.ID, attrs); err != nil {
 		return "", err
 	}
 	// Audit inside the same transaction: the registration and its record
@@ -543,7 +543,7 @@ func (c *Contacts) decryptCID(ctx context.Context, cid string) (map[string]strin
 	return c.PII.Decrypt(ctx, cid, blob, keyID, alg)
 }
 
-func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid string, attrs map[string]string) error {
+func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid, writtenBy string, attrs map[string]string) error {
 	var oldBlob []byte
 	var oldKeyID, oldAlg string
 	// FOR UPDATE: two concurrent merges onto the same row (dedup is the
@@ -593,7 +593,7 @@ func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid string, att
 	}
 	// F6: snapshot the outgoing blob as a version BEFORE overwriting, in
 	// this same transaction, so history and the overwrite are atomic.
-	if err := c.appendVersion(ctx, tx, cid, "register", oldBlob, oldKeyID, oldAlg); err != nil {
+	if err := c.appendVersion(ctx, tx, cid, writtenBy, oldBlob, oldKeyID, oldAlg); err != nil {
 		return err
 	}
 	_, err = tx.Exec(ctx,
@@ -609,5 +609,5 @@ const maxBlobBytes = 256 * 1024
 // the erasure race can be exercised at the write itself,
 // not only through a caller that pre-checks.
 func (c *Contacts) MergeIntoBlobForTest(ctx context.Context, tx pgx.Tx, cid string, attrs map[string]string) error {
-	return c.mergeIntoBlob(ctx, tx, cid, attrs)
+	return c.mergeIntoBlob(ctx, tx, cid, "test", attrs)
 }
