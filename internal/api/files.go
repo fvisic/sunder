@@ -6,6 +6,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/fvisic/sunder/internal/auth"
 )
@@ -108,4 +109,42 @@ func itoa64(n int64) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// fmtSscan parses a base-10 int64 from a path segment.
+func fmtSscan(str string, out *int64) (int, error) {
+	v, err := strconv.ParseInt(str, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	*out = v
+	return 1, nil
+}
+
+func (s *Server) handleVersionList(w http.ResponseWriter, r *http.Request) {
+	client := auth.FromContext(r.Context())
+	out, err := s.Contacts.ListVersions(r.Context(), client, r.PathValue("cid"))
+	if err != nil {
+		s.logErr(r, err)
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"versions": out})
+}
+
+func (s *Server) handleVersionAttribute(w http.ResponseWriter, r *http.Request) {
+	client := auth.FromContext(r.Context())
+	var versionNo int64
+	if _, err := fmtSscan(r.PathValue("version"), &versionNo); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": "version must be a number"})
+		return
+	}
+	val, err := s.Contacts.GetVersionAttribute(r.Context(), client,
+		r.PathValue("cid"), versionNo, r.PathValue("name"), r.URL.Query().Get("purpose"))
+	if err != nil {
+		s.logErr(r, err)
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"value": val})
 }

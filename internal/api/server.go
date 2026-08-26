@@ -121,7 +121,8 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		pii := crypto.NewPIIBox(eng)
 		pii.Alg = cfg.PIIAlg
 		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: pii, Ring: ring,
-			FuzzyName: cfg.SearchFuzzyName, PhoneSuffix: cfg.SearchPhoneSuffix}
+			FuzzyName: cfg.SearchFuzzyName, PhoneSuffix: cfg.SearchPhoneSuffix,
+			VersionsKeep: cfg.VersionsKeep}
 		s.OTI = &service.OTI{Pool: st.Pool, Eng: eng, Ring: ring, Contacts: s.Contacts, TTL: cfg.OTITTL}
 		s.GDPR = &service.GDPR{Pool: st.Pool, Contacts: s.Contacts,
 			HTTPTimeout: cfg.WebhookTimeout, MaxAttempts: cfg.WebhookMaxAttempts}
@@ -159,6 +160,8 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("POST /v1/contacts", s.handleContactsRegister)
 		v1.HandleFunc("POST /v1/contacts/{cid}/scopes", s.handleScopesIssue)
 		v1.HandleFunc("GET /v1/contacts/{cid}/attributes/{name}", s.handleAttributeGet)
+		v1.HandleFunc("GET /v1/contacts/{cid}/versions", s.handleVersionList)
+		v1.HandleFunc("GET /v1/contacts/{cid}/versions/{version}/attributes/{name}", s.handleVersionAttribute)
 		v1.HandleFunc("POST /v1/lookup", s.handleLookup)
 		v1.HandleFunc("POST /v1/admin/unlock", s.handleAdminUnlock)
 		v1.HandleFunc("POST /v1/tokens", s.handleTokenCreate)

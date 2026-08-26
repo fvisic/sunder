@@ -35,14 +35,15 @@ const (
 	// DSR actions (docs/DESIGN.md, GDPR layer). dsr.access and dsr.erase are org-wide,
 	// linkage-capable privileges for the privacy-officer client only;
 	// dsr.export is scope-local portability.
-	ActAdminUnlock  = "admin.unlock"
-	ActTokensCreate = "tokens.create"
-	ActTokensRead   = "tokens.read"
-	ActFilesWrite   = "files.write"
-	ActFilesRead    = "files.read"
-	ActDSRAccess    = "dsr.access"
-	ActDSRErase     = "dsr.erase"
-	ActDSRExport    = "dsr.export"
+	ActAdminUnlock       = "admin.unlock"
+	ActTokensCreate      = "tokens.create"
+	ActTokensRead        = "tokens.read"
+	ActFilesWrite        = "files.write"
+	ActFilesRead         = "files.read"
+	ActAttributesHistory = "attributes.history"
+	ActDSRAccess         = "dsr.access"
+	ActDSRErase          = "dsr.erase"
+	ActDSRExport         = "dsr.export"
 )
 
 // Client is an authenticated caller (one row in the clients table).
@@ -92,7 +93,7 @@ func RoleActions(role string) []string {
 		return []string{ActLookup, ActAttributesRead, ActContactsRegister,
 			ActScopesIssue, ActOTIIssue, ActOTIVerify, ActConsentManage,
 			ActClaimsExternal, ActAdminUnlock, ActTokensCreate, ActTokensRead,
-			ActFilesWrite, ActFilesRead}
+			ActFilesWrite, ActFilesRead, ActAttributesHistory}
 	case RolePrivacyOfficer:
 		return []string{ActDSRAccess, ActDSRErase, ActDSRExport, ActConsentManage}
 	}

@@ -307,6 +307,10 @@ func retentionCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 		if err != nil {
 			return err
 		}
+		versionRows, err := service.PruneBlobVersions(ctx, st.Pool, cfg.VersionsTTL)
+		if err != nil {
+			return err
+		}
 		var filesReaped int64
 		if cfg.FilesStorage != "" {
 			drv, err := storage.Open(storage.Config{Kind: cfg.FilesStorage, Dir: cfg.FilesDir,
@@ -319,8 +323,8 @@ func retentionCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 				return err
 			}
 		}
-		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned, %d consumed envelope(s) pruned, %d portal row(s) pruned, %d unlock token(s) pruned, %d value token(s) pruned, %d file(s) garbage-collected\n",
-			wiped, otiPruned, envelopes, portalRows, unlockRows, valueRows, filesReaped)
+		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned, %d consumed envelope(s) pruned, %d portal row(s) pruned, %d unlock token(s) pruned, %d value token(s) pruned, %d version(s) pruned, %d file(s) garbage-collected\n",
+			wiped, otiPruned, envelopes, portalRows, unlockRows, valueRows, versionRows, filesReaped)
 		fmt.Println("(audit rows are never pruned - the chain and its anchors are the tamper evidence)")
 		return nil
 	default:
@@ -579,7 +583,8 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		pii := crypto.NewPIIBox(eng)
 		pii.Alg = cfg.PIIAlg
 		contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: pii, Ring: ring,
-			FuzzyName: cfg.SearchFuzzyName, PhoneSuffix: cfg.SearchPhoneSuffix}
+			FuzzyName: cfg.SearchFuzzyName, PhoneSuffix: cfg.SearchPhoneSuffix,
+			VersionsKeep: cfg.VersionsKeep}
 		stats, err := contacts.Rekey(ctx, *reenc, *batch)
 		if err != nil {
 			return err

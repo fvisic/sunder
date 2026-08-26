@@ -107,6 +107,12 @@ type Config struct {
 	FilesS3AccessKey string // SUNDER_FILES_S3_ACCESS_KEY
 	FilesS3SecretKey string // SUNDER_FILES_S3_SECRET_KEY
 	FilesS3PathStyle bool   // SUNDER_FILES_S3_PATH_STYLE=true (MinIO)
+
+	// Attribute blob versioning (F6). 0 = off; N keeps the N most recent
+	// prior versions per cid. History extends the storage-limitation clock
+	// (GDPR), hence off by default.
+	VersionsKeep int           // SUNDER_VERSIONS_KEEP
+	VersionsTTL  time.Duration // SUNDER_VERSIONS_TTL: prune history older than this (0 = only the count cap)
 }
 
 func getenv(key, def string) string {
@@ -243,6 +249,13 @@ func FromEnvNoDB() (Config, error) {
 	c.FilesS3AccessKey = os.Getenv("SUNDER_FILES_S3_ACCESS_KEY")
 	c.FilesS3SecretKey = os.Getenv("SUNDER_FILES_S3_SECRET_KEY")
 	c.FilesS3PathStyle = os.Getenv("SUNDER_FILES_S3_PATH_STYLE") == "true"
+	rawVK := getenv("SUNDER_VERSIONS_KEEP", "0")
+	if c.VersionsKeep, err = strconv.Atoi(rawVK); err != nil || c.VersionsKeep < 0 || c.VersionsKeep > 1000 {
+		return c, fmt.Errorf("SUNDER_VERSIONS_KEEP: %q must be 0-1000", rawVK)
+	}
+	if c.VersionsTTL, err = getdur("SUNDER_VERSIONS_TTL", "0s", 0, 3650*24*time.Hour); err != nil {
+		return c, err
+	}
 	switch c.FilesStorage {
 	case "", "local":
 	case "s3":
