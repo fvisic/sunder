@@ -91,9 +91,9 @@ retried on any call.
 5. **Import the machine-readable contract** for codegen, contract tests
    or exploratory calls:
 
-   - OpenAPI 3.1: [`api/openapi.yaml`](../../../api/openapi.yaml) - the
+   - OpenAPI 3.1: `api/openapi.yaml` in the repository (also served at `/openapi.yaml` by every instance) - the
      source of truth for every request/response schema and error response.
-   - Postman: [`api/sunder.postman_collection.json`](../../../api/sunder.postman_collection.json) -
+   - Postman: `api/sunder.postman_collection.json` in the repository -
      set `baseUrl`, `credCrm`, `credErp`, `credNotifier` as collection
      variables; the "Demo" folders are ordered flows runnable top-to-bottom
      with test scripts that pass `cid`/`token` between steps automatically.

@@ -38,7 +38,7 @@ sequenceDiagram
 curl -X POST https://sunder.internal/v1/consent \
   -H "Authorization: Bearer crm_client_1.<secret>" \
   -H "Content-Type: application/json" \
-  -d '{"cid": "cid_9f2a...", "purpose": "newsletter", "granted": false}'
+  -d '{"cid": "CID-9F2A7VXTNP01", "purpose": "newsletter", "granted": false}'
 ```
 
 SDK: none of the six SDKs wrap `/v1/consent` yet - call the REST endpoint directly with the same bearer credential you already use for reads.
@@ -46,7 +46,7 @@ SDK: none of the six SDKs wrap `/v1/consent` yet - call the REST endpoint direct
 ### 2. List recorded decisions for a CID
 
 ```bash
-curl https://sunder.internal/v1/consent/cid_9f2a... \
+curl https://sunder.internal/v1/consent/CID-9F2A7VXTNP01 \
   -H "Authorization: Bearer crm_client_1.<secret>"
 ```
 
@@ -57,7 +57,7 @@ Returns `{"consents": [{"purpose": "newsletter", "granted": false, "updated_at":
 `dsr.access` is a high-privilege, linkage-capable action: it returns every scope's decrypted attributes for the person, not just the caller's own scope.
 
 ```bash
-curl "https://sunder.internal/v1/dsr/access?cid=cid_9f2a..." \
+curl "https://sunder.internal/v1/dsr/access?cid=CID-9F2A7VXTNP01" \
   -H "Authorization: Bearer privacy_officer.<secret>"
 ```
 
@@ -66,7 +66,7 @@ The response bundles `scopes` (each scope's attributes and consents) and `audit_
 ### 4. Data portability export (caller scope only)
 
 ```bash
-curl "https://sunder.internal/v1/dsr/export?cid=cid_9f2a..." \
+curl "https://sunder.internal/v1/dsr/export?cid=CID-9F2A7VXTNP01" \
   -H "Authorization: Bearer crm_client_1.<secret>"
 ```
 

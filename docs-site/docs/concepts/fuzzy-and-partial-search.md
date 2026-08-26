@@ -84,8 +84,6 @@ reduction, never a similarity score computed at query time.
    `200 {"cid": "CID-..."}` on exactly one match, `404 not_found` on zero
    *or on two or more* - add `name` to disambiguate a colliding suffix.
 
-   SDK equivalent: `client.Lookup(ctx, LookupInput{PhoneSuffix: "0957779999"})`.
-
 ## Why both default off
 
 Each widens the search surface and adds token rows per contact - an upgrade

@@ -14,7 +14,7 @@ sequenceDiagram
     PG-->>SD: healthy - depends_on unblocks sunder
     SD->>PG: connect SUNDER_DB_URL, run migrations
     SD->>SD: read/write keys under SUNDER_KEYSTORE_PATH (file driver)
-    Op->>SD: docker compose exec sunder sunder bootstrap
+    Op->>SD: docker compose exec sunder /sunder bootstrap
     SD->>PG: create admin client + audit row (one transaction)
     SD-->>Op: admin credential, printed once
 ```
@@ -45,7 +45,7 @@ curl http://127.0.0.1:8080/healthz
    (see [Bootstrap](bootstrap.md) for every flag):
 
 ```bash
-docker compose -f deploy/docker-compose.yml exec sunder sunder bootstrap
+docker compose -f deploy/docker-compose.yml exec sunder /sunder bootstrap
 ```
 
 The credential is printed exactly once. Store it before you scroll.
@@ -65,7 +65,7 @@ curl -X POST http://127.0.0.1:8080/v1/contacts \
   }'
 ```
 
-SDK equivalent: `client.Contacts.Register(ctx, sunder.RegisterInput{Email: "...", ...})`.
+SDK equivalent: `client.RegisterContact(ctx, sunder.RegisterInput{Email: "...", ...})`.
 
 ## What persists across `docker compose down`
 

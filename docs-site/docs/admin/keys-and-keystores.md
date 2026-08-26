@@ -11,7 +11,7 @@ flowchart LR
     API["sunder serve\n(no key material with SUNDER_SIGNER_SOCKET set)"]
     Signer["sunder signer\n(sole keystore holder, no DB, no network)"]
     FS["file: SUNDER_KEYSTORE_PATH\n0600 key files"]
-    Vault["vault: KV v2 at\n<mount>/data/sunder/<name>"]
+    Vault["vault: KV v2 at\n&lt;mount&gt;/data/sunder/&lt;name&gt;"]
 
     API -- "MAC / Seal / Open /\nSign / Verify / Ensure\n(unix socket, length-prefixed JSON)" --> Signer
     Signer -- "read/write key bytes" --> FS

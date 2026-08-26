@@ -79,7 +79,7 @@ Returns each scope's decrypted attributes and consents plus the cross-scope audi
 ```bash
 curl -X POST https://privacy.acme.example/portal/api/consent \
   -b cookies.txt -H "Content-Type: application/json" \
-  -d '{"cid": "cid_9f2a...", "purpose": "newsletter", "granted": false}'
+  -d '{"cid": "CID-9F2A7VXTNP01", "purpose": "newsletter", "granted": false}'
 ```
 
 `404` if the CID does not belong to the signed-in person. Takes effect immediately on reads and handoffs.

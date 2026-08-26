@@ -50,7 +50,7 @@ the `PredicateResult` booleans cross the scope boundary.
 
    `201 {"token": "v4.public...", "expires_at": "2026-08-23T12:05:00Z"}`
 
-   SDK equivalent: `client.OTI.Issue(ctx, cid, WithPredicates(AgeGTE("birthdate", 18)))`.
+   SDK equivalent: `client.IssueOTI(ctx, cid, "age_check", "webshop", &sunder.IssueOptions{SharePredicates: []sunder.Predicate{sunder.AgeAtLeast("birthdate", 18)}})`.
 
 2. **Hand the token to the verifier** through whatever channel your
    integration already uses (redirect, header, message payload) - the token
@@ -67,7 +67,7 @@ the `PredicateResult` booleans cross the scope boundary.
 
    `200 {"cid": "CID-e5f6...", "shared": [], "predicates": [{"attr":"birthdate","op":"age_gte","value":18,"result":true,"known":true}]}`
 
-   SDK equivalent: `client.OTI.Verify(ctx, token, purpose, audience)`.
+   SDK equivalent: `client.VerifyOTIFull(ctx, token, "age_check", "webshop")`.
 
 ## Supported ops and `Known` semantics
 
