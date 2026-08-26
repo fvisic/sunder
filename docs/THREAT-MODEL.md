@@ -283,7 +283,7 @@ ciphertext, and the threshold only holds if custodians keep their shares
 apart. The one operational risk it introduces is custodian concentration
 ("five shares in one vault is 1-of-1 in a costume"), stated in the guide.
 
-## Read-only audit surface (audit.verify) (P3.6)
+## Read-only audit surface (audit.verify) and the playground (P3.6)
 
 Two things landed with the interactive demo, and only one of them is a
 product surface.
@@ -307,3 +307,28 @@ product surface.
 - **Residual risk:** a holder learns activity *volume* and which client ids
   are active, which is metadata the metrics endpoint already exposes to
   operators. It cannot learn who was touched.
+
+### The playground (`cmd/playground`)
+
+Not a product surface: a demo tool that holds working client credentials
+for the instance it points at. It is therefore built as a separate binary
+into a separate image target, so nothing from it reaches the runtime image
+that serves traffic.
+
+- **Credentials never reach the browser.** Steps execute server-side and the
+  rendered `Authorization` header is masked to the client id; a
+  screen-shared demo cannot leak a working secret.
+- **No arbitrary-request surface.** `/api/run` takes a scenario id and a
+  step index; the shipped scenario files are the allowlist. A generic proxy
+  in front of real credentials would be an open relay with our own actions.
+- **Refuses to be exposed by accident.** A non-loopback bind requires an
+  explicit `-public` / `PLAYGROUND_PUBLIC=1`; requests are rate-limited per
+  source IP; sessions are per browser, so one visitor's captured pseudonyms
+  and webhook inbox are not visible to another; each session registers its
+  own fake person, so two visitors cannot dedup onto one record (or erase
+  each other's).
+- **Residual risk:** it registers and erases real records on whatever
+  instance it is aimed at, and the demo stack accumulates fake people until
+  `sunder retention run` or `down -v`. Pointing it at production is an
+  operator error the code cannot prevent; the guide says so in the security
+  notes, and the compose overlay only ever wires it to the dev stack.

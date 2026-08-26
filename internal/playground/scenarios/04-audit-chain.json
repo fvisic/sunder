@@ -1,0 +1,35 @@
+{
+  "id": "audit-chain",
+  "title": "The audit chain, and how you check it",
+  "summary": "Every read, handoff, consent decision and erasure is appended to a hash-chained log. Verification is an operation anyone with the audit privilege can run - and it names the position where the chain breaks.",
+  "panel": "audit",
+  "doc": "admin/audit-chain.md",
+  "roles": [
+    {
+      "name": "auditor",
+      "label": "Auditor (audit.verify only)",
+      "scope": "crm",
+      "actions": ["audit.verify"],
+      "purposes": []
+    }
+  ],
+  "steps": [
+    {
+      "label": "Verify the whole chain",
+      "note": "Each record's hash covers the previous hash, so altering or deleting one breaks every hash after it. Verification recomputes the chain from the beginning; 'pending' counts rows that are appended but not yet sealed - outside the chain, not broken.",
+      "actor": "auditor",
+      "method": "GET",
+      "path": "/v1/admin/audit/verify",
+      "expect": 200,
+      "capture": {"chain_ok": "ok"}
+    },
+    {
+      "label": "Read the tail of the chain",
+      "note": "Positions, actions and hash links - no cid, no detail. Proving that the log cannot have been altered is a different privilege from reading what happened to whom: this credential holds the first and not the second.",
+      "actor": "auditor",
+      "method": "GET",
+      "path": "/v1/admin/audit/chain?limit=12",
+      "expect": 200
+    }
+  ]
+}

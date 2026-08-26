@@ -110,3 +110,18 @@ export SUNDER_CRED_VAULT='vault.<secret>'
 The bundled `deploy/docker-compose.yml` already enables the file vault and
 versioning, so all six run against it out of the box. CI (the `e2e-demo`
 job) runs every one against the freshly built image on each push.
+
+## The playground
+
+The same stories, clickable, with the request and response shown under each
+step - and the panels the scripts cannot draw (two systems side by side, a
+consent toggle, the erasure webhook inbox, the audit chain):
+
+```sh
+docker compose -f deploy/docker-compose.yml \
+               -f deploy/docker-compose.playground.yml up --build -d
+open http://localhost:8081
+```
+
+See `examples/playground/README.md`. The scripts here stay the headless,
+CI-asserted path; the playground is the one you show someone.

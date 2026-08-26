@@ -1,0 +1,83 @@
+{
+  "id": "erasure-webhook",
+  "title": "Erasure, and the webhook that proves it",
+  "summary": "The right to be forgotten across systems: the vault wipes every scope's copy, then tells each scope's own system to forget its pseudonym - over a signed callback that lands in the inbox below.",
+  "panel": "webhook",
+  "doc": "gdpr/erasure-webhooks.md",
+  "roles": [
+    {
+      "name": "crm",
+      "label": "CRM (support desk)",
+      "scope": "crm",
+      "actions": ["contacts.register", "lookup", "attributes.read"],
+      "purposes": ["support"]
+    },
+    {
+      "name": "privacy",
+      "label": "Privacy officer",
+      "scope": "crm",
+      "actions": ["dsr.access", "dsr.erase", "dsr.export"],
+      "purposes": ["support", "admin"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "A record to erase",
+      "note": "Registered by the CRM, like any other customer.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {
+        "email": "{{demo_email}}",
+        "phone": "{{demo_phone}}",
+        "name": "{{demo_name}}",
+        "attributes": {"loyalty_tier": "gold"}
+      },
+      "expect": 201,
+      "capture": {"crm_cid": "cid"}
+    },
+    {
+      "label": "The data is there",
+      "note": "One field read, so the difference after the erasure is visible rather than asserted.",
+      "actor": "crm",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/attributes/email?purpose=support",
+      "expect": 200
+    },
+    {
+      "label": "The privacy officer sees every scope that holds them",
+      "note": "Right of access is org-wide and linkage-capable, which is why it is a separate, high-privilege action held by one client - not something the support desk can call.",
+      "actor": "privacy",
+      "method": "GET",
+      "path": "/v1/dsr/access?cid={{crm_cid}}",
+      "expect": 200
+    },
+    {
+      "label": "Erase the person",
+      "note": "One transaction: every scope's encrypted blob and every identifier token is wiped, outstanding one-time identifiers die with them, and one erasure event per scope is queued for delivery. The audit chain keeps the fact of the erasure - the evidence must outlive the data.",
+      "actor": "privacy",
+      "method": "POST",
+      "path": "/v1/dsr/erase",
+      "body": {"cid": "{{crm_cid}}"},
+      "expect": 200,
+      "capture": {"erasure_id": "erasure_id"}
+    },
+    {
+      "label": "The field is gone",
+      "note": "Not masked, not flagged as deleted: the ciphertext is gone, so there is nothing left to decrypt.",
+      "actor": "crm",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/attributes/email?purpose=support",
+      "expect": 404
+    },
+    {
+      "label": "And so is the way to find them",
+      "note": "The search tokens went with the record: a lookup by the same phone number is now a plain miss.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"phone": "{{demo_phone}}"},
+      "expect": 404
+    }
+  ]
+}

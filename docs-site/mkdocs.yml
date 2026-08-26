@@ -36,6 +36,7 @@ nav:
   - Home: index.md
   - Get Started:
       - Quickstart: get-started/quickstart.md
+      - Playground: get-started/playground.md
       - Performance: get-started/performance.md
   - Install:
       - Docker Compose: install/docker-compose.md

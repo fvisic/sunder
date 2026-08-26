@@ -1,0 +1,130 @@
+/* One stylesheet, no framework, no build step - the same posture as the
+   privacy portal SPA: a demo that needs a toolchain to render is a demo
+   that rots. */
+:root {
+  --bg: #f7f7f8;
+  --panel: #ffffff;
+  --ink: #16181d;
+  --muted: #666c77;
+  --line: #e3e5ea;
+  --accent: #1a1a1a;
+  --ok: #1d7a3d;
+  --fail: #b3261e;
+  --wire: #f2f3f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --panel: #1b1e24;
+    --ink: #e8eaee;
+    --muted: #9aa1ad;
+    --line: #2a2e37;
+    --accent: #e8eaee;
+    --ok: #4ec27a;
+    --fail: #ff6b60;
+    --wire: #12141a;
+  }
+}
+* { box-sizing: border-box; }
+/* The tab switch toggles [hidden] on containers that also carry a display
+   rule; without this the attribute loses to display: flex/grid. */
+[hidden] { display: none !important; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.55 system-ui, -apple-system, Segoe UI, sans-serif;
+}
+header {
+  display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+  padding: .85rem 1.25rem; background: var(--panel); border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 5;
+}
+.head-actions { display: flex; align-items: center; gap: .75rem; }
+main { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 1.25rem; padding: 1.25rem; align-items: start; }
+/* Grid and flex items default to min-width:auto, so one long line inside a
+   <pre> widens the whole column and the page scrolls sideways. Every
+   container that can hold a wire dump opts out explicitly. */
+main > section, .card, .wire > div, .system { min-width: 0; }
+@media (max-width: 820px) { main { grid-template-columns: 1fr; } }
+footer { padding: 1rem 1.25rem 2rem; max-width: 70ch; }
+.muted { color: var(--muted); font-size: .88rem; }
+
+nav { display: flex; flex-direction: column; gap: .4rem; position: sticky; top: 4.2rem; }
+nav button {
+  text-align: left; background: transparent; color: var(--ink); border: 1px solid transparent;
+  padding: .55rem .7rem; border-radius: 8px; cursor: pointer; font: inherit;
+}
+nav button:hover { border-color: var(--line); }
+nav button[aria-current="true"] { background: var(--panel); border-color: var(--line); font-weight: 600; }
+
+h1 { font-size: 1.25rem; margin: 0 0 .35rem; }
+h2 { font-size: 1rem; margin: 0; }
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: .9rem 1rem; margin: 0 0 .8rem;
+}
+.roles { display: flex; flex-wrap: wrap; gap: .4rem; margin: .6rem 0 0; }
+.chip {
+  border: 1px solid var(--line); border-radius: 999px; padding: .15rem .6rem;
+  font-size: .8rem; color: var(--muted);
+}
+.warn { border-color: var(--fail); color: var(--fail); }
+
+button.primary, button.ghost {
+  font: inherit; padding: .4rem .8rem; border-radius: 7px; cursor: pointer;
+}
+button.primary { background: var(--accent); color: var(--bg); border: 0; }
+button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+button[disabled] { opacity: .5; cursor: default; }
+
+.step { border-left: 3px solid var(--line); }
+.step.ok { border-left-color: var(--ok); }
+.step.fail { border-left-color: var(--fail); }
+.step-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.step-head .idx { color: var(--muted); font-variant-numeric: tabular-nums; }
+.actor { font-size: .78rem; border: 1px solid var(--line); border-radius: 6px; padding: .05rem .4rem; color: var(--muted); }
+.pill { font-size: .78rem; border-radius: 999px; padding: .1rem .55rem; border: 1px solid var(--line); }
+.pill.ok { color: var(--ok); border-color: var(--ok); }
+.pill.fail { color: var(--fail); border-color: var(--fail); }
+.note { margin: .5rem 0 0; max-width: 78ch; }
+.wire { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .6rem; margin-top: .6rem; }
+@media (max-width: 700px) { .wire { grid-template-columns: 1fr; } }
+.wire h3 { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 .25rem; }
+pre {
+  background: var(--wire); white-space: pre-wrap; word-break: break-word; border: 1px solid var(--line); border-radius: 8px;
+  margin: 0; padding: .6rem .7rem; overflow-x: auto; font-size: .8rem; line-height: 1.45;
+}
+.assert { margin: .5rem 0 0; padding: .45rem .6rem; border-radius: 7px; border: 1px solid var(--ok); color: var(--ok); font-size: .85rem; }
+.assert.fail { border-color: var(--fail); color: var(--fail); }
+.err { color: var(--fail); margin: .5rem 0 0; }
+
+.systems { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .8rem; }
+@media (max-width: 700px) { .systems { grid-template-columns: 1fr; } }
+.system { border: 1px solid var(--line); border-radius: 9px; padding: .7rem .8rem; }
+.cid { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; word-break: break-all; }
+.cid.empty { color: var(--muted); }
+.vars { display: flex; flex-wrap: wrap; gap: .35rem 1rem; margin: .5rem 0 0; font-size: .82rem; }
+.vars code { font-size: .82rem; }
+
+/* Tabs: the walkthroughs and the API reference. The reference is an iframe
+   because it runs a third-party web component under its own, looser CSP. */
+.tabs { display: flex; gap: .25rem; }
+button.tab {
+  font: inherit; background: transparent; color: var(--muted); cursor: pointer;
+  border: 1px solid transparent; border-radius: 7px; padding: .35rem .7rem;
+}
+button.tab[aria-selected="true"] { color: var(--ink); border-color: var(--line); font-weight: 600; }
+#reference { grid-column: 1 / -1; }
+#reference-frame { width: 100%; height: calc(100vh - 8rem); border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+
+/* Consent, webhook and audit panels. */
+.state { display: flex; align-items: center; gap: .5rem; margin: .6rem 0 0; }
+.badge { border-radius: 999px; padding: .1rem .6rem; font-size: .8rem; border: 1px solid var(--line); }
+.badge.granted { color: var(--ok); border-color: var(--ok); }
+.badge.withdrawn { color: var(--fail); border-color: var(--fail); }
+.delivery { border: 1px solid var(--line); border-radius: 9px; padding: .55rem .7rem; margin: .5rem 0 0; }
+.delivery-head { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; font-size: .85rem; }
+.chain { display: flex; flex-direction: column; gap: .3rem; margin: .6rem 0 0; }
+.link { display: flex; gap: .6rem; align-items: baseline; font-size: .82rem; }
+.link .seq { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 3.5rem; }
+.link .hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+.link.broken .hash { color: var(--fail); }

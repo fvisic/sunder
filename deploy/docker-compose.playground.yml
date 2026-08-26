@@ -1,0 +1,116 @@
+# The interactive demo (PLAN 17.4), as an overlay on the main dev stack:
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.playground.yml up --build
+#   open http://localhost:8081
+#
+# Three extra services:
+#   seed        creates the five demo clients ONCE and writes their credentials to
+#               a shared volume, the way `sunder bootstrap -credential-file`
+#               does - so no secret is passed through a compose environment
+#               variable or printed into a container log stream.
+#   playground  serves the walkthroughs; reads that credential file.
+#   deliver     drains the erasure webhook queue every few seconds, so the
+#               inbox panel fills without anyone running a CLI by hand.
+#
+# Note on '$$': compose expands '$' itself, so every shell variable and
+# command substitution below is escaped for the shell inside the container.
+services:
+  seed:
+    build:
+      context: ..
+      # The ops variant has a shell, which this script needs; the runtime
+      # image is distroless by design.
+      target: ops
+    environment:
+      SUNDER_DB_URL: postgres://sunder:sunder-dev-only@postgres:5432/sunder
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ -f /creds/playground.env ]; then
+          echo "credentials already seeded - nothing to do"
+          exit 0
+        fi
+        umask 077
+        crm=$$(/sunder client create -id pg-crm -name "Playground CRM" -scope crm \
+          -actions contacts.register,lookup,attributes.read,oti.issue,consent.manage \
+          -purposes support,create_order -rate 6000 | tail -1)
+        erp=$$(/sunder client create -id pg-erp -name "Playground ERP" -scope erp \
+          -actions oti.verify,attributes.read \
+          -purposes create_order -rate 6000 | tail -1)
+        privacy=$$(/sunder client create -id pg-privacy -name "Playground privacy officer" -scope crm \
+          -actions dsr.access,dsr.erase,dsr.export,consent.manage,contacts.register \
+          -purposes support,admin -rate 6000 | tail -1)
+        vault=$$(/sunder client create -id pg-vault -name "Playground vault" -scope crm \
+          -actions contacts.register,attributes.read,attributes.history,tokens.create,tokens.read,tokens.delete,admin.unlock,files.write,files.read,links.manage,shares.create,consent.manage,dsr.erase \
+          -purposes support -rate 6000 | tail -1)
+        # Loopback URL on purpose: Sunder refuses plain-http webhooks to
+        # anything but a loopback host, and that rule is worth keeping. The
+        # deliver sidecar below shares the playground's network namespace,
+        # so 127.0.0.1:8081 there IS the playground.
+        auditor=$$(/sunder client create -id pg-auditor -name "Playground auditor" -scope crm \
+          -actions audit.verify \
+          -purposes support -rate 6000 | tail -1)
+        secret=$$(/sunder webhook set -scope crm -url http://127.0.0.1:8081/hooks/erasure \
+          | tr ' ' '\n' | tail -1)
+        tmp=/creds/.playground.env.new
+        {
+          echo "# demo credentials for the Sunder playground - dev stack only"
+          echo "crm=$$crm"
+          echo "erp=$$erp"
+          echo "privacy=$$privacy"
+          echo "vault=$$vault"
+          echo "auditor=$$auditor"
+          echo "webhook_secret=$$secret"
+        } > "$$tmp"
+        mv "$$tmp" /creds/playground.env
+        echo "seeded 5 demo clients and the erasure webhook"
+    volumes:
+      - creds:/creds
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  playground:
+    build:
+      context: ..
+      target: playground
+    environment:
+      SUNDER_URL: http://sunder:8080
+      # 0.0.0.0 inside the container is deliberate and needs the explicit
+      # opt-in; the host port below is published on loopback only.
+      PLAYGROUND_LISTEN: "0.0.0.0:8081"
+      PLAYGROUND_PUBLIC: "1"
+      PLAYGROUND_CREDENTIAL_FILE: /creds/playground.env
+    ports:
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - creds:/creds:ro
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
+  deliver:
+    build:
+      context: ..
+      target: ops
+    environment:
+      SUNDER_DB_URL: postgres://sunder:sunder-dev-only@postgres:5432/sunder
+    # Shares the playground's network namespace so the stored loopback
+    # webhook URL resolves to the playground's listener.
+    network_mode: "service:playground"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          /sunder dsr deliver >/dev/null 2>&1 || true
+          sleep 2
+        done
+    depends_on:
+      postgres:
+        condition: service_healthy
+      playground:
+        condition: service_started
+
+volumes:
+  creds:
