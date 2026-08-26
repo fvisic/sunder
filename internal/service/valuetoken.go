@@ -106,22 +106,20 @@ func (v *ValueTokens) Detokenize(ctx context.Context, client *auth.Client, token
 		slidingSeconds *int64
 		lastUsed       time.Time
 	)
+	// Expiry is decided by the DATABASE clock in the same read (L5): the
+	// app clock must not straddle the pruner's clock. A row that fails the
+	// live predicate is an indistinguishable miss.
 	err := v.Pool.QueryRow(ctx, `
 		SELECT ciphertext, key_id, alg, expires_final, sliding_seconds, last_used
-		  FROM value_tokens WHERE token=$1 AND scope=$2`,
+		  FROM value_tokens WHERE token=$1 AND scope=$2
+		    AND (expires_final IS NULL OR expires_final > now())
+		    AND (sliding_seconds IS NULL OR last_used + make_interval(secs => sliding_seconds) > now())`,
 		token, client.Scope).Scan(&sealed, &keyID, &alg, &expiresFinal, &slidingSeconds, &lastUsed)
 	if err == pgx.ErrNoRows {
 		return "", v.auditMiss(ctx, client)
 	}
 	if err != nil {
 		return "", err
-	}
-	now := time.Now().UTC()
-	if expiresFinal != nil && now.After(*expiresFinal) {
-		return "", v.auditMiss(ctx, client)
-	}
-	if slidingSeconds != nil && now.After(lastUsed.Add(time.Duration(*slidingSeconds)*time.Second)) {
-		return "", v.auditMiss(ctx, client)
 	}
 
 	plain, err := v.Eng.Open(ctx, crypto.KeyPIIKEK+"/"+keyID, alg,
@@ -157,7 +155,7 @@ func (v *ValueTokens) auditMiss(ctx context.Context, client *auth.Client) error 
 // Delete removes one token (its scope's own only). Chained: destroying a
 // mapping is a mutation someone may need to prove later.
 func (v *ValueTokens) Delete(ctx context.Context, client *auth.Client, token string) error {
-	if !client.Can(auth.ActTokensCreate) {
+	if !client.Can(auth.ActTokensDelete) {
 		return ErrForbidden
 	}
 	tx, err := v.Pool.Begin(ctx)
@@ -241,6 +239,21 @@ func luhnValid(digits string) bool {
 	return sum%10 == 0
 }
 
+// uniformDigit returns a uniformly random decimal digit via rejection
+// sampling, avoiding the modulo bias of byte%10.
+func uniformDigit() byte {
+	var b [1]byte
+	for {
+		if _, err := rand.Read(b[:]); err != nil {
+			// The CSPRNG failing is not a recoverable state (see newUUID).
+			panic(err)
+		}
+		if b[0] < 250 { // 250 = 25*10, the largest multiple of 10 <= 255
+			return b[0] % 10
+		}
+	}
+}
+
 // luhnToken generates a random digit string of the given length with a
 // valid Luhn check digit. No BIN preservation, deliberately: a preserved
 // BIN leaks issuer and geography, defeating the point of tokenizing.
@@ -248,13 +261,11 @@ func luhnToken(length int) (string, error) {
 	if length < 12 || length > 19 {
 		return "", fmt.Errorf("%w: card number length %d outside 12-19", ErrValidation, length)
 	}
+	// Rejection-sample each digit from the unbiased range [0,250) so every
+	// digit 0-9 is equiprobable (L8: a plain byte%10 skews toward 0-5).
 	digits := make([]byte, length)
-	raw := make([]byte, length)
-	if _, err := rand.Read(raw); err != nil {
-		return "", err
-	}
 	for i := 0; i < length-1; i++ {
-		digits[i] = '0' + raw[i]%10
+		digits[i] = '0' + uniformDigit()
 	}
 	// Compute the check digit so the whole string satisfies Luhn.
 	sum, alt := 0, true

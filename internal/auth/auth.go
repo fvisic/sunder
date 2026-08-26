@@ -38,6 +38,7 @@ const (
 	ActAdminUnlock       = "admin.unlock"
 	ActTokensCreate      = "tokens.create"
 	ActTokensRead        = "tokens.read"
+	ActTokensDelete      = "tokens.delete"
 	ActFilesWrite        = "files.write"
 	ActFilesRead         = "files.read"
 	ActAttributesHistory = "attributes.history"
@@ -84,7 +85,7 @@ func RoleActions(role string) []string {
 	case RoleService:
 		return []string{ActLookup, ActAttributesRead, ActContactsRegister,
 			ActOTIIssue, ActOTIVerify, ActConsentManage,
-			ActTokensCreate, ActTokensRead, ActFilesWrite, ActFilesRead}
+			ActTokensCreate, ActTokensRead, ActTokensDelete, ActFilesWrite, ActFilesRead}
 	case RoleAdmin:
 		// Operational admin: the full integration set plus unlock, value
 		// tokens and files - but NOT the org-wide, cross-scope DSR
@@ -92,7 +93,7 @@ func RoleActions(role string) []string {
 		// the privacy-officer preset or explicit -actions).
 		return []string{ActLookup, ActAttributesRead, ActContactsRegister,
 			ActScopesIssue, ActOTIIssue, ActOTIVerify, ActConsentManage,
-			ActClaimsExternal, ActAdminUnlock, ActTokensCreate, ActTokensRead,
+			ActClaimsExternal, ActAdminUnlock, ActTokensCreate, ActTokensRead, ActTokensDelete,
 			ActFilesWrite, ActFilesRead, ActAttributesHistory}
 	case RolePrivacyOfficer:
 		return []string{ActDSRAccess, ActDSRErase, ActDSRExport, ActConsentManage}

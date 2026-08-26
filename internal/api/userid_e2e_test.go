@@ -428,7 +428,7 @@ func TestValueTokenHTTPSingleItem(t *testing.T) {
 	st := testutil.NewDB(t)
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
-		AllowedActions:  []string{auth.ActTokensCreate, auth.ActTokensRead},
+		AllowedActions:  []string{auth.ActTokensCreate, auth.ActTokensRead, auth.ActTokensDelete},
 		AllowedPurposes: []string{}, RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)
@@ -582,7 +582,7 @@ func TestTokenAndFileHandlerErrorBranches(t *testing.T) {
 	cred, err := auth.Create(ctx, st.Pool, auth.Client{
 		ID: "crm", Name: "CRM", Scope: "crm",
 		AllowedActions: []string{auth.ActContactsRegister, auth.ActTokensCreate, auth.ActTokensRead,
-			auth.ActFilesWrite, auth.ActFilesRead, auth.ActAdminUnlock},
+			auth.ActTokensDelete, auth.ActFilesWrite, auth.ActFilesRead, auth.ActAdminUnlock},
 		AllowedPurposes: []string{"support"}, RateLimit: 100})
 	if err != nil {
 		t.Fatal(err)

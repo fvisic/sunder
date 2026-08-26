@@ -17,7 +17,7 @@ func tokenEnv(t *testing.T) (*faultEnv, *service.ValueTokens, *auth.Client) {
 	// the ring lives on the service).
 	v := &service.ValueTokens{Pool: e.admin.Pool, Eng: e.svc.PII.Engine(), Ring: e.svc.Ring, Tok: e.svc.Tok}
 	client := &auth.Client{ID: "crm", Scope: "crm",
-		AllowedActions: []string{auth.ActTokensCreate, auth.ActTokensRead}}
+		AllowedActions: []string{auth.ActTokensCreate, auth.ActTokensRead, auth.ActTokensDelete}}
 	return e, v, client
 }
 
@@ -462,5 +462,20 @@ func TestValueTokenBulkFaultRollsBack(t *testing.T) {
 	v2 := &service.ValueTokens{Pool: e2.svc.Pool, Eng: e2.svc.PII.Engine(), Ring: e2.svc.Ring, Tok: e2.svc.Tok}
 	if _, err := v2.TokenizeBulk(ctx, client, []service.TokenizeInput{{Value: "a"}}); err == nil {
 		t.Fatal("bulk must fail when keys are denied")
+	}
+}
+
+func TestValueTokenDeleteNeedsDeleteAction(t *testing.T) {
+	_, v, client := tokenEnv(t)
+	ctx := context.Background()
+	tok, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A create+read client without tokens.delete cannot destroy mappings.
+	writer := &auth.Client{ID: "w", Scope: "crm",
+		AllowedActions: []string{auth.ActTokensCreate, auth.ActTokensRead}}
+	if err := v.Delete(ctx, writer, tok); !errors.Is(err, service.ErrForbidden) {
+		t.Fatalf("delete without tokens.delete must be forbidden: %v", err)
 	}
 }
