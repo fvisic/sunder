@@ -282,3 +282,28 @@ keystore. The recovery key never touches disk, `recovery.bundle` is
 ciphertext, and the threshold only holds if custodians keep their shares
 apart. The one operational risk it introduces is custodian concentration
 ("five shares in one vault is 1-of-1 in a costume"), stated in the guide.
+
+## Read-only audit surface (audit.verify) (P3.6)
+
+Two things landed with the interactive demo, and only one of them is a
+product surface.
+
+### `GET /v1/admin/audit/verify` and `/v1/admin/audit/chain`
+
+- **Surface opened:** the CLI's `verify-audit` verdict, plus the tail of the
+  sealed chain, over HTTP - so dashboards (and the demo's chain panel) can
+  show tamper evidence without shell access to the host.
+- **Mitigation:** its own action (`audit.verify`), granted to nobody by
+  default and orthogonal to every PII privilege - an auditor credential
+  holds this and nothing else. The chain view carries positions, actions,
+  client ids and hash links, and deliberately **not** `cid` or the detail
+  blob: proving the log cannot have been altered is a different privilege
+  from reading what happened to whom (`dsr.access` remains the only route
+  to a person's trail). Both endpoints are read-only and rate-limited per
+  client, because `Verify` walks the whole chain.
+- **Not audited itself:** appending a record per verification would make a
+  monitoring loop the loudest writer in the chain it checks - the same
+  stance the CLI has always taken.
+- **Residual risk:** a holder learns activity *volume* and which client ids
+  are active, which is metadata the metrics endpoint already exposes to
+  operators. It cannot learn who was touched.

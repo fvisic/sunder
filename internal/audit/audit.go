@@ -419,3 +419,46 @@ func Head(ctx context.Context, pool *pgxpool.Pool) (string, error) {
 	}
 	return hash, nil
 }
+
+// ChainRow is one sealed record as the read-only chain view exposes it:
+// position, time, actor, action and the hash links. Deliberately WITHOUT
+// the cid and the detail blob - the view exists to show that the chain is
+// intact, and showing what happened to whom is a different privilege from
+// showing that the record cannot have been altered.
+type ChainRow struct {
+	ChainSeq int64     `json:"chain_seq"`
+	TS       time.Time `json:"ts"`
+	ClientID string    `json:"client_id"`
+	Action   string    `json:"action"`
+	Hash     string    `json:"hash"`
+	PrevHash string    `json:"prev_hash"`
+}
+
+// Tail returns the newest sealed records, oldest-first within the window so
+// the hash links read in the direction they were computed.
+func Tail(ctx context.Context, pool *pgxpool.Pool, limit int) ([]ChainRow, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT chain_seq, ts, COALESCE(client_id,''), action, hash, COALESCE(prev_hash,'')
+		 FROM (SELECT chain_seq, ts, client_id, action, hash, prev_hash
+		       FROM audit WHERE hash IS NOT NULL ORDER BY chain_seq DESC LIMIT $1) t
+		 ORDER BY chain_seq`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ChainRow
+	for rows.Next() {
+		var r ChainRow
+		if err := rows.Scan(&r.ChainSeq, &r.TS, &r.ClientID, &r.Action, &r.Hash, &r.PrevHash); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

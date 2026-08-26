@@ -168,6 +168,10 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		v1.HandleFunc("GET /v1/contacts/{cid}/versions/{version}/attributes/{name}", s.handleVersionAttribute)
 		v1.HandleFunc("POST /v1/lookup", s.handleLookup)
 		v1.HandleFunc("POST /v1/admin/unlock", s.handleAdminUnlock)
+		// Read-only tamper-evidence surface (audit.verify): the CLI verdict
+		// over HTTP, for dashboards and the playground's chain panel.
+		v1.HandleFunc("GET /v1/admin/audit/verify", s.handleAuditVerify)
+		v1.HandleFunc("GET /v1/admin/audit/chain", s.handleAuditChain)
 		v1.HandleFunc("POST /v1/tokens", s.handleTokenCreate)
 		v1.HandleFunc("GET /v1/tokens/{token}", s.handleTokenRead)
 		v1.HandleFunc("DELETE /v1/tokens/{token}", s.handleTokenDelete)

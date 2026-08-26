@@ -44,9 +44,14 @@ const (
 	ActAttributesHistory = "attributes.history"
 	ActLinksManage       = "links.manage"
 	ActSharesCreate      = "shares.create"
-	ActDSRAccess         = "dsr.access"
-	ActDSRErase          = "dsr.erase"
-	ActDSRExport         = "dsr.export"
+	// ActAuditVerify is read-only: recompute the hash chain and read its
+	// tail. It exposes no PII (the chain view carries actions and hashes,
+	// never cids or details) but it does reveal activity volume, so it is
+	// its own action rather than a free-for-all.
+	ActAuditVerify = "audit.verify"
+	ActDSRAccess   = "dsr.access"
+	ActDSRErase    = "dsr.erase"
+	ActDSRExport   = "dsr.export"
 )
 
 // Client is an authenticated caller (one row in the clients table).
