@@ -21,7 +21,7 @@ sequenceDiagram
     M--)B: e-mail with magic link (out of band)
 
     B->>P: POST /session {token}
-    P->>DB: token used_at=now(); insert portal_sessions (30 min)
+    P->>DB: token used_at=now(), then insert portal_sessions (30 min)
     P-->>B: 200 + Set-Cookie (HttpOnly, SameSite=Strict)
 
     B->>P: GET /me (cookie)

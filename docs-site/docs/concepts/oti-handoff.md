@@ -27,7 +27,7 @@ sequenceDiagram
     Sunder->>Sunder: check signature, purpose, audience == caller's own scope
     Sunder->>DB: UPDATE oti SET status='USED' WHERE token_id=? AND status='VALID'
     DB-->>Sunder: 1 row updated (atomic CAS)
-    Sunder->>DB: auto-issue/fetch ERP's own scoped CID for the person; copy share_attributes into erp's blob
+    Sunder->>DB: auto-issue/fetch ERP's own scoped CID, then copy share_attributes into its blob
     Sunder-->>ERP: 200 {cid: "<erp's own CID>", shared:["shipping_address"]}
 
     Note over ERP,Sunder: A network blip now makes ERP unsure the call landed.<br/>Blind-retrying is exactly the wrong move:

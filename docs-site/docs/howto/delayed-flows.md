@@ -20,7 +20,7 @@ sequenceDiagram
     Note over CRM,Notifier: The token cannot wait for the escalation - it is<br/>consumed immediately, not "saved for later".
     CRM->>Notifier: hand token off now (queue/webhook), ticket ID attached
     Notifier->>Sunder: POST /v1/oti/verify {token, purpose, audience:"notifier"}
-    Sunder->>DB: VALID -> USED (atomic); copy share_attributes into notifier's blob
+    Sunder->>DB: VALID to USED (atomic), then copy share_attributes into the notifier blob
     Sunder-->>Notifier: 200 {cid: "<notifier's own CID>", shared:["email"]}
     Notifier->>Notifier: store ONLY ticket_id -> notifier_cid (no email, no name)
 
