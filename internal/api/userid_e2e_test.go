@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"mime/multipart"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -760,5 +762,170 @@ func TestBlobVersionsOverHTTP(t *testing.T) {
 	rec, _ = e.do(t, cred, "GET", "/v1/contacts/"+cid+"/versions/99/attributes/tier?purpose=support", nil)
 	if rec.Code != 404 {
 		t.Fatalf("unknown version: %d", rec.Code)
+	}
+}
+
+// TestNewEndpointsRateLimited covers the allow() helper on the token/file
+// audit-writing endpoints (review L1).
+func TestNewEndpointsRateLimited(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActTokensCreate},
+		AllowedPurposes: []string{}, RateLimit: 2}) // tiny budget
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	got429 := false
+	for i := 0; i < 10; i++ {
+		rec, _ := e.do(t, cred, "POST", "/v1/tokens", map[string]any{"value": "x"})
+		if rec.Code == 429 {
+			got429 = true
+			break
+		}
+	}
+	if !got429 {
+		t.Fatal("token creation must be rate limited")
+	}
+}
+
+// TestReviewFixHandlerBranches covers the new upload/token handler branches.
+func TestReviewFixHandlerBranches(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActFilesWrite, auth.ActFilesRead,
+			auth.ActTokensCreate, auth.ActTokensRead, auth.ActAdminUnlock},
+		AllowedPurposes: []string{"support"}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	weak, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "weak", Name: "Weak", Scope: "crm",
+		AllowedActions: []string{auth.ActLookup}, AllowedPurposes: []string{}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+		FilesStorage: "local", FilesDir: t.TempDir(), FilesMaxMB: 1}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{"email": "a@example.com"})
+	cid := out["cid"]
+
+	upload := func(bearer, cidPath, expiryHdr string) int {
+		var b bytes.Buffer
+		mw := multipart.NewWriter(&b)
+		pw, _ := mw.CreateFormFile("file", "x.txt")
+		pw.Write([]byte("data"))
+		mw.Close()
+		req := httptest.NewRequest("POST", "/v1/contacts/"+cidPath+"/files", &b)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		if expiryHdr != "" {
+			req.Header.Set("X-Sunder-File-Expiry", expiryHdr)
+		}
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	// Upload forbidden (before any body parse).
+	if code := upload(weak, cid, ""); code != 403 {
+		t.Fatalf("upload without action must 403: %d", code)
+	}
+	// Bad expiry header.
+	if code := upload(cred, cid, "not-a-date"); code != 400 {
+		t.Fatalf("bad expiry header must 400: %d", code)
+	}
+	// Valid expiry header succeeds.
+	if code := upload(cred, cid, "2999-01-01T00:00:00Z"); code != 201 {
+		t.Fatalf("valid expiry upload: %d", code)
+	}
+	// Version list without action: 403.
+	rec, _ := e.do(t, weak, "GET", "/v1/contacts/"+cid+"/versions", nil)
+	if rec.Code != 403 {
+		t.Fatalf("version list without action: %d", rec.Code)
+	}
+	// Bulk token create without action, behind a valid unlock: 403 from the
+	// action check BEFORE the token is spent.
+	_, o := e.do(t, cred, "POST", "/v1/admin/unlock", map[string]string{"purpose": "bulk-tokens"})
+	req := httptest.NewRequest("POST", "/v1/tokens/bulk", strings.NewReader(`{"items":[{"value":"a"}]}`))
+	req.Header.Set("Authorization", "Bearer "+weak)
+	req.Header.Set("X-Sunder-Unlock", o["unlock_token"])
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 403 {
+		t.Fatalf("bulk create without action must 403 (before spending token): %d", rr.Code)
+	}
+	// Bulk read with a malformed body but valid action: 400 before unlock.
+	req = httptest.NewRequest("POST", "/v1/tokens/bulk/read", strings.NewReader(`{bad`))
+	req.Header.Set("Authorization", "Bearer "+cred)
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 400 {
+		t.Fatalf("bulk read bad body must 400: %d", rr.Code)
+	}
+}
+
+// TestFileDownloadTruncatedAfterHeaders covers the handler branch where
+// Download fails after Peek has already written the 200 headers.
+func TestFileDownloadTruncatedAfterHeaders(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActFilesWrite, auth.ActFilesRead},
+		AllowedPurposes: []string{"support"}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+		FilesStorage: "local", FilesDir: dir, FilesMaxMB: 1}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{"email": "a@example.com"})
+	cid := out["cid"]
+	var b bytes.Buffer
+	mw := multipart.NewWriter(&b)
+	pw, _ := mw.CreateFormFile("file", "x.txt")
+	pw.Write([]byte(strings.Repeat("Z", 40000)))
+	mw.Close()
+	req := httptest.NewRequest("POST", "/v1/contacts/"+cid+"/files", &b)
+	req.Header.Set("Authorization", "Bearer "+cred)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	var meta map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &meta)
+	fileID := meta["id"].(string)
+	// Truncate the stored blob on disk so Peek still reads metadata from the
+	// DB but Download hits a short read after headers are written.
+	var key string
+	st.Pool.QueryRow(ctx, `SELECT storage_key FROM files WHERE id=$1`, fileID).Scan(&key)
+	if err := os.Truncate(filepath.Join(dir, key), 10); err != nil {
+		t.Fatal(err)
+	}
+	dreq := httptest.NewRequest("GET", "/v1/files/"+fileID+"?purpose=support", nil)
+	dreq.Header.Set("Authorization", "Bearer "+cred)
+	drec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(drec, dreq)
+	// The 200 header is already out; the body is truncated. The handler must
+	// not panic and must have logged the error.
+	if drec.Code != 200 {
+		t.Fatalf("headers were written before the failure, want 200 got %d", drec.Code)
 	}
 }

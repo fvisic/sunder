@@ -1016,3 +1016,22 @@ func TestClientGrantQueryErrors(t *testing.T) {
 		t.Fatal("clear-attributes grant must surface the query error")
 	}
 }
+
+func TestClientEmptyAttributesRejected(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	// create with a stray-comma attributes list: must be rejected, not
+	// silently fail-open to "read all".
+	if err := clientCmd(ctx, st, []string{"create", "-id", "e1", "-name", "E", "-scope", "crm",
+		"-actions", "lookup", "-purposes", "support", "-attributes", ","}); err == nil {
+		t.Fatal("empty attributes on create must be rejected")
+	}
+	if err := clientCmd(ctx, st, []string{"create", "-id", "e2", "-name", "E", "-scope", "crm",
+		"-actions", "lookup", "-purposes", "support", "-attributes", "iban"}); err != nil {
+		t.Fatal(err)
+	}
+	// grant with a stray-comma attributes list: also rejected.
+	if err := clientCmd(ctx, st, []string{"grant", "-id", "e2", "-attributes", " "}); err == nil {
+		t.Fatal("empty attributes on grant must be rejected")
+	}
+}

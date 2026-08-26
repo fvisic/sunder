@@ -195,6 +195,19 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 	return s, nil
 }
 
+// allow applies the per-client rate limit to an audit-writing endpoint and
+// writes a 429 if the client is over budget (L1: these endpoints append to
+// the chain under a global lock, so an unbounded caller can serialize the
+// instance). Returns false when the request must stop.
+func (s *Server) allow(w http.ResponseWriter, client *auth.Client) bool {
+	if s.Limiter != nil && !s.Limiter.Allow(client.ID, client.RateLimit) {
+		s.Metrics.Inc(fmt.Sprintf(`sunder_ratelimited_total{client=%q}`, client.ID))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+		return false
+	}
+	return true
+}
+
 // Handler returns the outermost HTTP handler (middleware applied).
 func (s *Server) Handler() http.Handler { return s.instrument(s.mux) }
 

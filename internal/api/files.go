@@ -7,16 +7,34 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/fvisic/sunder/internal/auth"
+	"github.com/fvisic/sunder/internal/service"
 )
 
 func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	// Multipart with one "file" part; the part name and filename are the
-	// metadata, the body streams into the vault.
-	if err := r.ParseMultipartForm(1 << 20); err != nil { // headers in memory; the file part streams
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": "multipart form with a \"file\" part required"})
+	// Authorize BEFORE reading a byte of the body: an unauthorized client
+	// must never make the server spool a multipart body to disk (H2).
+	if !client.Can(auth.ActFilesWrite) {
+		writeErr(w, service.ErrForbidden)
+		return
+	}
+	if !s.allow(w, client) {
+		return
+	}
+	// Cap the whole request body at the per-file limit plus a small
+	// multipart overhead allowance, BEFORE ParseMultipartForm - otherwise
+	// it spools the entire (plaintext) body to os.TempDir() with no ceiling
+	// and the MaxBytes check inside Upload runs far too late (H2).
+	limit := s.Files.MaxBytes
+	if limit <= 0 {
+		limit = 25 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit+(1<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": "multipart form with a \"file\" part required (or body too large)"})
 		return
 	}
 	file, header, err := r.FormFile("file")
@@ -25,8 +43,17 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	meta, err := s.Files.Upload(r.Context(), client, r.PathValue("cid"),
-		header.Filename, header.Header.Get("Content-Type"), file)
+	var expiresAt *time.Time
+	if hv := r.Header.Get("X-Sunder-File-Expiry"); hv != "" {
+		t, perr := time.Parse(time.RFC3339, hv)
+		if perr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": "X-Sunder-File-Expiry must be RFC3339"})
+			return
+		}
+		expiresAt = &t
+	}
+	meta, err := s.Files.UploadWithExpiry(r.Context(), client, r.PathValue("cid"),
+		header.Filename, header.Header.Get("Content-Type"), expiresAt, file)
 	if err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)

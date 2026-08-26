@@ -370,3 +370,97 @@ func TestValueTokenBulkReadErrorPropagates(t *testing.T) {
 		t.Fatal("bulk create must propagate a hard error")
 	}
 }
+
+// TestReviewH1_UniqueSurvivesKekRotation: the unique dedup hash must not be
+// named by the pii-kek version (a rotated KEK would name a nonexistent
+// hmac key). Rotate the KEK, then unique tokenization must still work and
+// still dedup.
+func TestReviewH1_UniqueSurvivesKekRotation(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	a, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "HR12", Unique: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rotate the pii-kek (the documented operation that triggered H1).
+	if _, err := e.svc.Ring.Rotate(ctx, e.svc.PII.Engine(), "pii-kek"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "HR12", Unique: true})
+	if err != nil {
+		t.Fatalf("unique tokenize must survive a kek rotation: %v", err)
+	}
+	if b != a {
+		t.Fatalf("dedup must still hit after rotation: %q vs %q", b, a)
+	}
+}
+
+// TestReviewM1_UniqueBindsTypeAndSkipsExpired.
+func TestReviewM1_UniqueBindsTypeAndSkipsExpired(t *testing.T) {
+	_, v, client := tokenEnv(t)
+	ctx := context.Background()
+	// A card and a string of the same digits must NOT dedup to each other.
+	sTok, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "4111111111111111", Unique: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cTok, err := v.Tokenize(ctx, client, service.TokenizeInput{Type: "card", Value: "4111111111111111", Unique: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sTok == cTok {
+		t.Fatal("string and card unique tokens of the same value must not collide")
+	}
+	// An expired unique row must not be returned by a fresh unique request.
+	exp, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "OLD", Unique: true, ExpiresFinal: "2020-01-01T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := v.Tokenize(ctx, client, service.TokenizeInput{Value: "OLD", Unique: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again == exp {
+		t.Fatal("a fresh unique request must not return an already-expired token")
+	}
+}
+
+// TestReviewM4_BulkAtomic: a bad item rolls the whole batch back - no
+// orphaned rows.
+func TestReviewM4_BulkAtomic(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	_, err := v.TokenizeBulk(ctx, client, []service.TokenizeInput{
+		{Value: "one"}, {Value: "two"}, {Value: ""}}) // third is invalid
+	if err == nil {
+		t.Fatal("a bad item must fail the batch")
+	}
+	var n int64
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM value_tokens`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("a failed bulk must leave no rows, got %d", n)
+	}
+}
+
+func TestValueTokenBulkFaultRollsBack(t *testing.T) {
+	e, v, client := tokenEnv(t)
+	ctx := context.Background()
+	// Break the table mid-batch: the whole transaction must roll back.
+	if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE value_tokens RENAME TO vt_bulk_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.TokenizeBulk(ctx, client, []service.TokenizeInput{{Value: "a"}, {Value: "b"}}); err == nil {
+		t.Fatal("bulk must fail when the table is broken")
+	}
+	if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE vt_bulk_gone RENAME TO value_tokens`); err != nil {
+		t.Fatal(err)
+	}
+	// Keys denied breaks the seal key up front.
+	e2 := newFaultEnv(t, "keys")
+	v2 := &service.ValueTokens{Pool: e2.svc.Pool, Eng: e2.svc.PII.Engine(), Ring: e2.svc.Ring, Tok: e2.svc.Tok}
+	if _, err := v2.TokenizeBulk(ctx, client, []service.TokenizeInput{{Value: "a"}}); err == nil {
+		t.Fatal("bulk must fail when keys are denied")
+	}
+}

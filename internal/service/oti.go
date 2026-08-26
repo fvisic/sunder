@@ -376,12 +376,72 @@ func (o *OTI) VerifyFull(ctx context.Context, client *auth.Client, token, purpos
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	// M3: filter the disclosure by the VERIFIER's attribute allowlist. A
+	// predicate is a one-bit oracle for its attribute, so a narrowed
+	// verifier must receive neither the shared value nor the predicate
+	// result for an attribute outside its allowlist. shareIntoScope has
+	// already run, so also strip any just-copied value it may not read.
+	if client.AllowedAttributes != nil {
+		kept := shared[:0]
+		for _, a := range shared {
+			if client.CanReadAttribute(a) {
+				kept = append(kept, a)
+			} else {
+				// Undo the copy into this scope's blob for a forbidden attr.
+				if err := o.stripSharedAttr(ctx, verifierCID, a); err != nil {
+					return nil, err
+				}
+			}
+		}
+		shared = kept
+		fpr := predResults[:0]
+		for _, pr := range predResults {
+			if client.CanReadAttribute(pr.Attr) {
+				fpr = append(fpr, pr)
+			}
+		}
+		predResults = fpr
+	}
 	return &VerifyOutcome{CID: verifierCID, Shared: shared, Predicates: predResults}, nil
 }
 
 // shareIntoScope copies the listed attributes from the issuer's blob into
 // the verifier's blob (issuer values win on conflict; missing attributes are
 // silently absent). Returns the names actually copied, for the audit record.
+// stripSharedAttr removes one attribute from a verifier-scope blob, used to
+// undo a share the verifier's allowlist forbids (M3). Best-effort within a
+// fresh transaction: the value was written by shareIntoScope moments ago.
+func (o *OTI) stripSharedAttr(ctx context.Context, cid, name string) error {
+	var blob []byte
+	var keyID, alg string
+	err := o.Pool.QueryRow(ctx,
+		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1`,
+		cid).Scan(&blob, &keyID, &alg)
+	if err != nil || len(blob) == 0 {
+		return err
+	}
+	attrs, err := o.Contacts.PII.Decrypt(ctx, cid, blob, keyID, alg)
+	if err != nil {
+		return err
+	}
+	if _, ok := attrs[name]; !ok {
+		return nil
+	}
+	delete(attrs, name)
+	newKey, err := o.Ring.Newest(ctx, crypto.KeyPIIKEK)
+	if err != nil {
+		return err
+	}
+	fresh, err := o.Contacts.PII.Encrypt(ctx, cid, newKey, attrs)
+	if err != nil {
+		return err
+	}
+	_, err = o.Pool.Exec(ctx,
+		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4, updated_at=now() WHERE cid=$1`,
+		cid, fresh, newKey, o.Contacts.PII.Algorithm())
+	return err
+}
+
 func (o *OTI) shareIntoScope(ctx context.Context, tx pgx.Tx, issuerCID, verifierCID string, attrs []string) ([]string, error) {
 	shared := []string{}
 	if len(attrs) == 0 || issuerCID == verifierCID {

@@ -542,3 +542,69 @@ func TestUnlockAndRecordKeyQueryErrors(t *testing.T) {
 		t.Fatalf("hard consume error must propagate, got %v", err)
 	}
 }
+
+// TestReviewM3_VerifierAllowlistOnVerify: a narrowed verifier must not
+// receive a shared value or a predicate result over a forbidden attribute.
+func TestReviewM3_VerifierAllowlistOnVerify(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	cid := e.register(t) // fault@example.com, attr tier=gold
+	// Issuer (un-narrowed) shares tier + a predicate over tier.
+	tok, _, err := e.oti.IssueFull(ctx, e.crm, service.IssueInput{
+		CID: cid, Purpose: "support", Audience: "billing",
+		ShareAttributes: []string{"tier"},
+		SharePredicates: []service.Predicate{{Attr: "tier", Op: "exists"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Verifier is narrowed to "email" only - must receive neither.
+	verifier := &auth.Client{ID: "billing", Scope: "billing",
+		AllowedActions:    []string{auth.ActOTIVerify, auth.ActAttributesRead},
+		AllowedPurposes:   []string{"support"},
+		AllowedAttributes: []string{"email"}}
+	out, err := e.oti.VerifyFull(ctx, verifier, tok, "support", "billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range out.Shared {
+		if a == "tier" {
+			t.Fatal("a narrowed verifier must not receive the forbidden shared attribute")
+		}
+	}
+	for _, pr := range out.Predicates {
+		if pr.Attr == "tier" {
+			t.Fatal("a narrowed verifier must not receive a predicate over a forbidden attribute")
+		}
+	}
+	// And the forbidden value must not have been left in the verifier blob.
+	reader := &auth.Client{ID: "billing", Scope: "billing",
+		AllowedActions: []string{auth.ActAttributesRead}, AllowedPurposes: []string{"support"}}
+	if _, err := e.svc.GetAttribute(ctx, reader, out.CID, "tier", "support"); err == nil {
+		t.Fatal("the stripped attribute must not be readable from the verifier scope")
+	}
+}
+
+// TestReviewM3_StripFaultFailsClosed: if undoing a forbidden share fails,
+// VerifyFull must surface the error, not disclose the attribute.
+func TestReviewM3_StripFaultFailsClosed(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	cid := e.register(t)
+	tok, _, err := e.oti.IssueFull(ctx, e.crm, service.IssueInput{
+		CID: cid, Purpose: "support", Audience: "billing",
+		ShareAttributes: []string{"tier"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := &auth.Client{ID: "billing", Scope: "billing",
+		AllowedActions:    []string{auth.ActOTIVerify},
+		AllowedPurposes:   []string{"support"},
+		AllowedAttributes: []string{"email"}}
+	// Break cids so stripSharedAttr's re-encrypt UPDATE fails.
+	if _, err := e.admin.Pool.Exec(ctx, `ALTER TABLE cids RENAME TO cids_hidden3`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.oti.VerifyFull(ctx, verifier, tok, "support", "billing"); err == nil {
+		t.Fatal("a failed strip must fail the verify, not disclose")
+	}
+}

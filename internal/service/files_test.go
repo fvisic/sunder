@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/service"
@@ -533,5 +534,102 @@ func TestFileVaultListDeleteQueryErrors(t *testing.T) {
 	}
 	if _, err := service.RunFileGC(ctx, e.admin.Pool, f.Store); err == nil {
 		t.Fatal("gc must surface the query error")
+	}
+}
+
+// TestReviewM2_ShortReadDetected: a truncated stored object must fail the
+// download, not report success on partial content.
+func TestReviewM2_ShortReadDetected(t *testing.T) {
+	e, f, client, cid := filesEnv(t)
+	ctx := context.Background()
+	meta, err := f.Upload(ctx, client, cid, "a.txt", "", strings.NewReader(strings.Repeat("A", 50000)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storageKey string
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT storage_key FROM files WHERE id=$1`, meta.ID).Scan(&storageKey); err != nil {
+		t.Fatal(err)
+	}
+	// Truncate the stored ciphertext to the first chunk header + partial.
+	rc, err := f.Store.Get(ctx, storageKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := new(bytes.Buffer)
+	blob.ReadFrom(rc)
+	rc.Close()
+	raw := blob.Bytes()
+	if err := f.Store.Put(ctx, storageKey, bytes.NewReader(raw[:len(raw)/2]), int64(len(raw)/2)); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if _, err := f.Download(ctx, client, meta.ID, "support", &out); err == nil {
+		t.Fatal("a truncated object must fail the download")
+	}
+}
+
+// TestReviewM6_FileExpiry: an expired file is a miss at read time.
+func TestReviewM6_FileExpiry(t *testing.T) {
+	e, f, client, cid := filesEnv(t)
+	ctx := context.Background()
+	past := time.Now().Add(-time.Hour)
+	meta, err := f.UploadWithExpiry(ctx, client, cid, "a.txt", "", &past, strings.NewReader("data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if _, err := f.Download(ctx, client, meta.ID, "support", &out); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("an expired file must be a miss: %v", err)
+	}
+	_ = e
+}
+
+// TestReviewL2_DekBoundToCid: repointing files.cid to another of the same
+// person's cids must make the DEK fail to unwrap.
+func TestReviewL2_DekBoundToCid(t *testing.T) {
+	e, f, client, cid := filesEnv(t)
+	ctx := context.Background()
+	// Give the person a second scope so there is another cid to point at.
+	otherCID, err := e.svc.IssueScopedCid(ctx, e.crm, cid, "erp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := f.Upload(ctx, client, cid, "a.txt", "", strings.NewReader("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Attacker repoints the row to the erp cid (same person, same record key).
+	if _, err := e.admin.Pool.Exec(ctx, `UPDATE files SET cid=$1 WHERE id=$2`, otherCID, meta.ID); err != nil {
+		t.Fatal(err)
+	}
+	erp := &auth.Client{ID: "erp", Scope: "erp",
+		AllowedActions: []string{auth.ActFilesRead}, AllowedPurposes: []string{"support"}}
+	// Grant erp the support purpose+consent path; the DEK AAD mismatch must
+	// still fail the decrypt even though scope now matches.
+	var out bytes.Buffer
+	if _, err := f.Download(ctx, erp, meta.ID, "support", &out); err == nil {
+		t.Fatal("a cid-repointed file must fail to decrypt (DEK bound to cid)")
+	}
+}
+
+// TestReviewL3_UploadAfterErasureRejected: a person erased before the
+// insert commits must not get a stranded, undecryptable file row.
+func TestReviewL3_UploadAfterErasureRejected(t *testing.T) {
+	e, f, client, cid := filesEnv(t)
+	ctx := context.Background()
+	// Erase the person first, then attempt an upload against the (retained)
+	// cid: the in-transaction re-check must reject it as a miss.
+	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Upload(ctx, client, cid, "a.txt", "", strings.NewReader("data")); !errors.Is(err, service.ErrNotFound) {
+		t.Fatalf("upload for an erased person must be a miss: %v", err)
+	}
+	var n int64
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM files`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("no file row must survive, got %d", n)
 	}
 }

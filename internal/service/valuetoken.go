@@ -64,119 +64,34 @@ func (v *ValueTokens) sealKey(ctx context.Context) (string, error) {
 	return v.Ring.Newest(ctx, crypto.KeyPIIKEK)
 }
 
-// Tokenize mints one token for one value.
+// Tokenize mints one token for one value, in its own transaction.
 func (v *ValueTokens) Tokenize(ctx context.Context, client *auth.Client, in TokenizeInput) (string, error) {
 	if !client.Can(auth.ActTokensCreate) {
 		return "", ErrForbidden
 	}
-	if in.Value == "" {
-		return "", fmt.Errorf("%w: value required", ErrValidation)
-	}
-	if len(in.Value) > maxTokenValueBytes {
-		return "", fmt.Errorf("%w: value exceeds %d bytes (the file vault is for blobs)", ErrValidation, maxTokenValueBytes)
-	}
-	tokenType := in.Type
-	if tokenType == "" {
-		tokenType = "string"
-	}
-	if tokenType != "string" && tokenType != "card" {
-		return "", fmt.Errorf("%w: type must be \"string\" or \"card\"", ErrValidation)
-	}
-	if tokenType == "card" {
-		if !luhnValid(digitsOf(in.Value)) {
-			return "", fmt.Errorf("%w: card value fails the Luhn check", ErrValidation)
-		}
-	}
-	var expiresFinal *time.Time
-	if in.ExpiresFinal != "" {
-		t, err := time.Parse(time.RFC3339, in.ExpiresFinal)
-		if err != nil {
-			return "", fmt.Errorf("%w: expires_final must be RFC3339", ErrValidation)
-		}
-		expiresFinal = &t
-	}
-	if in.SlidingSeconds < 0 {
-		return "", fmt.Errorf("%w: sliding_seconds must be >= 0", ErrValidation)
-	}
-
 	keyID, err := v.sealKey(ctx)
 	if err != nil {
 		return "", err
 	}
-	var uniqueHash []byte
-	if in.Unique {
-		// Keyed HMAC under the email HMAC key domain-separated for values:
-		// dedup needs determinism, never reversibility.
-		mac, err := v.Eng.MAC(ctx, crypto.KeyHMACEmail+"/"+keyID, []byte("valtok\x00"+client.Scope+"\x00"+in.Value))
-		if err != nil {
-			return "", err
-		}
-		uniqueHash = mac
-	}
-
-	for attempt := 0; attempt < 3; attempt++ {
-		token, err := newValueToken(tokenType, in.Value)
-		if err != nil {
-			return "", err
-		}
-		// The ciphertext is bound to its token and scope: a row cannot be
-		// re-pointed at another token or tenant without failing to open.
-		sealed, err := v.Eng.Seal(ctx, crypto.KeyPIIKEK+"/"+keyID, "aes256gcm",
-			[]byte("valtok\x00"+client.Scope+"\x00"+token), []byte(in.Value))
-		if err != nil {
-			return "", err
-		}
-
-		tx, err := v.Pool.Begin(ctx)
-		if err != nil {
-			return "", err
-		}
-		if in.Unique {
-			var existing string
-			err := tx.QueryRow(ctx,
-				`SELECT token FROM value_tokens WHERE scope=$1 AND unique_hash=$2`,
-				client.Scope, uniqueHash).Scan(&existing)
-			if err == nil {
-				// Dedup hit: same value, same token; a hit refreshes the
-				// sliding window like a read would.
-				_, err = tx.Exec(ctx, `UPDATE value_tokens SET last_used=now() WHERE token=$1`, existing)
-				if err == nil {
-					err = tx.Commit(ctx)
-				}
-				if err != nil {
-					_ = tx.Rollback(ctx)
-					return "", err
-				}
-				return existing, nil
-			}
-			if err != pgx.ErrNoRows {
-				_ = tx.Rollback(ctx)
-				return "", err
-			}
-		}
-		_, err = tx.Exec(ctx, `
-			INSERT INTO value_tokens (token, scope, token_type, ciphertext, key_id, alg, unique_hash, expires_final, sliding_seconds)
-			VALUES ($1,$2,$3,$4,$5,'aes256gcm',$6,$7,NULLIF($8,0))`,
-			token, client.Scope, tokenType, sealed, keyID, uniqueHash, expiresFinal, in.SlidingSeconds)
-		if err == nil {
-			err = audit.AppendTx(ctx, tx, audit.Entry{
-				ClientID: client.ID, Action: "tokens.create",
-				Detail: map[string]any{"type": tokenType, "unique": in.Unique},
-			})
-		}
-		if err == nil {
-			if err = tx.Commit(ctx); err != nil {
-				return "", err
-			}
-			return token, nil
-		}
-		_ = tx.Rollback(ctx)
-		if isUniqueViolation(err) {
-			continue // token collision (or a concurrent unique-dedup racer): retry fresh
-		}
+	tx, err := v.Pool.Begin(ctx)
+	if err != nil {
 		return "", err
 	}
-	return "", fmt.Errorf("token space collision persisted across retries")
+	defer func() { _ = tx.Rollback(ctx) }()
+	token, err := v.tokenizeInTx(ctx, tx, client, keyID, in)
+	if err != nil {
+		return "", err
+	}
+	if err := audit.AppendTx(ctx, tx, audit.Entry{
+		ClientID: client.ID, Action: "tokens.create",
+		Detail: map[string]any{"type": in.Type, "unique": in.Unique},
+	}); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 // Detokenize returns the sealed value and refreshes sliding expiry.
@@ -358,10 +273,10 @@ func luhnToken(length int) (string, error) {
 	return string(digits), nil
 }
 
-// TokenizeBulk mints tokens for up to bulkTokenLimit values in one call.
-// The HANDLER has already spent an unlock token; here the batch is audited
-// as one chained record carrying the count - bulk intent is provable
-// without a row per item.
+// TokenizeBulk mints tokens for up to bulkTokenLimit values in ONE
+// transaction: a mid-batch failure rolls the whole batch back, so a
+// migration can never leave sealed plaintext behind that nobody holds a
+// handle to (M4). The batch is one chained audit record carrying the count.
 func (v *ValueTokens) TokenizeBulk(ctx context.Context, client *auth.Client, items []TokenizeInput) ([]string, error) {
 	if !client.Can(auth.ActTokensCreate) {
 		return nil, ErrForbidden
@@ -372,23 +287,141 @@ func (v *ValueTokens) TokenizeBulk(ctx context.Context, client *auth.Client, ite
 	if len(items) > bulkTokenLimit {
 		return nil, fmt.Errorf("%w: at most %d items per bulk call", ErrValidation, bulkTokenLimit)
 	}
+	keyID, err := v.sealKey(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := v.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	out := make([]string, 0, len(items))
-	for _, in := range items {
-		token, err := v.Tokenize(ctx, client, in)
+	for i, in := range items {
+		token, err := v.tokenizeInTx(ctx, tx, client, keyID, in)
 		if err != nil {
-			// Fail the whole batch loudly: a partial bulk result with a
-			// silent hole is how values get lost in migrations.
-			return nil, fmt.Errorf("item %d: %w", len(out), err)
+			return nil, fmt.Errorf("item %d: %w", i, err)
 		}
 		out = append(out, token)
 	}
-	if err := audit.Append(ctx, v.Pool, audit.Entry{
+	if err := audit.AppendTx(ctx, tx, audit.Entry{
 		ClientID: client.ID, Action: "tokens.bulk_create",
 		Detail: map[string]any{"count": len(out)},
 	}); err != nil {
 		return nil, err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// tokenizeInTx does one item's validation, dedup and insert inside a
+// caller-supplied transaction. A token-PK collision retries inside a
+// savepoint so it cannot abort the surrounding batch.
+func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.Client, keyID string, in TokenizeInput) (string, error) {
+	tokenType, expiresFinal, uniqueHash, err := v.validateAndHash(ctx, client, keyID, in)
+	if err != nil {
+		return "", err
+	}
+	if in.Unique {
+		var existing string
+		err := tx.QueryRow(ctx, `
+			SELECT token FROM value_tokens
+			 WHERE scope=$1 AND unique_hash=$2
+			   AND (expires_final IS NULL OR expires_final > now())
+			   AND (sliding_seconds IS NULL OR last_used + make_interval(secs => sliding_seconds) > now())`,
+			client.Scope, uniqueHash).Scan(&existing)
+		if err == nil {
+			if _, err := tx.Exec(ctx, `UPDATE value_tokens SET last_used=now() WHERE token=$1`, existing); err != nil {
+				return "", err
+			}
+			return existing, nil
+		}
+		if err != pgx.ErrNoRows {
+			return "", err
+		}
+		// No LIVE row, but an EXPIRED row may still hold this unique_hash in
+		// the partial unique index and would block the insert. It is dead;
+		// remove it so the fresh token can take the slot.
+		if _, err := tx.Exec(ctx, `DELETE FROM value_tokens WHERE scope=$1 AND unique_hash=$2`,
+			client.Scope, uniqueHash); err != nil {
+			return "", err
+		}
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		token, err := newValueToken(tokenType, in.Value)
+		if err != nil {
+			return "", err
+		}
+		sealed, err := v.Eng.Seal(ctx, crypto.KeyPIIKEK+"/"+keyID, "aes256gcm",
+			[]byte("valtok\x00"+client.Scope+"\x00"+token), []byte(in.Value))
+		if err != nil {
+			return "", err
+		}
+		sp, err := tx.Begin(ctx) // savepoint
+		if err != nil {
+			return "", err
+		}
+		_, err = sp.Exec(ctx, `
+			INSERT INTO value_tokens (token, scope, token_type, ciphertext, key_id, alg, unique_hash, expires_final, sliding_seconds)
+			VALUES ($1,$2,$3,$4,$5,'aes256gcm',$6,$7,NULLIF($8,0))`,
+			token, client.Scope, tokenType, sealed, keyID, uniqueHash, expiresFinal, in.SlidingSeconds)
+		if err == nil {
+			return token, sp.Commit(ctx)
+		}
+		_ = sp.Rollback(ctx)
+		if isUniqueViolation(err) {
+			continue
+		}
+		return "", err
+	}
+	return "", fmt.Errorf("token space collision persisted across retries")
+}
+
+// validateAndHash performs the pure validation and the unique-hash
+// computation shared by the single and bulk paths.
+func (v *ValueTokens) validateAndHash(ctx context.Context, client *auth.Client, keyID string, in TokenizeInput) (tokenType string, expiresFinal *time.Time, uniqueHash []byte, err error) {
+	if in.Value == "" {
+		return "", nil, nil, fmt.Errorf("%w: value required", ErrValidation)
+	}
+	if len(in.Value) > maxTokenValueBytes {
+		return "", nil, nil, fmt.Errorf("%w: value exceeds %d bytes (the file vault is for blobs)", ErrValidation, maxTokenValueBytes)
+	}
+	tokenType = in.Type
+	if tokenType == "" {
+		tokenType = "string"
+	}
+	if tokenType != "string" && tokenType != "card" {
+		return "", nil, nil, fmt.Errorf("%w: type must be \"string\" or \"card\"", ErrValidation)
+	}
+	if tokenType == "card" && !luhnValid(digitsOf(in.Value)) {
+		return "", nil, nil, fmt.Errorf("%w: card value fails the Luhn check", ErrValidation)
+	}
+	if in.ExpiresFinal != "" {
+		t, perr := time.Parse(time.RFC3339, in.ExpiresFinal)
+		if perr != nil {
+			return "", nil, nil, fmt.Errorf("%w: expires_final must be RFC3339", ErrValidation)
+		}
+		expiresFinal = &t
+	}
+	if in.SlidingSeconds < 0 {
+		return "", nil, nil, fmt.Errorf("%w: sliding_seconds must be >= 0", ErrValidation)
+	}
+	if in.Unique {
+		hmacV, herr := v.Ring.Newest(ctx, crypto.KeyHMACEmail)
+		if herr != nil {
+			return "", nil, nil, herr
+		}
+		mac, merr := v.Eng.MAC(ctx, crypto.KeyHMACEmail+"/"+hmacV,
+			[]byte("valtok\x00"+client.Scope+"\x00"+tokenType+"\x00"+in.Value))
+		if merr != nil {
+			return "", nil, nil, merr
+		}
+		uniqueHash = mac
+	}
+	return tokenType, expiresFinal, uniqueHash, nil
 }
 
 // DetokenizeBulk redeems up to bulkTokenLimit tokens. Misses come back as
