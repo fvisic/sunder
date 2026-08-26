@@ -79,6 +79,7 @@ nav:
       - Delayed Flows: howto/delayed-flows.md
   - Dev:
       - SDKs and API: dev/sdks-and-api.md
+  - FAQ: faq.md
 
 plugins:
   - search
