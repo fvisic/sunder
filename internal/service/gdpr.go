@@ -419,6 +419,12 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 	if _, err := tx.Exec(ctx, `DELETE FROM person_tokens WHERE person_id=$1`, personID); err != nil {
 		return 0, 0, err
 	}
+	// F6: blob history is the same personal data, one generation older -
+	// it dies with the person.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM cid_blob_versions WHERE cid IN (SELECT cid FROM cids WHERE person_id=$1)`, personID); err != nil {
+		return 0, 0, err
+	}
 	// Portal state dies with the person: a queued login or erase-confirm
 	// mail must not still be delivered, and a live session must not
 	// outlive the data.

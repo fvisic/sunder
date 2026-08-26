@@ -260,3 +260,21 @@ func TestAuditSealingValidation(t *testing.T) {
 		t.Fatal("batch below 100 must be rejected")
 	}
 }
+
+func TestVersioningConfig(t *testing.T) {
+	t.Setenv("SUNDER_DB_URL", "postgres://localhost/sunder")
+	c, err := FromEnv()
+	if err != nil || c.VersionsKeep != 0 {
+		t.Fatalf("default versions keep: %d %v", c.VersionsKeep, err)
+	}
+	t.Setenv("SUNDER_VERSIONS_KEEP", "5")
+	t.Setenv("SUNDER_VERSIONS_TTL", "720h")
+	c, err = FromEnv()
+	if err != nil || c.VersionsKeep != 5 || c.VersionsTTL == 0 {
+		t.Fatalf("versions config: %+v %v", c, err)
+	}
+	t.Setenv("SUNDER_VERSIONS_KEEP", "5000")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("versions keep over 1000 must be rejected")
+	}
+}

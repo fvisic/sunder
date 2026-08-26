@@ -228,6 +228,25 @@ commit time (crypto-shredding), and `sunder retention run`
 garbage-collects the dead ciphertext. The storage driver only ever sees
 ciphertext.
 
+## Attribute blob versioning (F6)
+
+OFF by default: keeping history extends the storage-limitation clock, a
+real GDPR tension, so an upgrade must not silently start retaining
+superseded values.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SUNDER_VERSIONS_KEEP` | `0` | keep the N most recent prior blob versions per cid (0 = off, max 1000) |
+| `SUNDER_VERSIONS_TTL` | `0s` | also prune versions older than this via `sunder retention run` |
+
+Every overwrite of a cid's attribute blob snapshots the PREVIOUS value
+into `cid_blob_versions` in the SAME transaction as the write. History is
+read through `GET /v1/contacts/{cid}/versions` (metadata) and
+`GET /v1/contacts/{cid}/versions/{n}/attributes/{name}` (one field,
+`attributes.history` action) - purpose-, consent- and allowlist-checked
+and audited exactly like a live read. History is erased with the person
+(same personal data, one generation older) and pruned by retention.
+
 ## PostgreSQL sizing (P4.5)
 
 Stock Postgres defaults (128 MB `shared_buffers`) measure the defaults,

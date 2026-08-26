@@ -948,6 +948,7 @@ func TestRetentionSweepAllQueues(t *testing.T) {
 	cfg := testCfg(t)
 	cfg.FilesStorage = "local"
 	cfg.FilesDir = t.TempDir()
+	cfg.VersionsTTL = 24 * 3600 * 1e9 // 1 day, exercises the version-prune branch
 	if err := retentionCmd(ctx, cfg, st, []string{"run"}); err != nil {
 		t.Fatalf("retention run with the vault enabled: %v", err)
 	}

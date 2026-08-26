@@ -718,3 +718,47 @@ func TestHandlerHardErrorPaths(t *testing.T) {
 		t.Fatalf("a hard DB error during bulk unlock consume must 5xx, got %d", rr.Code)
 	}
 }
+
+// TestBlobVersionsOverHTTP covers the F6 version endpoints.
+func TestBlobVersionsOverHTTP(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActAttributesHistory},
+		AllowedPurposes: []string{"support"}, RateLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(), VersionsKeep: 5}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{
+		"email": "ana@example.com", "attributes": map[string]string{"tier": "bronze"}})
+	cid := out["cid"]
+	// Overwrite twice to create two versions.
+	e.do(t, cred, "POST", "/v1/contacts", map[string]any{"email": "ana@example.com", "attributes": map[string]string{"tier": "silver"}})
+	e.do(t, cred, "POST", "/v1/contacts", map[string]any{"email": "ana@example.com", "attributes": map[string]string{"tier": "gold"}})
+
+	rec, _ := e.do(t, cred, "GET", "/v1/contacts/"+cid+"/versions", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "version_no") {
+		t.Fatalf("version list: %d %s", rec.Code, rec.Body.String())
+	}
+	// Read version 1's attribute.
+	rec, o := e.do(t, cred, "GET", "/v1/contacts/"+cid+"/versions/1/attributes/tier?purpose=support", nil)
+	if rec.Code != 200 || o["value"] != "bronze" {
+		t.Fatalf("version 1 attribute: %d %s", rec.Code, rec.Body.String())
+	}
+	// A non-numeric version: 400.
+	rec, _ = e.do(t, cred, "GET", "/v1/contacts/"+cid+"/versions/abc/attributes/tier?purpose=support", nil)
+	if rec.Code != 400 {
+		t.Fatalf("bad version id: %d", rec.Code)
+	}
+	// Unknown version: 404.
+	rec, _ = e.do(t, cred, "GET", "/v1/contacts/"+cid+"/versions/99/attributes/tier?purpose=support", nil)
+	if rec.Code != 404 {
+		t.Fatalf("unknown version: %d", rec.Code)
+	}
+}

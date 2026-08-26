@@ -39,6 +39,11 @@ type Contacts struct {
 	// them on later backfills existing contacts via `sunder keys rekey`.
 	FuzzyName   bool
 	PhoneSuffix bool
+	// VersionsKeep > 0 keeps that many prior blob versions per cid (F6);
+	// 0 = off. Set from SUNDER_VERSIONS_KEEP.
+	VersionsKeep int
+	// WrittenBy labels version rows with the operating client id; set per
+	// call is impractical, so mergeIntoBlob passes the client through.
 }
 
 // mintDerived tokenizes pre-derived values (phonetic codes, suffixes)
@@ -566,6 +571,11 @@ func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid string, att
 	// cap and brick every crypto op on the row - refuse the write instead.
 	if len(blob) > maxBlobBytes {
 		return fmt.Errorf("%w: attribute blob exceeds %d bytes", ErrValidation, maxBlobBytes)
+	}
+	// F6: snapshot the outgoing blob as a version BEFORE overwriting, in
+	// this same transaction, so history and the overwrite are atomic.
+	if err := c.appendVersion(ctx, tx, cid, "register", oldBlob, oldKeyID, oldAlg); err != nil {
+		return err
 	}
 	_, err = tx.Exec(ctx,
 		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4, updated_at=now() WHERE cid=$1`,
