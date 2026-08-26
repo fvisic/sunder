@@ -136,8 +136,8 @@ gates `/metrics` because per-client counters reveal client IDs and activity.
 
 - `verify-audit` does NOT treat a nonzero pending count as a break - pending
   rows are still protected by the append-only trigger and seal on the next
-  pass. Only a missing `chain_seq`, a `prev_hash` mismatch, or (under
-  `sync`, which drains before serving) a nonzero pending count fails.
+  pass. Only a `chain_seq` gap, a `prev_hash` mismatch, or a record whose
+  content no longer matches its hash fails the chain check.
 - `sunder anchor` does NOT protect anything by itself if the export never
   leaves the host. An anchor kept only in the database is circular: whoever
   can rewrite the audit table can delete the anchor row too. The `.tsr`

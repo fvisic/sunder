@@ -69,7 +69,7 @@ after that is a just-in-time fetch against the notifier's own CID.
 
    `201 {"token": "v4.public...", "expires_at": "..."}`
 
-   SDK equivalent: `crm.IssueOTI(ctx, cid, "escalation", "mailer", &sunder.IssueOptions{ShareAttributes: []string{"email"}})`.
+   SDK equivalent: `crm.IssueOTI(ctx, cid, "escalation_notify", "notifier", &sunder.IssueOptions{ShareAttributes: []string{"email"}})`.
 
 3. **Verify immediately from the notifier**, well before the escalation
    moment - this is the step that actually copies `email` into the

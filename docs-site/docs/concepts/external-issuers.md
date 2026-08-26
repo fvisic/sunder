@@ -72,8 +72,6 @@ sequenceDiagram
 
    `200 {"stored": ["age_gte_18@gov.wallet"]}`
 
-   SDK equivalent: `client.Claims.AcceptExternal(ctx, cid, envelope)`.
-
 4. **Read it back** like any other attribute, using the namespaced name:
 
    ```bash

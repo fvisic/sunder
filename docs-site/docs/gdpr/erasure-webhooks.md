@@ -47,7 +47,7 @@ Each scope registers its own URL and gets its own secret; there is no shared sec
 curl -X POST https://sunder.internal/v1/dsr/erase \
   -H "Authorization: Bearer privacy_officer.<secret>" \
   -H "Content-Type: application/json" \
-  -d '{"cid": "cid_9f2a..."}'
+  -d '{"cid": "CID-9F2A7VXTNP01"}'
 ```
 
 ```json
@@ -65,7 +65,7 @@ POST /hooks/sunder-erase
 Content-Type: application/json
 X-Sunder-Signature: 7a1c...  (hex HMAC-SHA256 of the raw body, keyed with your scope's secret)
 
-{"event":"erase","scope":"crm","cid":"cid_9f2a...","erasure_id":4821,"ts":"2026-08-23T10:15:00Z"}
+{"event":"erase","scope":"crm","cid":"CID-9F2A7VXTNP01","erasure_id":4821,"ts":"2026-08-23T10:15:00Z"}
 ```
 
 Verify before acting on it:

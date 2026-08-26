@@ -58,6 +58,19 @@ from Databunker, HashiCorp Vault and DIY encryption in detail; the
 [Performance](get-started/performance.md) page has the measured cost of
 running it this way.
 
+## Try it
+
+The whole flow above runs on one machine in a few minutes:
+
+```sh
+git clone https://github.com/fvisic/sunder && cd sunder/deploy
+docker compose up --build -d
+docker compose exec sunder /sunder bootstrap
+```
+
+Then follow the [Quickstart](get-started/quickstart.md) to create a scoped
+client and walk register -> lookup -> OTI handoff end to end.
+
 ## Security notes
 
 - Sunder deliberately does **not** let one system read another system's

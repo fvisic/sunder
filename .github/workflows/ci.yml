@@ -160,3 +160,17 @@ jobs:
         run: bash demo/quickstart.sh
       - name: Verify audit chain
         run: docker compose -f deploy/docker-compose.yml exec sunder /sunder verify-audit
+
+  docs-site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # --strict fails on any broken nav entry or dead intra-site link, so
+      # the guides cannot rot silently.
+      - name: Build guides site
+        run: |
+          pip install mkdocs-material
+          cd docs-site && mkdocs build --strict
