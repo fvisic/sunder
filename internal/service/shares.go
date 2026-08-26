@@ -130,10 +130,16 @@ func (s *Shares) Fetch(ctx context.Context, actor, uuid string) (map[string]stri
 		return nil, err
 	}
 	// Re-check consent at fetch: a withdrawal after the share was minted
-	// must block it immediately, not only once the async revoke runs.
+	// must block it immediately, not only once the async revoke runs. Audit
+	// the miss like the absent/expired case (F2) so a consent-blocked fetch
+	// leaves a trace and is timing-symmetric with the other miss paths.
 	if denied, err := consentDenied(ctx, s.Pool, cid, purpose); err != nil {
 		return nil, err
 	} else if denied {
+		_ = audit.ReadEvent(ctx, s.Pool, audit.Entry{
+			ClientID: actor, Action: "shares.fetch",
+			Detail: map[string]any{"share": uuid, "matched": false},
+		})
 		return nil, ErrNotFound
 	}
 	// Read the person's blob directly (the share plus its consent check IS
@@ -187,13 +193,22 @@ func (s *Shares) Revoke(ctx context.Context, client *auth.Client, uuid string) e
 	return tx.Commit(ctx)
 }
 
-// revokeSharesForCID revokes every standing share of a person - called when
-// the person is erased or withdraws consent, so a share never outlives the
-// data it points at. Runs inside the caller's transaction.
+// revokeSharesForCID revokes every standing share of a person on CONSENT
+// withdrawal - the row is kept (consent can be re-granted) but blocked.
+// Runs inside the caller's transaction.
 func revokeSharesForCID(ctx context.Context, tx pgx.Tx, personID string) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE shared_records SET revoked_at = now()
 		 WHERE revoked_at IS NULL AND cid IN (SELECT cid FROM cids WHERE person_id=$1)`, personID)
+	return err
+}
+
+// deleteSharesForCID removes every share of a person on ERASURE - unlike a
+// consent revoke, an erased person's pseudonym must not linger in the row at
+// all (a "table survives Article 17" leak).
+func deleteSharesForCID(ctx context.Context, tx pgx.Tx, personID string) error {
+	_, err := tx.Exec(ctx,
+		`DELETE FROM shared_records WHERE cid IN (SELECT cid FROM cids WHERE person_id=$1)`, personID)
 	return err
 }
 

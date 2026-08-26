@@ -504,8 +504,10 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 		`DELETE FROM cid_blob_versions WHERE cid IN (SELECT cid FROM cids WHERE person_id=$1)`, personID); err != nil {
 		return 0, 0, err
 	}
-	// F8: revoke standing shares so a partner UUID never outlives the data.
-	if err := revokeSharesForCID(ctx, tx, personID); err != nil {
+	// F8: DELETE the person's shares on erasure - not merely revoke - so the
+	// erased pseudonym does not linger in a revoked row (consent withdrawal
+	// keeps the row; erasure must not).
+	if err := deleteSharesForCID(ctx, tx, personID); err != nil {
 		return 0, 0, err
 	}
 	// Portal state dies with the person: a queued login or erase-confirm
