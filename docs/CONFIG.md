@@ -271,6 +271,21 @@ auto-revoke standing shares, so a partner UUID never outlives the data.
 Every fetch is audited with the partner label. Long-expired shares are
 pruned by `sunder retention run`.
 
+## Shamir recovery shares (F9, file keystore only)
+
+No configuration - a set of CLI commands for the file keystore. The Vault
+driver delegates recovery to Vault's own unseal.
+
+| Command | Description |
+|---|---|
+| `sunder keys shamir-init -n 5 -k 3` | Seal the keystore into `recovery.bundle` under a random recovery key, split that key into `k`-of-`n` shares, print the shares ONCE. |
+| `sunder keys shamir-recover` | Reassemble the recovery key from `k` shares (`-shares` hex CSV, or interactive stdin) and restore the keystore after a loss. |
+| `sunder keys shamir-rotate` | Re-seal the current keystore under the SAME shares (the annual custodian drill; picks up keys added since init). |
+
+The recovery key and the shares are never written to disk. Give each share
+to a SEPARATE custodian - five shares in one vault is 1-of-1 in a costume.
+`recovery.bundle` holds only ciphertext and is safe to back up.
+
 ## PostgreSQL sizing (P4.5)
 
 Stock Postgres defaults (128 MB `shared_buffers`) measure the defaults,
