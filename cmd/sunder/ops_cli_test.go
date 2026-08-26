@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1033,5 +1034,28 @@ func TestClientEmptyAttributesRejected(t *testing.T) {
 	// grant with a stray-comma attributes list: also rejected.
 	if err := clientCmd(ctx, st, []string{"grant", "-id", "e2", "-attributes", " "}); err == nil {
 		t.Fatal("empty attributes on grant must be rejected")
+	}
+}
+
+// TestBootstrapUnattendedBadCredFile covers the credential-file write error
+// branch: writing to a path whose parent directory does not exist fails.
+func TestBootstrapUnattendedBadCredFile(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+	err := bootstrapCmd(ctx, cfg, st, []string{
+		"-unattended", "-id", "admin", "-scope", "admin",
+		"-credential-file", filepath.Join(t.TempDir(), "no-such-dir", "cred.txt")})
+	if err == nil {
+		t.Fatal("bootstrap must fail when the credential file cannot be written")
+	}
+	// The admin client must not have been left behind by the failed write
+	// (the transaction rolls back).
+	var n int64
+	if qerr := st.Pool.QueryRow(ctx, `SELECT count(*) FROM clients WHERE client_id='admin'`).Scan(&n); qerr != nil {
+		t.Fatal(qerr)
+	}
+	if n != 0 {
+		t.Fatalf("a failed credential write must roll back the client, found %d", n)
 	}
 }

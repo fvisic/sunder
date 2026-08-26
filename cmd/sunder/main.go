@@ -7,7 +7,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -530,7 +532,7 @@ func verifyAuditCmd(ctx context.Context, cfg config.Config, st *store.Store, arg
 // keysCmd implements `sunder keys rotate -kind <kind>` and `sunder keys list`.
 func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: sunder keys rotate -kind <kind> | keys rekey [-reencrypt-pii] | keys retire -kind <kind> -version <v> | keys list")
+		return fmt.Errorf("usage: sunder keys rotate|rekey|retire|list | keys shamir-init -n 5 -k 3 | keys shamir-recover | keys shamir-rotate")
 	}
 	if err := st.Migrate(ctx); err != nil {
 		return err
@@ -601,6 +603,51 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 			stats.Persons, stats.TokensInserted, stats.BlobsReenc, stats.Skipped)
 		fmt.Println("old versions can now be retired: sunder keys retire -kind <kind> -version <v>")
 		return nil
+	case "shamir-init":
+		fs := flag.NewFlagSet("keys shamir-init", flag.ContinueOnError)
+		n := fs.Int("n", 5, "total number of shares to issue")
+		k := fs.Int("k", 3, "shares required to recover")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		ks, err := fileKeystore(cfg)
+		if err != nil {
+			return err
+		}
+		return shamirInit(ks, *n, *k, os.Stdout)
+
+	case "shamir-recover":
+		fs := flag.NewFlagSet("keys shamir-recover", flag.ContinueOnError)
+		sharesFlag := fs.String("shares", "", "comma-separated hex shares (omit to read interactively, one per line)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		ks, err := fileKeystore(cfg)
+		if err != nil {
+			return err
+		}
+		shares, err := readShares(*sharesFlag)
+		if err != nil {
+			return err
+		}
+		return shamirRecover(ks, shares, os.Stdout)
+
+	case "shamir-rotate":
+		fs := flag.NewFlagSet("keys shamir-rotate", flag.ContinueOnError)
+		sharesFlag := fs.String("shares", "", "comma-separated hex shares (omit to read interactively)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		ks, err := fileKeystore(cfg)
+		if err != nil {
+			return err
+		}
+		shares, err := readShares(*sharesFlag)
+		if err != nil {
+			return err
+		}
+		return shamirRotate(ks, shares, os.Stdout)
+
 	case "list":
 		rows, err := st.Pool.Query(ctx, `SELECT key_id, status, created_at FROM keys ORDER BY kind, created_at`)
 		if err != nil {
@@ -619,6 +666,51 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 	default:
 		return fmt.Errorf("unknown keys subcommand %q", args[0])
 	}
+}
+
+// fileKeystore returns the file-driver keystore for F9 recovery, refusing
+// the Vault driver (which delegates recovery to Vault's own unseal).
+var randRead = cryptorand.Read
+
+func fileKeystore(cfg config.Config) (*crypto.FileKeystore, error) {
+	if cfg.Keystore != "" && cfg.Keystore != "file" {
+		return nil, fmt.Errorf("shamir recovery is for the file keystore only (SUNDER_KEYSTORE=%q delegates recovery to its own mechanism)", cfg.Keystore)
+	}
+	return &crypto.FileKeystore{Dir: cfg.KeystorePath}, nil
+}
+
+// readShares parses comma-separated hex shares from the flag, or reads them
+// interactively (one hex share per line, blank line to end) when empty.
+func readShares(flagVal string) ([][]byte, error) {
+	var raw []string
+	if flagVal != "" {
+		raw = strings.Split(flagVal, ",")
+	} else {
+		fmt.Fprintln(os.Stderr, "Enter recovery shares, one hex share per line, blank line to finish:")
+		sc := bufio.NewScanner(os.Stdin)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" {
+				break
+			}
+			raw = append(raw, line)
+		}
+		if err := sc.Err(); err != nil {
+			return nil, err
+		}
+	}
+	var out [][]byte
+	for _, r := range raw {
+		b, err := hex.DecodeString(strings.TrimSpace(r))
+		if err != nil {
+			return nil, fmt.Errorf("share %q is not valid hex: %w", r, err)
+		}
+		out = append(out, b)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no shares provided")
+	}
+	return out, nil
 }
 
 // clientCmd implements `sunder client create ...`. The credential is printed
