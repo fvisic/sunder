@@ -15,7 +15,7 @@ sequenceDiagram
     CLI->>CLI: validate flags (unattended needs -credential-file)
     CLI->>DB: Migrate()
     CLI->>KR: EnsureAll() - generate any missing key material
-    CLI->>DB: BEGIN; pg_advisory_xact_lock(0x53554E4442)
+    CLI->>DB: BEGIN, then pg_advisory_xact_lock(0x53554E4442)
     CLI->>DB: SELECT count(*) FROM clients WHERE client_id=$1
     alt client already exists
         DB-->>CLI: n > 0

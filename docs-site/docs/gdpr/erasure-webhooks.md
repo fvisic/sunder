@@ -23,7 +23,7 @@ sequenceDiagram
     DB->>S: claim PENDING events (SKIP LOCKED), mark SENDING
     S->>CRM: POST {event:"erase", scope:"crm", cid, erasure_id, ts} + X-Sunder-Signature
     CRM-->>S: 200
-    S->>DB: status=DELIVERED; audit "dsr.erase.delivered"
+    S->>DB: status=DELIVERED, then audit "dsr.erase.delivered"
 
     S->>BIL: POST {event:"erase", scope:"billing", cid, erasure_id, ts} + X-Sunder-Signature
     BIL-->>S: connection refused
