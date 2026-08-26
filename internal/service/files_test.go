@@ -657,3 +657,28 @@ func TestRekeyRecordKeyCorruptSkipped(t *testing.T) {
 		t.Fatalf("corrupt record key should be skipped: %+v", stats)
 	}
 }
+
+// TestFileVaultCorruptChunkHeaderNoPanic: a stored object whose chunk-length
+// header is below the nonce+tag minimum must be a clean error, not a panic.
+func TestFileVaultCorruptChunkHeaderNoPanic(t *testing.T) {
+	e, f, client, cid := filesEnv(t)
+	ctx := context.Background()
+	meta, err := f.Upload(ctx, client, cid, "a.txt", "", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storageKey string
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT storage_key FROM files WHERE id=$1`, meta.ID).Scan(&storageKey); err != nil {
+		t.Fatal(err)
+	}
+	// Overwrite the stored object with a tiny chunk-length header (n=5) and
+	// a few bytes - below the 12-byte nonce, which previously panicked.
+	bad := []byte{0, 0, 0, 5, 1, 2, 3, 4, 5}
+	if err := f.Store.Put(ctx, storageKey, bytes.NewReader(bad), int64(len(bad))); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if _, err := f.Download(ctx, client, meta.ID, "support", &out); err == nil {
+		t.Fatal("a corrupt chunk header must be a clean error")
+	}
+}

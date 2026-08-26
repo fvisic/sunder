@@ -482,7 +482,11 @@ func decryptChunks(dek []byte, fileID string, r io.Reader, w io.Writer) (int64, 
 			return written, err
 		}
 		n := binary.BigEndian.Uint32(lenHdr[:])
-		if n == 0 || n > fileChunkSize+64 {
+		// A sealed chunk is at least a nonce plus a GCM tag; a header below
+		// that (from a truncated or corrupt object) must be a clean error,
+		// never a slice past the nonce size that panics.
+		minChunk := uint32(gcm.NonceSize() + gcm.Overhead())
+		if n < minChunk || n > fileChunkSize+64 {
 			return written, fmt.Errorf("file vault: corrupt chunk header")
 		}
 		sealed := make([]byte, n)
