@@ -63,12 +63,61 @@ All failures throw a subclass of `io.sunderid.client.SunderException` (with
 `TokenUsedException`, `TokenExpiredException`, `TokenInvalidException`,
 `RateLimitedException`, `ValidationException`, `ServiceUnavailableException`.
 
+## Beyond the handoff
+
+Consent, the data-subject rights endpoints, value tokenization, the file
+vault, cross-org shares, person links, attribute version history, external
+claims and the admin unlock are all wrapped:
+
+```java
+// Consent gates attribute reads for that purpose, independently of the
+// client's own grant. The audit trail of consent SURVIVES erasure.
+crm.setConsent(cid, "marketing", true);
+
+// Article 15 (org-wide), 20 (caller scope), 17 (org-wide, destructive).
+Map<String, Object> access = dpo.dsrAccess(cid);   // holdings + who read them
+Map<String, Object> export = crm.dsrExport(cid);   // this scope's holdings
+dpo.dsrErase(cid);                                 // children LISTED, not erased
+dpo.dsrErase(cid, List.of("guardian"));            // named link types cascade
+
+// Value vault. Binding the token to a cid is what makes erasure destroy it.
+String token = crm.tokenize(iban, Map.of("cid", cid, "unique", true));
+String value = crm.detokenize(token);
+
+// Bulk routes ALWAYS need a single-use unlock token, whatever
+// SUNDER_SEARCH_UNLOCK is set to.
+String unlock = (String) crm.unlock("tokens").get("unlock_token");
+List<String> tokens = crm.tokenizeBulk(unlock, items);
+
+// Files are sealed under a key wrapped by the person's record key, so
+// erasing the person shreds them.
+Map<String, Object> meta = crm.uploadFile(cid, "scan.pdf", bytes, "application/pdf", null);
+byte[] blob = crm.downloadFile((String) meta.get("id"), "support");
+
+// A share is a SNAPSHOT, and partner_label is what the Article 15 answer
+// reports as the recipient.
+Map<String, Object> share = crm.createShare(cid, List.of("email"),
+        Map.of("partner_label", "partner-bank", "purpose", "kyc", "ttl_seconds", 3600));
+```
+
+Attribute the reads to an operator inside your system - it lands in the
+audit chain and in the Article 15 answer:
+
+```java
+SunderClient crm = new SunderClient(url, cred, Duration.ofSeconds(10), "agent-7");
+```
+
 ## Retry policy (baked in)
 
 Lookups and `issueOti` retry once on 5xx/network errors. `verifyOti` is
 **never** blind-retried - the token is single-use, and a retry after an
 ambiguous network failure would legitimately return `TokenUsedException`; the
 SDK surfaces that distinctly so your code can decide.
+
+Everything that destroys data or spends a single-use credential is attempted
+**exactly once**, for the same reason: `dsr_erase`/`dsrErase`/`DsrEraseAsync`,
+the token and file deletes, share revocation, unlink, and both bulk vault
+routes (they spend an unlock token).
 
 ## Development
 

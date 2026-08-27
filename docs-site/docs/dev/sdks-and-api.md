@@ -30,9 +30,9 @@ retried on any call.
 ## Steps
 
 1. **Pick the SDK for your stack and install it.** All six wrap the same
-   **subset** of `/v1/*` - transport, bearer auth, timeouts, retries and
-   error mapping, zero cryptography client-side - and the subset is the core
-   identity surface, not the whole API:
+   surface of `/v1/*` - transport, bearer auth, timeouts, retries and error
+   mapping, zero cryptography client-side. Since 0.5.0 that surface covers
+   every client-facing route, not just the core identity calls:
 
    | Surface | SDK method | Wrapped |
    |---|---|---|
@@ -40,13 +40,28 @@ retried on any call.
    | `POST /v1/contacts/{cid}/scopes` | `IssueScopedCID` | yes |
    | `GET /v1/contacts/{cid}/attributes/{name}` | `GetAttribute` | yes |
    | `POST /v1/lookup` (email / phone / name) | `LookupBy*` | yes |
-   | `POST /v1/lookup` (`phone_suffix`, `user_id`) | - | **no** |
    | `POST /v1/oti`, `POST /v1/oti/verify` | `IssueOTI`, `VerifyOTI(Full)` | yes |
-   | `GET /healthz` | `Health` | yes |
-   | consent, DSR (access/erase/export), value tokens (incl. bulk), files, shares, links, `admin/unlock`, admin audit, external claims, attribute versions | - | **no** |
+   | `POST /v1/consent`, `GET /v1/consent/{cid}` | `SetConsent`, `GetConsent` | yes |
+   | `GET /v1/dsr/access`, `GET /v1/dsr/export` | `DSRAccess`, `DSRExport` | yes |
+   | `POST /v1/dsr/erase` (incl. `cascade`) | `DSRErase` | yes |
+   | `POST /v1/tokens`, `GET`/`DELETE /v1/tokens/{token}` | `Tokenize`, `Detokenize`, `DeleteToken` | yes |
+   | `POST /v1/tokens/bulk`, `POST /v1/tokens/bulk/read` | `TokenizeBulk`, `DetokenizeBulk` | yes |
+   | `POST`/`GET /v1/contacts/{cid}/files`, `GET`/`DELETE /v1/files/{id}` | `UploadFile`, `ListFiles`, `DownloadFile`, `DeleteFile` | yes |
+   | `POST /v1/shares`, `GET`/`DELETE /v1/shares/{uuid}` | `CreateShare`, `FetchShare`, `RevokeShare` | yes |
+   | `POST`/`DELETE /v1/links`, `GET /v1/contacts/{cid}/links` | `Link`, `Unlink`, `ListLinks` | yes |
+   | `GET /v1/contacts/{cid}/versions[/{n}/attributes/{name}]` | `ListVersions`, `GetVersionAttribute` | yes |
+   | `POST /v1/claims/external` | `StoreExternalClaim` | yes |
+   | `POST /v1/admin/unlock` | `Unlock` | yes |
+   | `GET /healthz`, `GET /readyz` | `Health`, `Ready` | yes |
+   | `POST /v1/lookup` (`phone_suffix`) | - | **no** |
+   | `GET /v1/admin/audit/chain`, `/verify`; the `/portal/api/*` routes | - | **no** |
 
-   Everything in the last row is plain JSON over HTTP; `api/openapi.yaml`
-   is the contract for it, and the Postman collection below exercises it.
+   `user_id` is not a per-call argument: set it once on the client (Go
+   `WithUserID`, TS `userId`, Python `user_id=`, PHP/Java/.NET constructor
+   argument) and every call carries `X-Sunder-User-Id`.
+
+   Everything not wrapped is plain JSON over HTTP; `api/openapi.yaml` is the
+   contract for it, and the Postman collection below exercises it.
 
    ```bash
    go get github.com/fvisic/sunder/sdks/go@latest        # Go 1.25+
@@ -59,7 +74,7 @@ retried on any call.
    <dependency>
      <groupId>io.sunderid</groupId>
      <artifactId>sunder-client</artifactId>
-     <version>0.1.0</version>
+     <version>0.5.0</version>
    </dependency>
    ```
 
@@ -87,7 +102,26 @@ retried on any call.
           "attributes": {"loyalty_tier": "gold"}}'
    ```
 
-4. **Match on the sentinel errors, not on HTTP status codes**, so a status
+4. **Know which calls are never retried.** The rule is identical in all six
+   SDKs and is not configurable: reads and idempotent creates retry once on a
+   5xx or a network failure; anything that consumes a single-use credential or
+   destroys data is attempted exactly once. That covers `VerifyOTI` (the token
+   is single-use), `DSRErase`, `DeleteToken`, `DeleteFile`, `RevokeShare`,
+   `Unlink`, and both bulk vault routes (they spend an unlock token). After an
+   ambiguous network failure on one of those, reconciling is the caller's
+   decision - a blind retry would report "already used" for a call that
+   actually succeeded.
+
+   Two more shared behaviours worth knowing before you write the branch:
+
+   - `DSRErase` with no `cascade` sends **no `cascade` key at all**, not an
+     empty list. Linked children come back listed and untouched; naming a link
+     type is the only way to erase them.
+   - `Tokenize` omits an unset `cid` rather than sending an empty one. A
+     cid-bound token dies with the person's erasure; an unattributed one does
+     not, so the binding is a deliberate argument, never a default.
+
+5. **Match on the sentinel errors, not on HTTP status codes**, so a status
    code change in a future minor version does not silently break your
    branch logic:
 
@@ -103,7 +137,7 @@ retried on any call.
    }
    ```
 
-5. **Import the machine-readable contract** for codegen, contract tests
+6. **Import the machine-readable contract** for codegen, contract tests
    or exploratory calls:
 
    - OpenAPI 3.1: `api/openapi.yaml` in the repository (also served at `/openapi.yaml` by every instance) - the

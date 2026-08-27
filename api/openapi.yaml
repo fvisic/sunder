@@ -1559,7 +1559,7 @@ components:
         name: {type: string}
         content_type: {type: string}
         size_bytes: {type: integer, format: int64}
-        sha256: {type: string, description: Hex digest of the PLAINTEXT, for client-side integrity checks.}
+        sha256: {type: string, description: "Hex digest of the PLAINTEXT, for client-side integrity checks."}
         created_at: {type: string, format: date-time}
         expires_at: {type: string, format: date-time}
 

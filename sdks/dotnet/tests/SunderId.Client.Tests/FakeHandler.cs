@@ -16,7 +16,10 @@ internal sealed record RecordedRequest(
     string PathAndQuery,
     string? Authorization,
     string? ContentType,
-    string? Body);
+    string? Body,
+    // Request headers as well: the unlock-gated routes, the file expiry
+    // deadline and the operator attribution are all asserted on headers.
+    IReadOnlyDictionary<string, string> Headers);
 
 internal sealed class FakeHandler : HttpMessageHandler
 {
@@ -38,6 +41,14 @@ internal sealed class FakeHandler : HttpMessageHandler
     public void EnqueueTimeout()
         => _responses.Enqueue(() => throw new TaskCanceledException("simulated timeout"));
 
+    public void EnqueueBytes(HttpStatusCode status, byte[] body)
+    {
+        _responses.Enqueue(() => new HttpResponseMessage(status)
+        {
+            Content = new ByteArrayContent(body),
+        });
+    }
+
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken)
     {
@@ -47,12 +58,21 @@ internal sealed class FakeHandler : HttpMessageHandler
         string? auth = request.Headers.TryGetValues("Authorization", out var values)
             ? string.Join(" ", values)
             : null;
+        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var header in request.Headers)
+            headers[header.Key] = string.Join(" ", header.Value);
+        if (request.Content is not null)
+        {
+            foreach (var header in request.Content.Headers)
+                headers[header.Key] = string.Join(" ", header.Value);
+        }
         Requests.Add(new RecordedRequest(
             request.Method.Method,
             request.RequestUri!.PathAndQuery,
             auth,
             request.Content?.Headers.ContentType?.MediaType,
-            body));
+            body,
+            headers));
         if (_responses.Count == 0)
         {
             return new HttpResponseMessage(HttpStatusCode.InternalServerError)

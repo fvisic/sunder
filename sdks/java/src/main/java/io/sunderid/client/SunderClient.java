@@ -8,7 +8,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -41,6 +43,7 @@ public final class SunderClient {
     private final String credential;
     private final Duration timeout;
     private final HttpClient http;
+    private final String userId;
 
     /**
      * Configures the client entirely from the environment:
@@ -68,6 +71,25 @@ public final class SunderClient {
      * @param timeout    per-request timeout; {@code null} means the default (10s)
      */
     public SunderClient(String url, String credential, Duration timeout) {
+        this(url, credential, timeout, null);
+    }
+
+    /**
+     * @param url        base URL of the Sunder instance; {@code null} falls
+     *                   back to env {@code SUNDER_URL}
+     * @param credential {@code "client_id.secret"} bearer credential;
+     *                   {@code null} falls back to env {@code SUNDER_CREDENTIAL}
+     * @param timeout    per-request timeout; {@code null} means the default (10s)
+     * @param userId     attributes every read to an operator inside the calling
+     *                   system, sent as {@code X-Sunder-User-Id} and recorded in
+     *                   the audit chain. CLIENT-ASSERTED and unverifiable by
+     *                   design: Sunder records the claim and proves it was not
+     *                   altered afterwards, not that it was true. Accepts
+     *                   {@code [A-Za-z0-9._@:-]}, 1-64 characters; anything else
+     *                   is a 400 rather than a silent drop.
+     */
+    public SunderClient(String url, String credential, Duration timeout, String userId) {
+        this.userId = userId;
         if (url == null) {
             url = System.getenv("SUNDER_URL");
         }
@@ -252,6 +274,388 @@ public final class SunderClient {
         return body.isEmpty() ? "ok" : body;
     }
 
+
+    // -- consent ---------------------------------------------------------------
+
+    /**
+     * Records the person's decision for one purpose.
+     *
+     * <p>Consent gates attribute reads for that purpose: revoking it makes
+     * {@link #getAttribute} throw {@link ConsentDeniedException} even though
+     * the client's own grant is unchanged. Every call is appended to the audit
+     * chain, and that trail SURVIVES erasure - it is the accountability record
+     * of what was consented to and when.
+     */
+    public Map<String, Object> setConsent(String cid, String purpose, boolean granted) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("cid", cid);
+        body.put("purpose", purpose);
+        body.put("granted", granted);
+        return request("POST", "/v1/consent", body, false);
+    }
+
+    /**
+     * Lists every purpose the caller's scope has recorded for a person.
+     *
+     * <p>A purpose that was never set is ABSENT, not false: "no decision" and
+     * "refused" are different facts.
+     */
+    public List<Map<String, Object>> getConsent(String cid) {
+        return listOf(request("GET", "/v1/consent/" + encode(cid), null, true), "consents");
+    }
+
+    // -- data subject rights -----------------------------------------------------
+
+    /**
+     * Article 15, ORG-WIDE: {@code {"scopes": [...], "audit_trail": [...]}}.
+     *
+     * <p>Each scope carries the holdings that do NOT live in the attribute blob -
+     * value tokens, files, the RECIPIENTS of shares, and links. This crosses
+     * scope boundaries on the data subject's behalf, so it needs its own grant
+     * and is itself audited; never route it through an ordinary integration
+     * credential.
+     */
+    public Map<String, Object> dsrAccess(String cid) {
+        return request("GET", "/v1/dsr/access?cid=" + encode(cid), null, true);
+    }
+
+    /**
+     * Article 20 for the CALLER's scope only: the same holdings sections in
+     * machine-readable form, for portability.
+     */
+    public Map<String, Object> dsrExport(String cid) {
+        return request("GET", "/v1/dsr/export?cid=" + encode(cid), null, true);
+    }
+
+    /** Article 17 erasure with no cascade: linked children are listed, not touched. */
+    public Map<String, Object> dsrErase(String cid) {
+        return dsrErase(cid, null);
+    }
+
+    /**
+     * Article 17: erases the person org-wide, queueing one Article 19
+     * notification per scope that held them.
+     *
+     * <p>{@code cascade} names the link types ("guardian", "member", "owner")
+     * whose linked children are erased too. Null or empty, the children are
+     * LISTED in the result and left untouched - an accidental cascade would
+     * delete a third party's data, so it is opt-in per link type.
+     *
+     * <p>A cascade is one transaction PER PERSON, and the plan is recorded
+     * before any child is touched: re-issuing the identical call after an
+     * interruption RESUMES the outstanding children. Once everything is done it
+     * throws {@link NotFoundException}, deliberately indistinguishable from a
+     * cid that never existed.
+     *
+     * <p>Never retried: it is destructive, and resuming is the caller's decision.
+     */
+    public Map<String, Object> dsrErase(String cid, List<String> cascade) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("cid", cid);
+        // An empty list must not be sent: absence is what "cascade nothing"
+        // looks like on the wire.
+        if (cascade != null && !cascade.isEmpty()) {
+            body.put("cascade", cascade);
+        }
+        return request("POST", "/v1/dsr/erase", body, false);
+    }
+
+    // -- value tokenization -------------------------------------------------------
+
+    /**
+     * Vaults one value and returns its opaque token.
+     *
+     * <p>{@code options} accepts {@code "type"} ("string" default, or "card"
+     * which also validates the Luhn checksum), {@code "cid"}, {@code "unique"},
+     * {@code "expires_final"} and {@code "sliding_seconds"}. The cid binds the
+     * token to a person in the caller's scope, so erasure and the retention
+     * sweep destroy it; omit it ONLY for a scope-wide value belonging to no
+     * single subject, because an unattributed token survives that erasure.
+     */
+    public String tokenize(String value, Map<String, Object> options) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("value", value);
+        if (options != null) {
+            body.putAll(options);
+        }
+        return requireString(request("POST", "/v1/tokens", body, false), "token");
+    }
+
+    /** Vaults one value with no options. */
+    public String tokenize(String value) {
+        return tokenize(value, null);
+    }
+
+    /**
+     * Resolves a token back to its value.
+     *
+     * <p>Audited per read and, for a cid-bound token, attributed to that
+     * person's CID - so "who read my tokenized IBAN" is answerable from the
+     * access trail.
+     */
+    public String detokenize(String token) {
+        return requireString(request("GET", "/v1/tokens/" + encode(token), null, true), "value");
+    }
+
+    /** Destroys a token and its value. Not retried: it is destructive. */
+    public void deleteToken(String token) {
+        request("DELETE", "/v1/tokens/" + encode(token), null, false);
+    }
+
+    /**
+     * Vaults many values in one call; tokens come back in input order.
+     *
+     * <p>Bulk surfaces ALWAYS require a single-use unlock token, regardless of
+     * {@code SUNDER_SEARCH_UNLOCK}: one call touching many people is exactly the
+     * shape a rate limit does not constrain. Get one from {@link #unlock}. The
+     * whole batch is validated before the token is spent, so a rejected item
+     * does not burn the unlock.
+     */
+    public List<String> tokenizeBulk(String unlockToken, List<Map<String, Object>> items) {
+        Map<String, Object> out = request("POST", "/v1/tokens/bulk",
+                Map.of("items", items), false,
+                Map.of("X-Sunder-Unlock", unlockToken), null);
+        return stringsOf(out, "tokens");
+    }
+
+    /** Resolves many tokens in one call. Requires an unlock token. */
+    public List<String> detokenizeBulk(String unlockToken, List<String> tokens) {
+        Map<String, Object> out = request("POST", "/v1/tokens/bulk/read",
+                Map.of("tokens", tokens), false,
+                Map.of("X-Sunder-Unlock", unlockToken), null);
+        return stringsOf(out, "values");
+    }
+
+    // -- file vault ----------------------------------------------------------------
+
+    /**
+     * Stores a file for a person; returns its metadata.
+     *
+     * <p>Each file gets its own data key, wrapped by the person's record key -
+     * so erasing the person shreds the file even if the object store still holds
+     * the ciphertext. {@code expiresAt} (RFC 3339, may be null) sets a hard
+     * deadline after which the file is unreadable and swept.
+     *
+     * <p>Never retried: a retried upload after an ambiguous failure stores the
+     * file twice.
+     */
+    public Map<String, Object> uploadFile(String cid, String filename, byte[] content,
+                                          String contentType, String expiresAt) {
+        String boundary = "----SunderFormBoundary" + Long.toHexString(System.nanoTime())
+                + Integer.toHexString(filename.hashCode());
+        String head = "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"\r\n"
+                + "Content-Type: " + (contentType == null ? "application/octet-stream" : contentType)
+                + "\r\n\r\n";
+        String tail = "\r\n--" + boundary + "--\r\n";
+        byte[] headBytes = head.getBytes(StandardCharsets.UTF_8);
+        byte[] tailBytes = tail.getBytes(StandardCharsets.UTF_8);
+        byte[] payload = new byte[headBytes.length + content.length + tailBytes.length];
+        System.arraycopy(headBytes, 0, payload, 0, headBytes.length);
+        System.arraycopy(content, 0, payload, headBytes.length, content.length);
+        System.arraycopy(tailBytes, 0, payload, headBytes.length + content.length, tailBytes.length);
+
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put("Content-Type", "multipart/form-data; boundary=" + boundary);
+        if (expiresAt != null) {
+            headers.put("X-Sunder-File-Expiry", expiresAt);
+        }
+        return request("POST", "/v1/contacts/" + encode(cid) + "/files", null, false,
+                headers, payload);
+    }
+
+    /**
+     * Lists a person's files (metadata only). Purpose-gated and consent-gated
+     * like any other read; expired files are hidden.
+     */
+    public List<Map<String, Object>> listFiles(String cid, String purpose) {
+        String path = "/v1/contacts/" + encode(cid) + "/files?purpose=" + encode(purpose);
+        return listOf(request("GET", path, null, true), "files");
+    }
+
+    /**
+     * Downloads one file's plaintext.
+     *
+     * <p>A download that fails mid-stream ABORTS the connection rather than
+     * completing a 200 with a short body, so a truncated read surfaces as a
+     * network error - verify the length, or the {@code sha256} from
+     * {@link #listFiles}, before treating the bytes as complete.
+     */
+    public byte[] downloadFile(String id, String purpose) {
+        String path = "/v1/files/" + encode(id) + "?purpose=" + encode(purpose);
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl + path))
+                .timeout(timeout)
+                .header("Authorization", "Bearer " + credential)
+                .GET();
+        if (userId != null) {
+            builder.header("X-Sunder-User-Id", userId);
+        }
+        HttpResponse<byte[]> res;
+        try {
+            res = http.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
+        } catch (IOException e) {
+            throw new ServiceUnavailableException("service_unavailable", null, "network failure: " + e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ServiceUnavailableException("service_unavailable", null, "network failure: " + e);
+        }
+        int status = res.statusCode();
+        if (status < 200 || status >= 300) {
+            // A 404 must surface as the taxonomy error, never as the bytes of
+            // an error page the caller would write to disk as the file.
+            throw mapError(status, new String(res.body(), StandardCharsets.UTF_8));
+        }
+        return res.body();
+    }
+
+    /**
+     * Removes a file. Its name and digest are redacted immediately; the
+     * ciphertext is collected by the retention sweep. Not retried.
+     */
+    public void deleteFile(String id) {
+        request("DELETE", "/v1/files/" + encode(id), null, false);
+    }
+
+    // -- cross-org shares -------------------------------------------------------------
+
+    /**
+     * Discloses a SNAPSHOT of named fields to a partner.
+     *
+     * <p>The returned uuid is unguessable and, when the server runs with
+     * {@code SUNDER_SHARES_PUBLIC}, is the ONLY credential needed to fetch it -
+     * treat it as a bearer secret. {@code options} accepts
+     * {@code "partner_label"} (which identifies the recipient in the audit trail
+     * and in the Article 15 answer), {@code "purpose"} and {@code "ttl_seconds"}.
+     */
+    public Map<String, Object> createShare(String cid, List<String> fields,
+                                           Map<String, Object> options) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("cid", cid);
+        body.put("fields", fields);
+        if (options != null) {
+            body.putAll(options);
+        }
+        return request("POST", "/v1/shares", body, false);
+    }
+
+    /**
+     * Reads a share's fields. An expired, revoked or erased share throws
+     * {@link NotFoundException}.
+     */
+    public Map<String, Object> fetchShare(String uuid) {
+        Map<String, Object> out = request("GET", "/v1/shares/" + encode(uuid), null, true);
+        Object fields = out.get("fields");
+        if (fields instanceof Map<?, ?> m) {
+            Map<String, Object> typed = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : m.entrySet()) {
+                typed.put(String.valueOf(e.getKey()), e.getValue());
+            }
+            return typed;
+        }
+        return new LinkedHashMap<>();
+    }
+
+    /**
+     * Withdraws a share. Precise to (cid, purpose) on the consent path, so
+     * revoking one never silently withdraws another. Not retried.
+     */
+    public void revokeShare(String uuid) {
+        request("DELETE", "/v1/shares/" + encode(uuid), null, false);
+    }
+
+    // -- person links --------------------------------------------------------------------
+
+    /**
+     * Relates two people in the caller's scope.
+     *
+     * <p>Erasing the parent LISTS the children; it never erases them unless
+     * {@link #dsrErase(String, List)} names the link type.
+     */
+    public void link(String parentCid, String childCid, String linkType) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("parent_cid", parentCid);
+        body.put("child_cid", childCid);
+        body.put("link_type", linkType);
+        request("POST", "/v1/links", body, false);
+    }
+
+    /** Removes the relation. Not retried. */
+    public void unlink(String parentCid, String childCid) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("parent_cid", parentCid);
+        body.put("child_cid", childCid);
+        request("DELETE", "/v1/links", body, false);
+    }
+
+    /**
+     * Reports this person's links, each with the role ("parent" or "child")
+     * this cid plays in it.
+     */
+    public List<Map<String, Object>> listLinks(String cid) {
+        return listOf(request("GET", "/v1/contacts/" + encode(cid) + "/links", null, true), "links");
+    }
+
+    // -- attribute version history ---------------------------------------------------------
+
+    /**
+     * Reports the retained revisions of a person's attributes, newest first.
+     *
+     * <p>How many are kept is the server's {@code SUNDER_VERSIONS_KEEP} /
+     * {@code _TTL} decision; history is personal data and is destroyed by
+     * erasure like everything else.
+     */
+    public List<Map<String, Object>> listVersions(String cid) {
+        return listOf(request("GET", "/v1/contacts/" + encode(cid) + "/versions", null, true), "versions");
+    }
+
+    /**
+     * Reads one attribute as it was at a past revision.
+     *
+     * <p>Purpose-gated, consent-gated and audited exactly like a current read:
+     * an old value is not a lesser secret.
+     */
+    public String getVersionAttribute(String cid, long versionNo, String name, String purpose) {
+        String path = "/v1/contacts/" + encode(cid)
+                + "/versions/" + versionNo
+                + "/attributes/" + encode(name)
+                + "?purpose=" + encode(purpose);
+        return requireString(request("GET", path, null, true), "value");
+    }
+
+    // -- external claims ----------------------------------------------------------------------
+
+    /**
+     * Ingests a signed envelope from a trusted issuer; returns the names
+     * actually stored.
+     *
+     * <p>Stored attribute names carry the issuer's provenance after an '@'
+     * separator - which is why '@' is refused in a caller-supplied attribute
+     * name: an attribute an external issuer vouched for must never be
+     * impersonable by an ordinary write.
+     */
+    public List<String> storeExternalClaim(String cid, String envelope) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("cid", cid);
+        body.put("envelope", envelope);
+        return stringsOf(request("POST", "/v1/claims/external", body, false), "stored");
+    }
+
+    // -- admin ----------------------------------------------------------------------------------
+
+    /**
+     * Mints a single-use token authorizing one privileged call.
+     *
+     * <p>"search" covers fuzzy and partial lookups when
+     * {@code SUNDER_SEARCH_UNLOCK} is on; "tokens" covers the bulk vault routes.
+     * It lives about a minute and is spent by ONE call. Requires the
+     * {@code admin.unlock} action, and the server refuses to grant that to a
+     * credential with no expiry: a standing key to every gated surface is not
+     * something an audit can reconstruct after the fact.
+     */
+    public Map<String, Object> unlock(String purpose) {
+        return request("POST", "/v1/admin/unlock", Map.of("purpose", purpose), false);
+    }
+
     // -- transport -------------------------------------------------------------
 
     /**
@@ -260,11 +664,17 @@ public final class SunderClient {
      */
     private Map<String, Object> request(String method, String path,
                                         Map<String, Object> body, boolean retryOnce) {
+        return request(method, path, body, retryOnce, Map.of(), null);
+    }
+
+    private Map<String, Object> request(String method, String path,
+                                        Map<String, Object> body, boolean retryOnce,
+                                        Map<String, String> extraHeaders, byte[] rawBody) {
         int attempts = retryOnce ? 2 : 1;
         ServiceUnavailableException lastError = null;
         for (int attempt = 0; attempt < attempts; attempt++) {
             try {
-                return doRequest(method, path, body);
+                return doRequest(method, path, body, extraHeaders, rawBody);
             } catch (ServiceUnavailableException e) {
                 lastError = e; // retryable if attempts remain
                 if (Thread.currentThread().isInterrupted()) {
@@ -277,12 +687,23 @@ public final class SunderClient {
         throw lastError;
     }
 
-    private Map<String, Object> doRequest(String method, String path, Map<String, Object> body) {
+    private Map<String, Object> doRequest(String method, String path, Map<String, Object> body,
+                                          Map<String, String> extraHeaders, byte[] rawBody) {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl + path))
                 .timeout(timeout)
                 .header("Authorization", "Bearer " + credential)
                 .header("Accept", "application/json");
-        if (body != null) {
+        if (userId != null) {
+            builder.header("X-Sunder-User-Id", userId);
+        }
+        for (Map.Entry<String, String> h : extraHeaders.entrySet()) {
+            builder.header(h.getKey(), h.getValue());
+        }
+        if (rawBody != null) {
+            // Pre-encoded body (a multipart upload); the caller supplied the
+            // Content-Type with its boundary in extraHeaders.
+            builder.method(method, HttpRequest.BodyPublishers.ofByteArray(rawBody));
+        } else if (body != null) {
             builder.header("Content-Type", "application/json")
                     .method(method, HttpRequest.BodyPublishers.ofString(
                             Json.write(body), StandardCharsets.UTF_8));
@@ -393,6 +814,33 @@ public final class SunderClient {
                     "missing \"" + key + "\" in response");
         }
         return s;
+    }
+
+    /** Pulls a list of objects out of a parsed response body, or an empty list. */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> listOf(Map<String, Object> map, String key) {
+        Object value = map.get(key);
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (value instanceof List<?> items) {
+            for (Object item : items) {
+                if (item instanceof Map<?, ?> m) {
+                    out.add((Map<String, Object>) m);
+                }
+            }
+        }
+        return out;
+    }
+
+    /** Pulls a list of strings out of a parsed response body, or an empty list. */
+    private static List<String> stringsOf(Map<String, Object> map, String key) {
+        Object value = map.get(key);
+        List<String> out = new ArrayList<>();
+        if (value instanceof List<?> items) {
+            for (Object item : items) {
+                out.add(String.valueOf(item));
+            }
+        }
+        return out;
     }
 
     /** Percent-encodes one path segment or query value (RFC 3986, nothing safe). */

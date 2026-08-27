@@ -52,14 +52,27 @@ final class SunderClient
     private string $base;
     private string $credential;
     private float $timeout;
+    private ?string $userId;
 
     /**
      * @param string|null $url        base URL of the Sunder instance; defaults to $SUNDER_URL.
      * @param string|null $credential "client_id.secret" bearer credential; defaults to $SUNDER_CREDENTIAL.
      * @param float       $timeout    per-request timeout in seconds (default 10).
+     * @param string|null $userId     attributes every read to an operator inside the
+     *                                calling system, sent as X-Sunder-User-Id and
+     *                                recorded in the audit chain. CLIENT-ASSERTED and
+     *                                unverifiable by design: Sunder records the claim
+     *                                and proves it was not altered afterwards, not
+     *                                that it was true. Accepts [A-Za-z0-9._@:-], 1-64
+     *                                characters; anything else is a 400 rather than a
+     *                                silent drop.
      */
-    public function __construct(?string $url = null, ?string $credential = null, float $timeout = 10.0)
-    {
+    public function __construct(
+        ?string $url = null,
+        ?string $credential = null,
+        float $timeout = 10.0,
+        ?string $userId = null
+    ) {
         $url = $url ?? (string) getenv('SUNDER_URL');
         $credential = $credential ?? (string) getenv('SUNDER_CREDENTIAL');
         if ($url === '') {
@@ -76,6 +89,7 @@ final class SunderClient
         $this->base = rtrim($url, '/');
         $this->credential = $credential;
         $this->timeout = $timeout;
+        $this->userId = $userId;
     }
 
     // -- contacts -------------------------------------------------------------
@@ -253,19 +267,427 @@ final class SunderClient
         return ['status' => $text !== '' ? $text : 'ok'];
     }
 
+
+    // -- consent --------------------------------------------------------------
+
+    /**
+     * Records the person's decision for one purpose.
+     *
+     * Consent gates attribute reads for that purpose: revoking it makes
+     * getAttribute throw ConsentDeniedException even though the client's own
+     * grant is unchanged. Every call is appended to the audit chain, and that
+     * trail SURVIVES erasure - it is the accountability record of what was
+     * consented to and when.
+     *
+     * @return array{cid: string, purpose: string, granted: bool}
+     */
+    public function setConsent(string $cid, string $purpose, bool $granted): array
+    {
+        return $this->request('POST', '/v1/consent', [
+            'cid' => $cid,
+            'purpose' => $purpose,
+            'granted' => $granted,
+        ]);
+    }
+
+    /**
+     * Lists every purpose the caller's scope has recorded for a person.
+     *
+     * A purpose that was never set is ABSENT, not false: "no decision" and
+     * "refused" are different facts.
+     *
+     * @return list<array{purpose: string, granted: bool, updated_at?: string}>
+     */
+    public function getConsent(string $cid): array
+    {
+        $out = $this->request('GET', '/v1/consent/' . rawurlencode($cid), null, retry: true);
+        return is_array($out['consents'] ?? null) ? $out['consents'] : [];
+    }
+
+    // -- data subject rights ---------------------------------------------------
+
+    /**
+     * Article 15, ORG-WIDE: ["scopes" => [...], "audit_trail" => [...]].
+     *
+     * Each scope carries the holdings that do NOT live in the attribute blob -
+     * value_tokens, files, the RECIPIENTS of shares, and links. This crosses
+     * scope boundaries on the data subject's behalf, so it needs its own grant
+     * and is itself audited; never route it through an ordinary integration
+     * credential.
+     */
+    public function dsrAccess(string $cid): array
+    {
+        return $this->request('GET', '/v1/dsr/access?cid=' . rawurlencode($cid), null, retry: true);
+    }
+
+    /**
+     * Article 20 for the CALLER's scope only: the same holdings sections in
+     * machine-readable form, for portability.
+     */
+    public function dsrExport(string $cid): array
+    {
+        return $this->request('GET', '/v1/dsr/export?cid=' . rawurlencode($cid), null, retry: true);
+    }
+
+    /**
+     * Article 17: erases the person org-wide, queueing one Article 19
+     * notification per scope that held them.
+     *
+     * $cascade names the link types ("guardian", "member", "owner") whose
+     * linked children are erased too. Empty, the children are LISTED in the
+     * result and left untouched - an accidental cascade would delete a third
+     * party's data, so it is opt-in per link type.
+     *
+     * A cascade is one transaction PER PERSON, and the plan is recorded before
+     * any child is touched: re-issuing the identical call after an
+     * interruption RESUMES the outstanding children. Once everything is done
+     * it throws NotFoundException, deliberately indistinguishable from a cid
+     * that never existed.
+     *
+     * Never retried: it is destructive, and resuming is the caller's decision.
+     *
+     * @param list<string> $cascade
+     * @return array{erasure_id: int, scopes: int, linked?: list<array>}
+     */
+    public function dsrErase(string $cid, array $cascade = []): array
+    {
+        $body = ['cid' => $cid];
+        // An empty list must not be sent: absence is what "cascade nothing"
+        // looks like on the wire.
+        if ($cascade !== []) {
+            $body['cascade'] = array_values($cascade);
+        }
+        return $this->request('POST', '/v1/dsr/erase', $body);
+    }
+
+    // -- value tokenization ----------------------------------------------------
+
+    /**
+     * Vaults one value and returns its opaque token.
+     *
+     * $options accepts "type" ("string" default, or "card" which also
+     * validates the Luhn checksum), "cid", "unique", "expires_final" and
+     * "sliding_seconds". The cid binds the token to a person in the caller's
+     * scope, so erasure and the retention sweep destroy it; omit it ONLY for a
+     * scope-wide value belonging to no single subject, because an unattributed
+     * token survives that person's erasure.
+     */
+    public function tokenize(string $value, array $options = []): string
+    {
+        $body = ['value' => $value] + $options;
+        return $this->expectString($this->request('POST', '/v1/tokens', $body), 'token');
+    }
+
+    /**
+     * Resolves a token back to its value.
+     *
+     * Audited per read and, for a cid-bound token, attributed to that person's
+     * CID - so "who read my tokenized IBAN" is answerable from the trail.
+     */
+    public function detokenize(string $token): string
+    {
+        $out = $this->request('GET', '/v1/tokens/' . rawurlencode($token), null, retry: true);
+        return $this->expectString($out, 'value');
+    }
+
+    /** Destroys a token and its value. Not retried: it is destructive. */
+    public function deleteToken(string $token): void
+    {
+        $this->request('DELETE', '/v1/tokens/' . rawurlencode($token));
+    }
+
+    /**
+     * Vaults many values in one call; tokens come back in input order.
+     *
+     * Bulk surfaces ALWAYS require a single-use unlock token, regardless of
+     * SUNDER_SEARCH_UNLOCK: one call touching many people is exactly the shape
+     * a rate limit does not constrain. Get one from unlock('tokens'). The whole
+     * batch is validated before the token is spent, so a rejected item does not
+     * burn the unlock.
+     *
+     * @param list<array> $items
+     * @return list<string>
+     */
+    public function tokenizeBulk(string $unlockToken, array $items): array
+    {
+        $out = $this->request('POST', '/v1/tokens/bulk', ['items' => array_values($items)],
+            extraHeaders: ['X-Sunder-Unlock' => $unlockToken]);
+        return is_array($out['tokens'] ?? null) ? $out['tokens'] : [];
+    }
+
+    /**
+     * Resolves many tokens in one call. Requires an unlock token.
+     *
+     * @param list<string> $tokens
+     * @return list<string>
+     */
+    public function detokenizeBulk(string $unlockToken, array $tokens): array
+    {
+        $out = $this->request('POST', '/v1/tokens/bulk/read', ['tokens' => array_values($tokens)],
+            extraHeaders: ['X-Sunder-Unlock' => $unlockToken]);
+        return is_array($out['values'] ?? null) ? $out['values'] : [];
+    }
+
+    // -- file vault ------------------------------------------------------------
+
+    /**
+     * Stores a file for a person; returns its metadata.
+     *
+     * Each file gets its own data key, wrapped by the person's record key - so
+     * erasing the person shreds the file even if the object store still holds
+     * the ciphertext. $expiresAt (RFC 3339) sets a hard deadline after which
+     * the file is unreadable and swept.
+     *
+     * Never retried: a retried upload after an ambiguous failure stores twice.
+     */
+    public function uploadFile(
+        string $cid,
+        string $filename,
+        string $content,
+        string $contentType = 'application/octet-stream',
+        ?string $expiresAt = null
+    ): array {
+        $boundary = '----SunderFormBoundary' . bin2hex(random_bytes(16));
+        $body = "--{$boundary}\r\n"
+            . "Content-Disposition: form-data; name=\"file\"; filename=\"{$filename}\"\r\n"
+            . "Content-Type: {$contentType}\r\n\r\n"
+            . $content
+            . "\r\n--{$boundary}--\r\n";
+        $headers = ['Content-Type' => "multipart/form-data; boundary={$boundary}"];
+        if ($expiresAt !== null) {
+            $headers['X-Sunder-File-Expiry'] = $expiresAt;
+        }
+        return $this->request('POST', '/v1/contacts/' . rawurlencode($cid) . '/files', null,
+            extraHeaders: $headers, rawBody: $body);
+    }
+
+    /**
+     * Lists a person's files (metadata only). Purpose-gated and consent-gated
+     * like any other read; expired files are hidden.
+     *
+     * @return list<array>
+     */
+    public function listFiles(string $cid, string $purpose): array
+    {
+        $path = '/v1/contacts/' . rawurlencode($cid) . '/files?purpose=' . rawurlencode($purpose);
+        $out = $this->request('GET', $path, null, retry: true);
+        return is_array($out['files'] ?? null) ? $out['files'] : [];
+    }
+
+    /**
+     * Downloads one file's plaintext.
+     *
+     * A download that fails mid-stream ABORTS the connection rather than
+     * completing a 200 with a short body, so a truncated read surfaces as a
+     * network error - verify the length, or the sha256 from listFiles, before
+     * treating the bytes as complete.
+     */
+    public function downloadFile(string $id, string $purpose): string
+    {
+        $path = '/v1/files/' . rawurlencode($id) . '?purpose=' . rawurlencode($purpose);
+        [$status, $raw] = $this->send('GET', $path, null, withAuth: true);
+        if ($status < 200 || $status >= 300) {
+            // A 404 must surface as the taxonomy error, never as the bytes of
+            // an error page the caller would write to disk as the file.
+            throw $this->mapError($status, $raw);
+        }
+        return $raw;
+    }
+
+    /**
+     * Removes a file. Its name and digest are redacted immediately; the
+     * ciphertext is collected by the retention sweep. Not retried.
+     */
+    public function deleteFile(string $id): void
+    {
+        $this->request('DELETE', '/v1/files/' . rawurlencode($id));
+    }
+
+    // -- cross-org shares -------------------------------------------------------
+
+    /**
+     * Discloses a SNAPSHOT of named fields to a partner.
+     *
+     * The returned uuid is unguessable and, when the server runs with
+     * SUNDER_SHARES_PUBLIC, is the ONLY credential needed to fetch it - treat
+     * it as a bearer secret. $options accepts "partner_label" (which
+     * identifies the recipient in the audit trail and in the Article 15
+     * answer), "purpose" and "ttl_seconds".
+     *
+     * @param list<string> $fields
+     * @return array{uuid: string, expires_at?: string}
+     */
+    public function createShare(string $cid, array $fields, array $options = []): array
+    {
+        $body = ['cid' => $cid, 'fields' => array_values($fields)] + $options;
+        return $this->request('POST', '/v1/shares', $body);
+    }
+
+    /**
+     * Reads a share's fields. An expired, revoked or erased share throws
+     * NotFoundException.
+     *
+     * @return array<string, string>
+     */
+    public function fetchShare(string $uuid): array
+    {
+        $out = $this->request('GET', '/v1/shares/' . rawurlencode($uuid), null, retry: true);
+        return is_array($out['fields'] ?? null) ? $out['fields'] : [];
+    }
+
+    /**
+     * Withdraws a share. Precise to (cid, purpose) on the consent path, so
+     * revoking one never silently withdraws another. Not retried.
+     */
+    public function revokeShare(string $uuid): void
+    {
+        $this->request('DELETE', '/v1/shares/' . rawurlencode($uuid));
+    }
+
+    // -- person links -----------------------------------------------------------
+
+    /**
+     * Relates two people in the caller's scope.
+     *
+     * Erasing the parent LISTS the children; it never erases them unless
+     * dsrErase names the link type.
+     */
+    public function link(string $parentCid, string $childCid, string $linkType): void
+    {
+        $this->request('POST', '/v1/links', [
+            'parent_cid' => $parentCid,
+            'child_cid' => $childCid,
+            'link_type' => $linkType,
+        ]);
+    }
+
+    /** Removes the relation. Not retried. */
+    public function unlink(string $parentCid, string $childCid): void
+    {
+        $this->request('DELETE', '/v1/links', [
+            'parent_cid' => $parentCid,
+            'child_cid' => $childCid,
+        ]);
+    }
+
+    /**
+     * Reports this person's links, each with the role ("parent" or "child")
+     * this cid plays in it.
+     *
+     * @return list<array{cid: string, link_type: string, role?: string}>
+     */
+    public function listLinks(string $cid): array
+    {
+        $out = $this->request('GET', '/v1/contacts/' . rawurlencode($cid) . '/links', null, retry: true);
+        return is_array($out['links'] ?? null) ? $out['links'] : [];
+    }
+
+    // -- attribute version history ----------------------------------------------
+
+    /**
+     * Reports the retained revisions of a person's attributes, newest first.
+     *
+     * How many are kept is the server's SUNDER_VERSIONS_KEEP / _TTL decision;
+     * history is personal data and is destroyed by erasure like everything
+     * else.
+     *
+     * @return list<array{version_no: int, written_by?: string, written_at?: string}>
+     */
+    public function listVersions(string $cid): array
+    {
+        $out = $this->request('GET', '/v1/contacts/' . rawurlencode($cid) . '/versions', null, retry: true);
+        return is_array($out['versions'] ?? null) ? $out['versions'] : [];
+    }
+
+    /**
+     * Reads one attribute as it was at a past revision.
+     *
+     * Purpose-gated, consent-gated and audited exactly like a current read: an
+     * old value is not a lesser secret.
+     */
+    public function getVersionAttribute(string $cid, int $versionNo, string $name, string $purpose): string
+    {
+        $path = '/v1/contacts/' . rawurlencode($cid)
+            . '/versions/' . $versionNo
+            . '/attributes/' . rawurlencode($name)
+            . '?purpose=' . rawurlencode($purpose);
+        return $this->expectString($this->request('GET', $path, null, retry: true), 'value');
+    }
+
+    // -- external claims ---------------------------------------------------------
+
+    /**
+     * Ingests a signed envelope from a trusted issuer; returns the names
+     * actually stored.
+     *
+     * Stored attribute names carry the issuer's provenance after an '@'
+     * separator - which is why '@' is refused in a caller-supplied attribute
+     * name: an attribute an external issuer vouched for must never be
+     * impersonable by an ordinary write.
+     *
+     * @return list<string>
+     */
+    public function storeExternalClaim(string $cid, string $envelope): array
+    {
+        $out = $this->request('POST', '/v1/claims/external', ['cid' => $cid, 'envelope' => $envelope]);
+        return is_array($out['stored'] ?? null) ? $out['stored'] : [];
+    }
+
+    // -- admin --------------------------------------------------------------------
+
+    /**
+     * Mints a single-use token authorizing one privileged call.
+     *
+     * "search" covers fuzzy and partial lookups when SUNDER_SEARCH_UNLOCK is
+     * on; "tokens" covers the bulk vault routes. It lives about a minute and is
+     * spent by ONE call. Requires the admin.unlock action, and the server
+     * refuses to grant that to a credential with no expiry: a standing key to
+     * every gated surface is not something an audit can reconstruct after the
+     * fact.
+     *
+     * @return array{unlock_token: string, expires_at?: string}
+     */
+    public function unlock(string $purpose): array
+    {
+        return $this->request('POST', '/v1/admin/unlock', ['purpose' => $purpose]);
+    }
+
+    /**
+     * Readiness probe (GET /readyz). Unlike health it reports whether the
+     * backing store and keystore are actually usable, so it is the one to gate
+     * traffic on.
+     *
+     * @return array{status: string}
+     */
+    public function ready(): array
+    {
+        [$status, $raw] = $this->send('GET', '/readyz', null, withAuth: false);
+        if ($status < 200 || $status >= 300) {
+            throw $this->mapError($status, $raw);
+        }
+        $text = trim($raw);
+        return ['status' => $text !== '' ? $text : 'ok'];
+    }
+
     // -- transport ---------------------------------------------------------
 
     /**
      * One HTTP round trip plus a single extra attempt when $retry is set and
      * the failure is a 5xx or a network error.
      */
-    private function request(string $method, string $path, ?array $body = null, bool $retry = false): array
-    {
+    private function request(
+        string $method,
+        string $path,
+        ?array $body = null,
+        bool $retry = false,
+        array $extraHeaders = [],
+        ?string $rawBody = null
+    ): array {
         $attempts = $retry ? 2 : 1;
         $last = null;
         for ($i = 0; $i < $attempts; $i++) {
             try {
-                return $this->doRequest($method, $path, $body);
+                return $this->doRequest($method, $path, $body, $extraHeaders, $rawBody);
             } catch (ServiceUnavailableException $e) {
                 $last = $e;
             }
@@ -273,9 +695,15 @@ final class SunderClient
         throw $last;
     }
 
-    private function doRequest(string $method, string $path, ?array $body): array
-    {
-        [$status, $raw] = $this->send($method, $path, $body, withAuth: true);
+    private function doRequest(
+        string $method,
+        string $path,
+        ?array $body,
+        array $extraHeaders = [],
+        ?string $rawBody = null
+    ): array {
+        [$status, $raw] = $this->send($method, $path, $body, withAuth: true,
+            extraHeaders: $extraHeaders, rawBody: $rawBody);
         if ($status < 200 || $status >= 300) {
             throw $this->mapError($status, $raw);
         }
@@ -295,19 +723,35 @@ final class SunderClient
      *
      * @return array{0: int, 1: string} [status, raw body]
      */
-    private function send(string $method, string $path, ?array $body, bool $withAuth): array
-    {
+    private function send(
+        string $method,
+        string $path,
+        ?array $body,
+        bool $withAuth,
+        array $extraHeaders = [],
+        ?string $rawBody = null
+    ): array {
         $headers = [];
         if ($withAuth) {
             $headers[] = 'Authorization: Bearer ' . $this->credential;
         }
         $headers[] = 'Accept: application/json';
+        if ($withAuth && $this->userId !== null) {
+            $headers[] = 'X-Sunder-User-Id: ' . $this->userId;
+        }
+        foreach ($extraHeaders as $name => $value) {
+            $headers[] = $name . ': ' . $value;
+        }
         $options = [
             'method' => $method,
             'timeout' => $this->timeout,
             'ignore_errors' => true, // return error bodies instead of failing
         ];
-        if ($body !== null) {
+        if ($rawBody !== null) {
+            // Pre-encoded body (a multipart upload); the caller supplied the
+            // Content-Type with its boundary in $extraHeaders.
+            $options['content'] = $rawBody;
+        } elseif ($body !== null) {
             $headers[] = 'Content-Type: application/json';
             // Empty bodies must encode as a JSON object, not a JSON list.
             $encoded = $body === [] ? '{}' : json_encode($body, JSON_UNESCAPED_SLASHES);

@@ -66,14 +66,14 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 		var ids []string
 		for rows.Next() {
 			var id string
-			if err := rows.Scan(&id); err != nil {
+			if err := rows.Scan(&id); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 				rows.Close()
 				return stats, err
 			}
 			ids = append(ids, id)
 		}
 		rows.Close()
-		if err := rows.Err(); err != nil {
+		if err := rows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
 			return stats, err
 		}
 		if len(ids) == 0 {
@@ -128,14 +128,14 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 	var blobs []blobRow
 	for rows.Next() {
 		var b blobRow
-		if err := rows.Scan(&b.cid, &b.blob, &b.keyID, &b.alg, &b.updatedAt); err != nil {
+		if err := rows.Scan(&b.cid, &b.blob, &b.keyID, &b.alg, &b.updatedAt); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return err
 		}
 		blobs = append(blobs, b)
 	}
 	rows.Close()
-	if err := rows.Err(); err != nil {
+	if err := rows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
 		return err
 	}
 
@@ -328,14 +328,14 @@ func (c *Contacts) rekeyVaults(ctx context.Context, newestKEK string, stats *Rek
 	for trows.Next() {
 		var t vt
 		if err := trows.Scan(&t.token, &t.scope, &t.ct, &t.keyID, &t.alg, &t.cid, &t.aadV,
-			&t.tokenType, &t.hasUnique, &t.uniqueVersion); err != nil {
+			&t.tokenType, &t.hasUnique, &t.uniqueVersion); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			trows.Close()
 			return err
 		}
 		vts = append(vts, t)
 	}
 	trows.Close()
-	if err := trows.Err(); err != nil {
+	if err := trows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
 		return err
 	}
 	for _, t := range vts {
@@ -402,14 +402,14 @@ func (c *Contacts) rekeyVaults(ctx context.Context, newestKEK string, stats *Rek
 	var rks []rk
 	for rrows.Next() {
 		var r rk
-		if err := rrows.Scan(&r.personID, &r.wrapped, &r.keyID, &r.alg); err != nil {
+		if err := rrows.Scan(&r.personID, &r.wrapped, &r.keyID, &r.alg); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rrows.Close()
 			return err
 		}
 		rks = append(rks, r)
 	}
 	rrows.Close()
-	if err := rrows.Err(); err != nil {
+	if err := rrows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
 		return err
 	}
 	for _, r := range rks {
@@ -458,14 +458,14 @@ func (c *Contacts) rekeyVaults(ctx context.Context, newestKEK string, stats *Rek
 	var vvs []vv
 	for vrows.Next() {
 		var v vv
-		if err := vrows.Scan(&v.cid, &v.versionNo, &v.blob, &v.keyID, &v.alg, &v.aadV); err != nil {
+		if err := vrows.Scan(&v.cid, &v.versionNo, &v.blob, &v.keyID, &v.alg, &v.aadV); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			vrows.Close()
 			return err
 		}
 		vvs = append(vvs, v)
 	}
 	vrows.Close()
-	if err := vrows.Err(); err != nil {
+	if err := vrows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
 		return err
 	}
 	for _, v := range vvs {
@@ -508,14 +508,14 @@ func (c *Contacts) rekeyVaults(ctx context.Context, newestKEK string, stats *Rek
 	var obs []ob
 	for orows.Next() {
 		var o ob
-		if err := orows.Scan(&o.id, &o.payload, &o.keyID, &o.alg); err != nil {
+		if err := orows.Scan(&o.id, &o.payload, &o.keyID, &o.alg); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			orows.Close()
 			return err
 		}
 		obs = append(obs, o)
 	}
 	orows.Close()
-	if err := orows.Err(); err != nil {
+	if err := orows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
 		return err
 	}
 	for _, o := range obs {

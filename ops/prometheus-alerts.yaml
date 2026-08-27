@@ -113,3 +113,25 @@ groups:
         annotations:
           summary: "Sunder minted {{ $value }} new key(s) at runtime"
           description: "The keystore volume is lost, unmounted or pointed at the wrong path. Data written under the missing versions is unreadable. STOP the replica and restore the correct keystore before writing anything further - docs/RUNBOOK-BACKUP-DR.md."
+
+      # AES-256-GCM under random 96-bit nonces has a birthday bound: NIST SP
+      # 800-38D puts the safe ceiling at 2^32 invocations per key. The gauge
+      # is per-process and resets on restart, so it under-counts a key's
+      # lifetime use - alarm well before the bound, and rotate on the signal.
+      - alert: SunderKEKSealBudgetHigh
+        expr: max by (version) (sunder_kek_seals_total{job="sunder"}) > 536870912
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Key version {{ $labels.version }} is at {{ $value }} AES-GCM seals in one process"
+          description: "Half the per-process seal budget (2^30) is spent on this key version. Rotate it (`sunder keys rotate -kind pii-kek`) or migrate to SUNDER_PII_ALG=xchacha20poly1305, whose 192-bit nonces have no practical birthday bound - docs/RUNBOOK-ALG-MIGRATION.md."
+
+      # The shared rate-limit backend is unreachable. With
+      # SUNDER_REDIS_FAIL_CLOSED=false (the default) the limiter falls open,
+      # so limits are NOT being enforced while this fires.
+      - alert: SunderRateLimitBackendFailing
+        expr: increase(sunder_ratelimit_backend_failures_total{job="sunder"}[10m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Sunder cannot reach the Redis rate-limit backend"
+          description: "Rate-limit windows are not shared across replicas right now. With SUNDER_REDIS_FAIL_CLOSED=false the limiter fails OPEN, so the per-client limits are not being enforced; with true, lookups are being rejected. Check Redis reachability and credentials."

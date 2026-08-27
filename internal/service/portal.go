@@ -289,7 +289,7 @@ func (p *Portal) DeliverPendingMail(ctx context.Context) (int, error) {
 	var items []item
 	for rows.Next() {
 		var it item
-		if err := rows.Scan(&it.id, &it.kind, &it.payload, &it.keyID, &it.alg, &it.expires, &it.attempts); err != nil {
+		if err := rows.Scan(&it.id, &it.kind, &it.payload, &it.keyID, &it.alg, &it.expires, &it.attempts); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return 0, err
 		}
