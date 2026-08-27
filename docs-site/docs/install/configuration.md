@@ -16,7 +16,7 @@ flowchart LR
     LOADER -->|"SUNDER_AUDIT_SEALING\nSUNDER_AUDIT_SEAL_*"| SEALER["Sealer\n(inline or external)"]
     LOADER -->|SUNDER_PORTAL_*| PORTAL["Portal listener\n(SUNDER_PORTAL_LISTEN)"]
     API -->|"INSERT unsealed row"| AUDIT[(audit table\nhash chain)]
-    SEALER -->|"UPDATE prev_hash, hash, chain_seq"| AUDIT
+    SEALER -->|"UPDATE prev_hash, hash, chain_seq, hash_v"| AUDIT
     RL -->|"allow / deny\n(fail open or closed)"| API
     PORTAL -->|"POST portal_login event"| API
     KEY -->|"sign / decrypt on demand"| API
@@ -87,7 +87,7 @@ How audit records enter the hash chain - the one setting with a measured order-o
 | `SUNDER_AUDIT_SEAL_INTERVAL` | `200ms` | `50ms`-`30s` | Sealer cadence. Shorter narrows the sealing window and spends more sealer transactions. |
 | `SUNDER_AUDIT_SEAL_DELAY` | `2s` | `100ms`-`5m` | How long a row must settle before sealing. Not a correctness knob (`chain_seq` handles commit-order races, so a late-committing row enters the chain late rather than being lost) - it only keeps chain order close to wall-clock order. |
 | `SUNDER_AUDIT_SEAL_BATCH` | `5000` | >= `100` | Rows per sealing transaction: one lock acquisition and one fsync per batch. |
-| `SUNDER_AUDIT_SEAL_EXTERNAL` | `false` | boolean | `true`: this process seals nothing; run `sunder sealer` separately, on a DB role that may UPDATE only `prev_hash`/`hash`/`chain_seq` - the API role gets INSERT but no UPDATE, so a compromised API cannot forge hashes over its own rows. |
+| `SUNDER_AUDIT_SEAL_EXTERNAL` | `false` | boolean | `true`: this process seals nothing; run `sunder sealer` separately, on a DB role with `UPDATE (prev_hash, hash, chain_seq, hash_v)` and `INSERT` on `audit`, plus `UPDATE (sealed_at)` on `audit_read_buckets` - the API role gets INSERT but no UPDATE, so a compromised API cannot seal or forge hashes over its own rows. The exact GRANTs are in the audit-operations runbook; omitting `hash_v` makes every seal cycle fail. |
 
 Mode changes are restart-only: `sync -> async` needs nothing; `async -> sync` drains every unsealed row before the listeners open, so no record is left outside the chain by the switch. On a multi-replica deployment switching to `sync`, stop ALL replicas first - a lingering async replica committing after the new instance's startup drain leaves that row outside the chain until the next drain.
 

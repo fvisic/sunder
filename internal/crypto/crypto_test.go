@@ -320,3 +320,35 @@ func TestVaultErrorBranches(t *testing.T) {
 		t.Fatal("unreachable vault must error on ensure")
 	}
 }
+
+// CRYPTO-8: AES-256-GCM with 96-bit RANDOM nonces has a birthday bound, and
+// nothing counted invocations - so an operator had no way to tell how close
+// a key version was, nor any usage-based reason to rotate.
+func TestSealCountsTrackTheAESGCMBudget(t *testing.T) {
+	ks := &FileKeystore{Dir: t.TempDir()}
+	eng := NewLocalEngine(ks)
+	ctx := context.Background()
+	if err := eng.Ensure(ctx, "pii-kek/v1"); err != nil {
+		t.Fatal(err)
+	}
+	before := SealCounts()["pii-kek/v1"]
+	for i := 0; i < 5; i++ {
+		if _, err := eng.Seal(ctx, "pii-kek/v1", AlgAES256GCM, []byte("aad"), []byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := SealCounts()["pii-kek/v1"] - before; got != 5 {
+		t.Fatalf("AES-GCM seals must be counted per key version, got %d", got)
+	}
+	// XChaCha20's 192-bit nonces make random nonces unconditionally safe, so
+	// there is no budget to track and nothing to count.
+	if err := eng.Ensure(ctx, "pii-kek/v2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Seal(ctx, "pii-kek/v2", AlgXChaCha20, []byte("aad"), []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if _, counted := SealCounts()["pii-kek/v2"]; counted {
+		t.Fatal("XChaCha20 seals must not be counted - they carry no nonce budget")
+	}
+}

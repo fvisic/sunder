@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -562,5 +563,65 @@ func TestS3EndpointTrailingSlash(t *testing.T) {
 	}
 	if _, err := url.Parse(u.String()); err != nil {
 		t.Errorf("unparseable URL %q: %v", u.String(), err)
+	}
+}
+
+// FILES-STORAGE-2: the driver re-buffered an already-buffered body, so real
+// peak upload memory was ~4x the payload rather than the 1x the semaphore's
+// documented bound assumes.
+func TestPutDoesNotReBufferAnAlreadyMaterialisedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	d, err := Open(Config{Kind: "s3", S3Endpoint: srv.URL, S3Bucket: "test-bucket",
+		S3AccessKey: "k", S3SecretKey: "s", S3Region: "us-east-1", S3PathStyle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const size = 8 << 20
+	payload := bytes.NewBuffer(make([]byte, size))
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	if err := d.Put(context.Background(), "k1", payload, size); err != nil {
+		t.Fatal(err)
+	}
+	runtime.ReadMemStats(&after)
+
+	delta := after.TotalAlloc - before.TotalAlloc
+	// The body is already in hand, so the PUT must not allocate another
+	// copy of it. A generous ceiling: request/SigV4 scratch only.
+	if delta > size/2 {
+		t.Fatalf("Put allocated %d bytes for an already-buffered %d-byte body - it is copying it again", delta, size)
+	}
+}
+
+// An over-long reader must still be refused - that guard is what the
+// LimitReader used to provide.
+func TestPutRefusesAnOverLongReader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	d, err := Open(Config{Kind: "s3", S3Endpoint: srv.URL, S3Bucket: "test-bucket",
+		S3AccessKey: "k", S3SecretKey: "s", S3Region: "us-east-1", S3PathStyle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A plain reader (not *bytes.Buffer/*bytes.Reader) carrying more than
+	// the declared size.
+	long := io.NopCloser(bytes.NewReader(make([]byte, 100)))
+	if err := d.Put(context.Background(), "k2", long, 50); err == nil {
+		t.Fatal("a reader longer than the declared size must be refused")
+	}
+	// ...and a short one too.
+	short := io.NopCloser(bytes.NewReader(make([]byte, 10)))
+	if err := d.Put(context.Background(), "k3", short, 50); err == nil {
+		t.Fatal("a reader shorter than the declared size must be refused")
 	}
 }

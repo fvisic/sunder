@@ -165,6 +165,34 @@ func (p *Portal) allowEmailSend(ctx context.Context, tx pgx.Tx, normalized strin
 		return false, err
 	}
 	key := []byte(tok)
+	// The row is keyed by the NEWEST version, so a `keys rotate -kind
+	// hmac-email` would otherwise hand every address a fresh window - i.e.
+	// reset the anti-mail-bomb throttle fleet-wide, silently, at exactly the
+	// moment an operator is responding to a key incident (CRYPTO-3, same
+	// root cause as the value-token dedup hash). Carry the existing row
+	// forward instead, under the still-live older versions.
+	if older, verr := p.Contacts.Ring.Versions(ctx, crypto.KeyHMACEmail); verr == nil && len(older) > 1 {
+		stale := make([][]byte, 0, len(older))
+		for _, v := range older {
+			if v == version {
+				continue
+			}
+			t, terr := p.Contacts.Tok.EmailToken(ctx, v, normalized)
+			if terr != nil {
+				return false, terr
+			}
+			stale = append(stale, []byte(t))
+		}
+		if len(stale) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE portal_email_throttle SET email_token=$1
+				 WHERE email_token = ANY($2)
+				   AND NOT EXISTS (SELECT 1 FROM portal_email_throttle t WHERE t.email_token=$1)`,
+				key, stale); err != nil {
+				return false, err
+			}
+		}
+	}
 	var sends int
 	err = tx.QueryRow(ctx,
 		`INSERT INTO portal_email_throttle (email_token, window_start, sends)
@@ -218,6 +246,21 @@ func (p *Portal) enqueueMail(ctx context.Context, tx pgx.Tx, personID, kind, ema
 // (or once the token has expired) is the row abandoned. Runs on the same
 // ticker as the erasure webhook worker.
 func (p *Portal) DeliverPendingMail(ctx context.Context) (int, error) {
+	// The settle statements run detached from the caller's context: a
+	// SIGTERM or a client disconnect must not kill the statement that
+	// releases the claim, because the claim's only other release is the
+	// reaper's grace period (QUEUE-WORKER-3, same shape as H1).
+	settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+	defer cancelSettle()
+
+	// Recover claims abandoned by a worker that died mid-send before taking
+	// new ones.
+	if n, rerr := ReapStrandedMail(settleCtx, p.GDPR.Pool, p.GDPR.claimTTL()); rerr != nil {
+		p.GDPR.logger().Error("portal outbox reap", "err", rerr.Error())
+	} else if n > 0 {
+		p.GDPR.logger().Warn("requeued stranded portal mail", "count", n)
+	}
+
 	// CLAIM the rows: the worker runs in every replica (the chart defaults
 	// to two), so a plain SELECT ... WHERE status='PENDING' had every
 	// replica mail every link. SKIP LOCKED lets replicas work
@@ -264,7 +307,7 @@ func (p *Portal) DeliverPendingMail(ctx context.Context) (int, error) {
 			ids = append(ids, it.id)
 		}
 		if _, err := claim.Exec(ctx,
-			`UPDATE portal_outbox SET status='SENDING' WHERE id = ANY($1)`, ids); err != nil {
+			`UPDATE portal_outbox SET status='SENDING', claimed_at=now() WHERE id = ANY($1)`, ids); err != nil {
 			return 0, err
 		}
 	}
@@ -272,36 +315,83 @@ func (p *Portal) DeliverPendingMail(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
+	release := func(rest []item) {
+		if len(rest) == 0 {
+			return
+		}
+		ids := make([]int64, 0, len(rest))
+		for _, it := range rest {
+			ids = append(ids, it.id)
+		}
+		if _, rerr := p.GDPR.Pool.Exec(settleCtx,
+			`UPDATE portal_outbox SET status='PENDING', claimed_at=NULL
+			 WHERE id = ANY($1) AND status='SENDING'`, ids); rerr != nil {
+			p.GDPR.logger().Error("release portal mail claims", "count", len(ids), "err", rerr.Error())
+		}
+	}
+
 	delivered := 0
-	for _, it := range items {
+	for idx, it := range items {
+		if ctx.Err() != nil {
+			release(items[idx:])
+			return delivered, nil
+		}
 		plain, err := p.Contacts.PII.OpenBytes(ctx, "portal-outbox", it.payload, it.keyID, it.alg)
 		if err != nil {
-			// Unopenable payload (retired key): abandon, never retry.
-			p.settleMail(ctx, it.id, it.kind, "FAILED")
+			// PERMANENT vs TRANSIENT. This used to treat every error as
+			// permanent on the assumption that the only cause is a retired
+			// key - but OpenBytes spans an in-process AEAD, a unix-socket
+			// RPC to the signer and, under the vault driver, an HTTP call.
+			// A signer restart or a Vault failover therefore marked the row
+			// FAILED, which is terminal (the claim takes only PENDING, the
+			// reaper only SENDING) - and the sealed payload is the ONLY copy
+			// of the clear-text token, so the citizen's login link or
+			// erase-confirmation was destroyed by a blip (QUEUE-WORKER-5).
+			if errors.Is(err, crypto.ErrEngineUnavailable) {
+				p.GDPR.logger().Error("portal mail: crypto engine unavailable, keeping the row queued",
+					"outbox_id", it.id, "err", err.Error())
+				if _, rerr := p.GDPR.Pool.Exec(settleCtx,
+					`UPDATE portal_outbox SET status='PENDING', claimed_at=NULL WHERE id=$1`, it.id); rerr != nil {
+					p.GDPR.logger().Error("requeue portal mail", "outbox_id", it.id, "err", rerr.Error())
+				}
+				continue
+			}
+			// Genuinely unopenable (retired key, tampered ciphertext):
+			// abandon, never retry - but say why.
+			p.GDPR.logger().Error("portal mail: payload cannot be opened, abandoning",
+				"outbox_id", it.id, "err", err.Error())
+			p.settleMail(settleCtx, it.id, it.kind, "FAILED")
 			continue
 		}
 		var mp mailPayload
 		if err := json.Unmarshal(plain, &mp); err != nil {
-			p.settleMail(ctx, it.id, it.kind, "FAILED")
+			p.settleMail(settleCtx, it.id, it.kind, "FAILED")
 			continue
 		}
 		switch err := p.mail(ctx, it.kind, mp.Email, mp.Token, it.expires); {
 		case err == errNoMailer:
-			p.settleMail(ctx, it.id, it.kind, "NO_MAILER")
+			p.settleMail(settleCtx, it.id, it.kind, "NO_MAILER")
 		case err == nil:
-			p.settleMail(ctx, it.id, it.kind, "DELIVERED")
+			p.settleMail(settleCtx, it.id, it.kind, "DELIVERED")
 			delivered++
 		default:
+			// Our own context dying is not the mailer's fault: hand the
+			// batch back without charging anyone an attempt.
+			if ctx.Err() != nil {
+				release(items[idx:])
+				return delivered, nil
+			}
 			// Transient: keep it PENDING for the next sweep unless the
 			// attempt cap is reached or the token has already expired.
 			attempts := it.attempts + 1
 			if attempts >= maxMailAttempts || time.Now().After(it.expires) {
-				p.settleMail(ctx, it.id, it.kind, "FAILED")
+				p.settleMail(settleCtx, it.id, it.kind, "FAILED")
 				continue
 			}
-			if _, err := p.GDPR.Pool.Exec(ctx,
-				`UPDATE portal_outbox SET attempts=$2, status='PENDING' WHERE id=$1`,
+			if _, err := p.GDPR.Pool.Exec(settleCtx,
+				`UPDATE portal_outbox SET attempts=$2, status='PENDING', claimed_at=NULL WHERE id=$1`,
 				it.id, attempts); err != nil {
+				p.GDPR.logger().Error("requeue portal mail", "outbox_id", it.id, "err", err.Error())
 				continue
 			}
 		}
@@ -318,16 +408,39 @@ func (p *Portal) settleMail(ctx context.Context, id int64, kind, status string) 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx,
-		`UPDATE portal_outbox SET status=$2, attempts=attempts+1 WHERE id=$1`, id, status); err != nil {
+		`UPDATE portal_outbox SET status=$2, attempts=attempts+1, claimed_at=NULL WHERE id=$1`, id, status); err != nil {
+		p.GDPR.logger().Error("settle portal mail", "outbox_id", id, "status", status, "err", err.Error())
 		return
 	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
 		ClientID: "portal", Action: "portal.mail." + strings.ToLower(status),
 		Detail: map[string]any{"kind": kind, "outbox_id": id},
 	}); err != nil {
+		p.GDPR.logger().Error("audit portal mail settle", "outbox_id", id, "status", status, "err", err.Error())
 		return
 	}
-	_ = tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		p.GDPR.logger().Error("commit portal mail settle", "outbox_id", id, "status", status, "err", err.Error())
+	}
+}
+
+// ReapStrandedMail returns portal_outbox claims older than ttl to the queue.
+// The reaper used to key off created_at (QUEUE-WORKER-2), which made an aged
+// row reap-eligible the INSTANT it was claimed - a second worker could pick
+// it up while the first was still mailing. It keys off claim age now.
+func ReapStrandedMail(ctx context.Context, pool *pgxpool.Pool, ttl time.Duration) (int64, error) {
+	if ttl <= 0 {
+		ttl = DefaultWorkerClaimTTL
+	}
+	tag, err := pool.Exec(ctx,
+		`UPDATE portal_outbox SET status='PENDING', claimed_at=NULL
+		 WHERE status='SENDING'
+		   AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $1))`,
+		ttl.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 var errNoMailer = errors.New("portal: no mailer webhook configured")
@@ -481,6 +594,13 @@ func (p *Portal) SetConsent(ctx context.Context, personID, cid, purpose string, 
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Liveness re-checked inside the transaction, as in GDPR.SetConsent: a
+	// self-service erasure racing a consent flip otherwise leaves a
+	// (pseudonym, purpose, granted) row behind, against the stated intent
+	// that consent STATE dies with the person (GDPR-ERASURE-5).
+	if _, err := lockPersonRows(ctx, tx, cid); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO consents (cid, purpose, granted) VALUES ($1,$2,$3)
 		 ON CONFLICT (cid, purpose) DO UPDATE SET granted=$3, updated_at=now()`,
@@ -664,9 +784,13 @@ func PrunePortal(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 		// unreachable mailer would otherwise grow this table without bound
 		//.
 		`DELETE FROM portal_outbox WHERE status='PENDING' AND expires_at < now()`,
-		// A claim left behind by a crashed worker returns to the queue.
-		`UPDATE portal_outbox SET status='PENDING'
-		   WHERE status='SENDING' AND created_at < now() - interval '10 minutes'`,
+		// A claim left behind by a crashed worker returns to the queue -
+		// keyed on CLAIM age, not row age (QUEUE-WORKER-2). The default
+		// grace period is the SUNDER_WORKER_CLAIM_TTL default; the workers
+		// themselves reap with the configured value on every sweep.
+		`UPDATE portal_outbox SET status='PENDING', claimed_at=NULL
+		   WHERE status='SENDING'
+		     AND (claimed_at IS NULL OR claimed_at < now() - interval '10 minutes')`,
 		`DELETE FROM portal_email_throttle WHERE window_start < now() - interval '1 day'`,
 	} {
 		tag, err := pool.Exec(ctx, q)
@@ -677,3 +801,9 @@ func PrunePortal(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 	}
 	return total, nil
 }
+
+// PortalStartFloor exposes the constant-time floor so a test can assert that
+// EVERY login-start response actually observed it. Without that assertion,
+// removing the floor entirely does not fail the timing test as long as both
+// branches speed up together (TESTS-2).
+func PortalStartFloor() time.Duration { return portalStartFloor }

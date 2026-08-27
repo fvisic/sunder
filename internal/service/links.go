@@ -61,6 +61,26 @@ func (l *Links) Link(ctx context.Context, client *auth.Client, parentCID, childC
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Liveness re-checked INSIDE the transaction for BOTH endpoints. The two
+	// personForClientCID calls above ran on the pool, and an erasure landing
+	// between them and this INSERT ran its `DELETE FROM person_links` against
+	// a row that did not exist yet - leaving a link that leaks the erased
+	// person's pseudonym through the surviving side's listing forever, and
+	// that Unlink cannot remove because it 404s on a tombstoned endpoint
+	// (GDPR-ERASURE-5).
+	//
+	// The endpoints are locked in a DETERMINISTIC order (by cid), so two
+	// concurrent Link calls on the same pair in opposite directions cannot
+	// ABBA each other.
+	first, second := parentCID, childCID
+	if second < first {
+		first, second = second, first
+	}
+	for _, endpoint := range []string{first, second} {
+		if _, err := lockPersonRows(ctx, tx, endpoint); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO person_links (parent_person, child_person, scope, link_type, created_by)
 		VALUES ($1,$2,$3,$4,$5)
@@ -132,13 +152,18 @@ func (l *Links) List(ctx context.Context, client *auth.Client, cid string) ([]Li
 	}
 	// One query, both directions, resolving the OTHER person back to its
 	// cid in this scope.
+	// Both arms carry the tombstone predicate: a link row that outlived its
+	// counterparty's erasure must not keep listing that person's pseudonym
+	// to the surviving side (GDPR-ERASURE-5, defence in depth).
 	rows, err := l.Pool.Query(ctx, `
 		SELECT c.cid, pl.link_type, 'child' AS role
 		  FROM person_links pl JOIN cids c ON c.person_id = pl.child_person AND c.scope = pl.scope
+		  JOIN persons pe ON pe.id = c.person_id AND pe.erased_at IS NULL
 		 WHERE pl.parent_person = $1 AND pl.scope = $2
 		UNION ALL
 		SELECT c.cid, pl.link_type, 'parent' AS role
 		  FROM person_links pl JOIN cids c ON c.person_id = pl.parent_person AND c.scope = pl.scope
+		  JOIN persons pe ON pe.id = c.person_id AND pe.erased_at IS NULL
 		 WHERE pl.child_person = $1 AND pl.scope = $2
 		 ORDER BY 1`, person, client.Scope)
 	if err != nil {

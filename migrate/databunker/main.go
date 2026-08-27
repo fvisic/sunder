@@ -10,10 +10,15 @@
 //
 // Usage:
 //
+//	export DATABUNKER_TOKEN=<root token>
+//	export SUNDER_CRED='<client_id.secret>'
 //	go run ./migrate/databunker \
-//	 -source http://localhost:3000 -source-token <root token> \
-//	 -target http://localhost:8080 -cred '<client_id.secret>' \
+//	 -source http://localhost:3000 -target http://localhost:8080 \
 //	 -map-out mapping.csv [-batch 100] [-c 8] [-dry-run]
+//
+// Both secrets come from the environment: on a command line they are
+// readable through /proc/<pid>/cmdline, `ps auxww`, shell history and CI
+// logs. The -source-token and -cred flags still work but warn.
 //
 // The Sunder client needs the contacts.register action. Records without an
 // email or phone cannot be registered (nothing searchable) and are reported
@@ -77,17 +82,33 @@ type migrated struct {
 
 func main() {
 	source := flag.String("source", "", "Databunker base URL")
-	sourceToken := flag.String("source-token", "", "Databunker root/admin token")
+	// Secrets come from the ENVIRONMENT by default. Passing them as argv
+	// puts both on one command line, readable via /proc/<pid>/cmdline, `ps
+	// auxww`, shell history and CI logs - and this tool's two secrets are
+	// the Databunker ROOT token and a Sunder credential (OPS-CLI-CONFIG-9).
+	// The flags remain as a deprecated fallback, with a warning.
+	sourceToken := flag.String("source-token", "", "DEPRECATED - use DATABUNKER_TOKEN. Databunker root/admin token")
 	target := flag.String("target", "", "Sunder base URL")
-	cred := flag.String("cred", "", "Sunder client credential (contacts.register)")
+	cred := flag.String("cred", "", "DEPRECATED - use SUNDER_CRED. Sunder client credential (contacts.register)")
 	mapOut := flag.String("map-out", "", "CSV output: databunker_token,sunder_cid (recommended)")
 	batch := flag.Int("batch", 100, "Databunker page size")
 	conc := flag.Int("c", 8, "concurrent Sunder registrations")
 	dryRun := flag.Bool("dry-run", false, "read and validate only; register nothing")
 	keepToken := flag.Bool("keep-source-token", true, "store the Databunker token as attribute databunker_token")
 	flag.Parse()
+	// Environment first; the flags are the deprecated path and say so.
+	if *sourceToken != "" {
+		fmt.Fprintln(os.Stderr, "WARNING: -source-token puts the Databunker ROOT token on the command line, where /proc, `ps auxww`, shell history and CI logs can read it. Use DATABUNKER_TOKEN instead.")
+	} else {
+		*sourceToken = os.Getenv("DATABUNKER_TOKEN")
+	}
+	if *cred != "" {
+		fmt.Fprintln(os.Stderr, "WARNING: -cred puts the Sunder credential on the command line. Use SUNDER_CRED instead.")
+	} else {
+		*cred = os.Getenv("SUNDER_CRED")
+	}
 	if *source == "" || *sourceToken == "" || *target == "" || (*cred == "" && !*dryRun) {
-		fmt.Fprintln(os.Stderr, "need -source, -source-token, -target and -cred (or -dry-run)")
+		fmt.Fprintln(os.Stderr, "need -source, -target, DATABUNKER_TOKEN and SUNDER_CRED (or -dry-run)")
 		os.Exit(2)
 	}
 
@@ -147,9 +168,17 @@ func main() {
 
 	if *mapOut != "" && len(mappings) > 0 && !*dryRun {
 		sort.Slice(mappings, func(i, j int) bool { return mappings[i].token < mappings[j].token })
-		f, err := os.Create(*mapOut)
+		// 0600, explicitly: the mapping is a token -> pseudonym table, and
+		// os.Create leaves it 0666 & umask. O_CREATE does not tighten an
+		// existing file, so Chmod as well (OPS-CLI-CONFIG-9).
+		f, err := os.OpenFile(*mapOut, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "map-out:", err)
+			os.Exit(1)
+		}
+		if err := f.Chmod(0o600); err != nil {
+			fmt.Fprintln(os.Stderr, "map-out chmod:", err)
+			_ = f.Close()
 			os.Exit(1)
 		}
 		w := csv.NewWriter(f)

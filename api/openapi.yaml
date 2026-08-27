@@ -87,6 +87,7 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/Internal'
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /v1/contacts/{cid}/scopes:
     post:
@@ -133,6 +134,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /v1/contacts/{cid}/attributes/{name}:
     get:
@@ -147,6 +149,7 @@ paths:
         (scope isolation - per-scope encrypted blobs).
       parameters:
         - $ref: '#/components/parameters/Cid'
+        - $ref: '#/components/parameters/UserIdHeader'
         - name: name
           in: path
           required: true
@@ -181,6 +184,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /v1/lookup:
     post:
@@ -223,7 +227,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          $ref: '#/components/responses/ForbiddenOrUnlock'
         '404':
           $ref: '#/components/responses/NotFound'
         '429':
@@ -266,6 +270,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /portal/api/start:
     post:
@@ -316,6 +321,7 @@ paths:
           description: Session started; the cookie is set.
         '404':
           description: Unknown, expired or already-used token.
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /portal/api/me:
     get:
@@ -328,6 +334,7 @@ paths:
           description: The person's own data across all scopes.
         '401':
           description: No session, or the session expired (also after erasure).
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /portal/api/consent:
     post:
@@ -350,6 +357,7 @@ paths:
           description: Recorded; it takes effect immediately on reads and handoffs.
         '404':
           description: The CID does not belong to the signed-in person.
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /portal/api/erase:
     post:
@@ -363,6 +371,7 @@ paths:
       responses:
         '202':
           description: A confirmation link has been queued to the address on file.
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /portal/api/erase/confirm:
     post:
@@ -383,6 +392,7 @@ paths:
           description: Erased; every scope is notified via its signed webhook.
         '404':
           description: Unknown, expired, already-used, or issued for a different person.
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /portal/api/logout:
     post:
@@ -392,6 +402,7 @@ paths:
       responses:
         '200':
           description: Signed out; the session row is deleted and the cookie cleared.
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /v1/claims/external:
     post:
@@ -514,6 +525,7 @@ paths:
                   value: {"error": "token_expired"}
         '500':
           $ref: '#/components/responses/Internal'
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /v1/consent:
     post:
@@ -552,6 +564,7 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '500': {$ref: '#/components/responses/Internal'}
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /v1/consent/{cid}:
     get:
@@ -580,6 +593,7 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '500': {$ref: '#/components/responses/Internal'}
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /v1/dsr/access:
     get:
@@ -605,18 +619,35 @@ paths:
                     items: {$ref: '#/components/schemas/ScopeData'}
                   audit_trail:
                     type: array
+                    description: |
+                      Who touched this person, when, doing what. Chained
+                      per-event rows carry `seq`; under
+                      `SUNDER_AUDIT_READS=bucketed` (the default) READ events
+                      arrive aggregated per hour instead, carrying `count`
+                      and `last_ts` and no `seq`.
                     items:
                       type: object
                       properties:
                         seq: {type: integer}
                         ts: {type: string, format: date-time}
                         client_id: {type: string}
+                        user_id:
+                          type: string
+                          description: P4.2 operator attribution, as asserted by the calling system.
                         action: {type: string}
                         cid: {type: string}
+                        count:
+                          type: integer
+                          description: Bucketed read events only - how many times in the hour.
+                        last_ts:
+                          type: string
+                          format: date-time
+                          description: Bucketed read events only - the last event in the hour (`ts` is the first).
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '500': {$ref: '#/components/responses/Internal'}
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /v1/dsr/erase:
     post:
@@ -628,6 +659,14 @@ paths:
         deletes all search tokens, tombstones the person (CID references in
         client systems never break) and queues one signed webhook event per
         scope. Audited. Re-registration afterwards creates a new person.
+
+        `cascade` (F7) names the link types whose linked children are erased
+        with this person. Omitted, children are only LISTED - never touched.
+        A cascade is one transaction PER PERSON: children first, parent last,
+        with the plan recorded durably inside the parent's transaction, so
+        re-issuing the identical request resumes any outstanding children.
+        Once everything is done the same call answers 404, indistinguishable
+        from a cid that never existed.
       requestBody:
         required: true
         content:
@@ -637,6 +676,11 @@ paths:
               required: [cid]
               properties:
                 cid: {type: string}
+                cascade:
+                  type: array
+                  description: Link types to cascade the erasure across.
+                  items: {type: string, enum: [guardian, member, owner]}
+                  examples: [[guardian]]
       responses:
         '200':
           description: Erasure executed; events queued.
@@ -647,10 +691,24 @@ paths:
                 properties:
                   erasure_id: {type: integer}
                   scopes: {type: integer}
+                  linked:
+                    type: array
+                    description: |
+                      Every person linked to this one, and whether this
+                      request erased them. A child is reported even when it
+                      was NOT cascaded, so the report proves what was left
+                      intact.
+                    items:
+                      type: object
+                      properties:
+                        cid: {type: string}
+                        link_type: {type: string}
+                        cascaded: {type: boolean}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '500': {$ref: '#/components/responses/Internal'}
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /v1/dsr/export:
     get:
@@ -669,6 +727,7 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '500': {$ref: '#/components/responses/Internal'}
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /v1/admin/audit/verify:
     get:
@@ -926,7 +985,7 @@ paths:
                     items: {type: string}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
+        '403': {$ref: '#/components/responses/ForbiddenOrUnlock'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/Internal'}
 
@@ -968,7 +1027,7 @@ paths:
                     items: {type: string}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
+        '403': {$ref: '#/components/responses/ForbiddenOrUnlock'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/Internal'}
 
@@ -1444,6 +1503,24 @@ components:
       schema:
         $ref: '#/components/schemas/Cid'
 
+    UserIdHeader:
+      name: X-Sunder-User-Id
+      in: header
+      required: false
+      description: |
+        P4.2 operator attribution on GET routes: who INSIDE the calling
+        system made this request (an opaque agent id, never the data
+        subject). Client-asserted and unverifiable; recorded on the audit row
+        (and as a read-bucket key) and part of the hashed tuple, so it cannot
+        be altered afterwards without breaking verification. POST routes
+        carry it as the `user_id` body field instead.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._@:-]{1,64}$'
+      examples:
+        agent:
+          value: agent-9
+
   schemas:
     TokenizeInput:
       type: object
@@ -1544,6 +1621,62 @@ components:
               purpose: {type: string}
               granted: {type: boolean}
               updated_at: {type: string, format: date-time}
+        # Holdings that do not live in the attribute blob. Article 15(1) is
+        # "what do you hold about me" and 15(1)(c) is "who did you disclose
+        # it to"; metadata only - a token, never its value; a file's name and
+        # size, never its content; a share's partner label, which is the
+        # recipient rather than their data.
+        value_tokens:
+          type: array
+          description: Tokenized values held for this person. Never the value itself.
+          items:
+            type: object
+            properties:
+              token: {type: string}
+              type: {type: string}
+              scope: {type: string}
+              created_by: {type: string}
+              created_at: {type: string, format: date-time}
+              last_used: {type: string, format: date-time}
+              expires_at: {type: string, format: date-time}
+        files:
+          type: array
+          description: Files stored for this person (metadata only).
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              name: {type: string}
+              content_type: {type: string}
+              size_bytes: {type: integer, format: int64}
+              created_at: {type: string, format: date-time}
+              expires_at: {type: string, format: date-time}
+        shares:
+          type: array
+          description: |
+            Disclosures to named recipients - the Article 15(1)(c) answer.
+            Revoked and expired shares are included: the question is who the
+            data HAS been disclosed to, not who holds it now.
+          items:
+            type: object
+            properties:
+              uuid: {type: string}
+              partner_label: {type: string}
+              fields: {type: array, items: {type: string}}
+              purpose: {type: string}
+              created_by: {type: string}
+              created_at: {type: string, format: date-time}
+              expires_at: {type: string, format: date-time}
+              revoked: {type: boolean}
+        links:
+          type: array
+          description: Relationships to other persons in the same scope.
+          items:
+            type: object
+            properties:
+              cid: {type: string}
+              link_type: {type: string}
+              role: {type: string, enum: [parent, child]}
 
     RegisterContactRequest:
       type: object
@@ -1594,8 +1727,10 @@ components:
     LookupRequest:
       type: object
       description: |
-        Valid combinations: `email` alone, `phone` alone, `name` + `email`,
-        or `name` + `phone`. Name alone is rejected with 400 `validation`.
+        Valid combinations: `email` alone, `phone` alone, `phone_suffix`
+        alone (F2, requires `SUNDER_SEARCH_PHONE_SUFFIX=true`), `name` +
+        `email`, or `name` + `phone`. Name alone is rejected with 400
+        `validation`.
       properties:
         email:
           type: string
@@ -1603,13 +1738,33 @@ components:
         phone:
           type: string
           examples: ['+385911234567']
+        phone_suffix:
+          type: string
+          description: |
+            F2 partial-phone search: the trailing digits of a number, as a
+            caller who only has the last part would type them. Enabled by
+            `SUNDER_SEARCH_PHONE_SUFFIX`; a multi-hit is a miss, decided
+            within the caller's scope. Under `SUNDER_SEARCH_UNLOCK=true` this
+            key additionally requires an `X-Sunder-Unlock` token.
+          examples: ['1234567']
         name:
           type: string
           description: Narrowing key only - must be accompanied by email or phone.
           examples: [Filip Visic]
+        user_id:
+          type: string
+          description: |
+            P4.2 operator attribution: who INSIDE the calling system made
+            this request (an opaque agent id, never the data subject). It is
+            client-asserted and unverifiable, recorded on the audit row and
+            part of the hashed tuple. GET routes carry it as the
+            `X-Sunder-User-Id` header instead.
+          pattern: '^[A-Za-z0-9._@:-]{1,64}$'
+          examples: [agent-7]
       anyOf:
         - required: [email]
         - required: [phone]
+        - required: [phone_suffix]
 
     OtiIssueRequest:
       type: object
@@ -1722,6 +1877,25 @@ components:
           examples:
             forbidden:
               value: {"error": "forbidden"}
+
+    ForbiddenOrUnlock:
+      description: |
+        The client is not allowed to perform this action (`forbidden`), or
+        the call needs a single-use unlock token it did not present
+        (`unlock_required`). The two are DIFFERENT: `unlock_required` means
+        the credential is entitled but must first declare bulk/fuzzy intent
+        via `POST /v1/admin/unlock` and carry the token in `X-Sunder-Unlock`.
+        Applies under `SUNDER_SEARCH_UNLOCK=true` (fuzzy and phone-suffix
+        lookup) and always on the bulk token routes.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            forbidden:
+              value: {"error": "forbidden"}
+            unlock_required:
+              value: {"error": "unlock_required"}
 
     ForbiddenOrPurpose:
       description: The client is not allowed to perform this action, or the declared purpose is not in the client's allowed purposes - `error` is `forbidden` or `purpose_not_allowed`.

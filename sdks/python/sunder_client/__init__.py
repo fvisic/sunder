@@ -25,6 +25,7 @@ __all__ = [
     "UnauthorizedError",
     "ForbiddenError",
     "PurposeNotAllowedError",
+    "UnlockRequiredError",
     "AudienceMismatchError",
     "TokenUsedError",
     "TokenExpiredError",
@@ -109,6 +110,14 @@ class ServiceUnavailableError(SunderError):
     pass
 
 
+class UnlockRequiredError(SunderError):
+    """403 unlock_required - the credential IS entitled, but the call needs a
+    single-use unlock token it did not present. Mint one with
+    POST /v1/admin/unlock and send it as X-Sunder-Unlock. Deliberately
+    distinct from ForbiddenError: "declare bulk/fuzzy intent first" and
+    "you lack the action" call for opposite responses."""
+
+
 # Exact (status, error-code) pairs first; falls through to status-only rules.
 _CODE_MAP: dict[str, type[SunderError]] = {
     "unauthorized": UnauthorizedError,
@@ -116,6 +125,7 @@ _CODE_MAP: dict[str, type[SunderError]] = {
     "forbidden": ForbiddenError,
     "consent_denied": ConsentDeniedError,
     "purpose_not_allowed": PurposeNotAllowedError,
+    "unlock_required": UnlockRequiredError,
     "audience_mismatch": AudienceMismatchError,
     "not_found": NotFoundError,
     "validation": ValidationError,

@@ -28,7 +28,13 @@ func pinMode(t *testing.T, m string) {
 func TestSyncStartupDrainsAsyncBacklog(t *testing.T) {
 	pinMode(t, audit.ModeAsync)
 	st := testutil.NewDB(t)
-	ctx := context.Background()
+	// CANCELLED at the end of the test: startAuditSealing launches the
+	// unsealed gauge (30s), the bucket closer (60s) and the sync backlog
+	// sealer (10s), and testutil drops the database on cleanup - so a
+	// context.Background() here leaked three tickers hammering a dropped
+	// database for the rest of the package run (TESTS-10).
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 
 	for i := 0; i < 5; i++ {
 		if err := audit.Append(ctx, st.Pool, audit.Entry{ClientID: "crm", Action: "lookup"}); err != nil {
@@ -353,4 +359,122 @@ func TestBucketCloserSurvivesDBFailure(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	cancel()
 	time.Sleep(60 * time.Millisecond)
+}
+
+// AUDIT-CHAIN-7: a rolling async -> sync restart drains only in the FIRST
+// process to switch; replicas still on async keep inserting unsealed rows
+// after it, and once the last one stops there is no sealer left in the
+// fleet. Those rows are stranded outside the chain indefinitely - verify
+// fails hard and the only cure is running the sealer under a different mode
+// than the one configured. Sync mode therefore keeps a low-frequency
+// backlog sealer of its own.
+func TestSyncModeSealsRowsThatAppearAfterStartup(t *testing.T) {
+	pinMode(t, audit.ModeSync)
+	st := testutil.NewDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
+		AuditSealing: audit.ModeSync, AuditSealBatch: 100}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.syncBacklogInterval = 50 * time.Millisecond
+	if err := srv.startAuditSealing(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// A row inserted the way a still-async replica inserts them: unsealed,
+	// after this process already drained at startup.
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO audit (ts, client_id, action, detail) VALUES (now(),'crm','lookup','null')`); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		n, err := audit.UnsealedCount(ctx, st.Pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d row(s) left outside the chain: a sync-mode process must still drain a backlog that appears after startup", n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if broken, reason, _, err := audit.Verify(ctx, st.Pool); err != nil || broken != 0 {
+		t.Fatalf("the chain must verify after the drain: %d %s %v", broken, reason, err)
+	}
+}
+
+// The operational gauges are the whole detection story for three findings -
+// a stalled sealer, stranded Article 19 notifications, and key material
+// minted at runtime - and each one is a number nothing else reports. The
+// loop that feeds them was never driven by a test.
+func TestOperationalGaugesArePublished(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.gaugeInterval = 20 * time.Millisecond
+
+	// Something for each gauge to report.
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO persons (id) VALUES (gen_random_uuid())`); err != nil {
+		t.Fatal(err)
+	}
+	var personID string
+	if err := st.Pool.QueryRow(ctx, `SELECT id FROM persons LIMIT 1`).Scan(&personID); err != nil {
+		t.Fatal(err)
+	}
+	var erasureID int64
+	if err := st.Pool.QueryRow(ctx,
+		`INSERT INTO erasures (person_id, requested_by) VALUES ($1,'t') RETURNING id`,
+		personID).Scan(&erasureID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO erasure_events (erasure_id, scope, cid, status, claimed_at)
+		VALUES ($1,'crm','CID-GAUGE000000000000000','SENDING', now()),
+		       ($1,'erp','CID-GAUGE100000000000000','FAILED', NULL)`, erasureID); err != nil {
+		t.Fatal(err)
+	}
+	srv.startUnsealedGauge(ctx)
+
+	want := []string{
+		"sunder_audit_unsealed_rows",
+		"sunder_erasure_events_sending",
+		"sunder_erasure_events_failed",
+		"sunder_keystore_minted_total",
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rec := httptest.NewRecorder()
+		srv.Metrics.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+		body := rec.Body.String()
+		missing := ""
+		for _, m := range want {
+			if !strings.Contains(body, m) {
+				missing = m
+			}
+		}
+		if missing == "" {
+			// The values must be real, not zero placeholders.
+			if !strings.Contains(body, "sunder_erasure_events_sending 1") ||
+				!strings.Contains(body, "sunder_erasure_events_failed 1") {
+				t.Fatalf("the erasure gauges must report the real queue depth:\n%s", body)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("gauge %q was never published:\n%s", missing, body)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

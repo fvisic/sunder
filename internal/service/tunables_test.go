@@ -66,9 +66,10 @@ func TestWebhookMaxAttemptsConfigurable(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.gdpr.MaxAttempts = 2
-	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err != nil { // attempt 1 (inline)
+	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err != nil { // attempt 1 (detached)
 		t.Fatal(err)
 	}
+	e.gdpr.Drain()
 	if _, err := e.gdpr.DeliverPending(ctx); err != nil { // attempt 2 -> cap
 		t.Fatal(err)
 	}

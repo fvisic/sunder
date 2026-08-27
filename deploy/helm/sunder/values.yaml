@@ -1,8 +1,8 @@
 image:
   repository: ghcr.io/fvisic/sunder
-  tag: v0.4.0
+  tag: v0.5.0
   # The ops image (anchor/verify-audit cron jobs) needs openssl:
-  opsTag: v0.4.0-ops
+  opsTag: v0.5.0-ops
 
 replicaCount: 2
 
@@ -134,3 +134,11 @@ audit:
 resources:
   requests: {cpu: 250m, memory: 256Mi}
   limits: {memory: 512Mi}
+
+# Startup budget for `serve`, which applies pending migrations before it
+# listens. periodSeconds x failureThreshold is how long a migration may take
+# before Kubernetes gives up; raise it for a large database. Liveness does
+# not start probing until the startup probe passes (OPS-CLI-CONFIG-6).
+startupProbe:
+  periodSeconds: 10
+  failureThreshold: 60   # 10 minutes

@@ -11,16 +11,22 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	neturl "net/url"
 	"os"
 	"os/signal"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/fvisic/sunder/internal/api"
 	"github.com/fvisic/sunder/internal/audit"
@@ -83,6 +89,7 @@ func run(cmd string, args []string) error {
 	// the raw environment the audit package fell back to at init.
 	audit.SetMode(cfg.AuditSealing)
 	audit.SetReadsMode(cfg.AuditReads)
+	audit.SetStaleUnsealedBound(cfg.AuditStaleUnsealed)
 	st, err := store.New(ctx, cfg.DBURL)
 	if err != nil {
 		return err
@@ -158,10 +165,17 @@ func webhookCmd(ctx context.Context, st *store.Store, args []string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := st.Pool.Exec(ctx,
-			`INSERT INTO webhooks (scope, url, secret) VALUES ($1,$2,$3)
-			 ON CONFLICT (scope) DO UPDATE SET url=EXCLUDED.url, secret=EXCLUDED.secret, created_at=now()`,
-			*scope, *url, secret); err != nil {
+		// Audited: repointing a scope's erasure webhook redirects every
+		// future notification (scope + CID) and mints a new signing secret.
+		// The URL is recorded, the secret never is.
+		if err := auditOperator(ctx, st.Pool, "webhook.set",
+			map[string]any{"scope": *scope, "url": *url}, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx,
+					`INSERT INTO webhooks (scope, url, secret) VALUES ($1,$2,$3)
+					 ON CONFLICT (scope) DO UPDATE SET url=EXCLUDED.url, secret=EXCLUDED.secret, created_at=now()`,
+					*scope, *url, secret)
+				return err
+			}); err != nil {
 			return err
 		}
 		fmt.Println("webhook signing secret (shown once, configure the receiver now):")
@@ -225,12 +239,12 @@ func clientGrantCmd(ctx context.Context, st *store.Store, args []string) error {
 		return err
 	}
 	known := knownActions()
+	if *role != "" && *addActions != "" {
+		return fmt.Errorf("-role and -add-actions are mutually exclusive")
+	}
+	var preset []string
 	if *role != "" {
-		if *addActions != "" {
-			return fmt.Errorf("-role and -add-actions are mutually exclusive")
-		}
-		preset := auth.RoleActions(*role)
-		if preset == nil {
+		if preset = auth.RoleActions(*role); preset == nil {
 			return fmt.Errorf("unknown role %q", *role)
 		}
 		// L10: a preset that includes admin.unlock (admin does) must not land
@@ -238,13 +252,10 @@ func clientGrantCmd(ctx context.Context, st *store.Store, args []string) error {
 		if err := checkUnlockAgainstExpiry(ctx, st, *id, preset); err != nil {
 			return err
 		}
-		if _, err := st.Pool.Exec(ctx,
-			`UPDATE clients SET role=$2, allowed_actions=$3 WHERE client_id=$1`,
-			*id, *role, preset); err != nil {
-			return err
-		}
-	} else if *addActions != "" {
-		add := splitCSV(*addActions)
+	}
+	var add []string
+	if *addActions != "" {
+		add = splitCSV(*addActions)
 		for _, a := range add {
 			if !known[a] {
 				return fmt.Errorf("unknown action %q", a)
@@ -255,31 +266,109 @@ func clientGrantCmd(ctx context.Context, st *store.Store, args []string) error {
 		if err := checkUnlockAgainstExpiry(ctx, st, *id, add); err != nil {
 			return err
 		}
+	}
+	var attrs []string
+	if !*clearAttrs && *attributes != "" {
+		if attrs = splitCSV(*attributes); len(attrs) == 0 {
+			return fmt.Errorf("-attributes given but empty after parsing; use -clear-attributes to allow all")
+		}
+	}
+
+	// ONE transaction for every UPDATE plus the audit row. It used to be up
+	// to three independent autocommit statements with an unconditional
+	// success print: a failure between them left a half-applied grant
+	// reported as success, and a typo'd client id reported success while
+	// changing nothing (OPS-CLI-CONFIG-10). Escalating a credential is also
+	// exactly the mutation the chain must carry - THREAT-MODEL calls
+	// reviewing grants a human duty, and a review needs something
+	// tamper-evident to review (OPS-CLI-CONFIG-3).
+	tx, err := st.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Existence is checked under a row lock, so the audit row cannot
+	// describe a client that vanished mid-command.
+	var found int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM (SELECT 1 FROM clients WHERE client_id=$1 FOR UPDATE) x`, *id).Scan(&found); err != nil {
+		return err
+	}
+	if found == 0 {
+		return fmt.Errorf("no such client %q", *id)
+	}
+
+	detail := map[string]any{"client_id": *id}
+	if preset != nil {
+		if _, err := tx.Exec(ctx,
+			`UPDATE clients SET role=$2, allowed_actions=$3 WHERE client_id=$1`,
+			*id, *role, preset); err != nil {
+			return err
+		}
+		detail["role"], detail["allowed_actions"] = *role, preset
+	}
+	if add != nil {
 		// Union the added actions into the current set; role becomes custom.
-		if _, err := st.Pool.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE clients
 			   SET allowed_actions = (SELECT array_agg(DISTINCT a) FROM unnest(allowed_actions || $2::text[]) a),
 			       role = 'custom'
 			 WHERE client_id = $1`, *id, add); err != nil {
 			return err
 		}
+		detail["added_actions"], detail["role"] = add, "custom"
 	}
 	if *clearAttrs {
-		if _, err := st.Pool.Exec(ctx, `UPDATE clients SET allowed_attributes=NULL WHERE client_id=$1`, *id); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE clients SET allowed_attributes=NULL WHERE client_id=$1`, *id); err != nil {
 			return err
 		}
-	} else if *attributes != "" {
-		attrs := splitCSV(*attributes)
-		if len(attrs) == 0 {
-			return fmt.Errorf("-attributes given but empty after parsing; use -clear-attributes to allow all")
-		}
-		if _, err := st.Pool.Exec(ctx, `UPDATE clients SET allowed_attributes=$2 WHERE client_id=$1`,
+		detail["allowed_attributes"] = nil
+	} else if attrs != nil {
+		if _, err := tx.Exec(ctx, `UPDATE clients SET allowed_attributes=$2 WHERE client_id=$1`,
 			*id, attrs); err != nil {
 			return err
 		}
+		detail["allowed_attributes"] = attrs
+	}
+	if err := audit.AppendTx(ctx, tx, audit.Entry{
+		ClientID: "operator", Action: "client.grant", Detail: detail,
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
 	}
 	fmt.Printf("client %q updated\n", *id)
 	return nil
+}
+
+// auditOperator writes one chained record for a privileged operator
+// mutation, inside the transaction that performs it.
+//
+// Auditing used to be added per command as each was written - rotate-secret,
+// issuer add/remove and bootstrap had it; creating a credential with an
+// arbitrary action set, escalating one, repointing a scope's erasure webhook,
+// retiring a key version (which DELETEs person_tokens) and setting a
+// retention TTL that wipes blobs en masse did not. `verify-audit` then
+// reported an intact chain across a period in which the whole authorisation
+// model was rewritten (OPS-CLI-CONFIG-3). Detail carries configuration
+// metadata only - never a secret, never personal data.
+func auditOperator(ctx context.Context, pool *pgxpool.Pool, action string, detail map[string]any, mutate func(pgx.Tx) error) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := mutate(tx); err != nil {
+		return err
+	}
+	if err := audit.AppendTx(ctx, tx, audit.Entry{
+		ClientID: "operator", Action: action, Detail: detail,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // knownActions is the authoritative action allowlist for CLI validation.
@@ -314,10 +403,16 @@ func retentionCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 		if *scope == "" || *days < 0 {
 			return fmt.Errorf("-scope and -days are required")
 		}
-		if _, err := st.Pool.Exec(ctx,
-			`INSERT INTO retention_policies (scope, contacts_ttl_days) VALUES ($1,$2)
-			 ON CONFLICT (scope) DO UPDATE SET contacts_ttl_days=EXCLUDED.contacts_ttl_days`,
-			*scope, *days); err != nil {
+		// Audited: a TTL change is the instruction that makes the next
+		// sweep wipe blobs en masse.
+		if err := auditOperator(ctx, st.Pool, "retention.set",
+			map[string]any{"scope": *scope, "contacts_ttl_days": *days}, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx,
+					`INSERT INTO retention_policies (scope, contacts_ttl_days) VALUES ($1,$2)
+					 ON CONFLICT (scope) DO UPDATE SET contacts_ttl_days=EXCLUDED.contacts_ttl_days`,
+					*scope, *days)
+				return err
+			}); err != nil {
 			return err
 		}
 		fmt.Printf("retention for scope %s: blobs older than %d day(s) are wiped by `sunder retention run`\n", *scope, *days)
@@ -332,6 +427,17 @@ func retentionCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 			return err
 		}
 		portalRows, err := service.PrunePortal(ctx, st.Pool)
+		if err != nil {
+			return err
+		}
+		// Claims abandoned by a worker that died mid-send. The workers reap
+		// on every sweep too; this is the operator-driven path and the one
+		// that recovers rows stranded before the reaper existed (H1).
+		strandedEvents, err := service.ReapStrandedErasureEvents(ctx, st.Pool, cfg.WorkerClaimTTL)
+		if err != nil {
+			return err
+		}
+		strandedMail, err := service.ReapStrandedMail(ctx, st.Pool, cfg.WorkerClaimTTL)
 		if err != nil {
 			return err
 		}
@@ -365,6 +471,8 @@ func retentionCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 		}
 		fmt.Printf("retention sweep: %d blob(s) wiped, %d expired OTI row(s) pruned, %d consumed envelope(s) pruned, %d portal row(s) pruned, %d unlock token(s) pruned, %d value token(s) pruned, %d version(s) pruned, %d share(s) pruned, %d file(s) garbage-collected\n",
 			wiped, otiPruned, envelopes, portalRows, unlockRows, valueRows, versionRows, shareRows, filesReaped)
+		fmt.Printf("stranded worker claims requeued: %d erasure event(s), %d portal mail row(s)\n",
+			strandedEvents, strandedMail)
 		fmt.Println("(audit rows are never pruned - the chain and its anchors are the tamper evidence)")
 		return nil
 	default:
@@ -375,19 +483,76 @@ func retentionCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 // dsrCmd operates the erasure delivery queue.
 func dsrCmd(ctx context.Context, cfg config.Config, st *store.Store, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: sunder dsr deliver | dsr events")
+		return fmt.Errorf("usage: sunder dsr deliver | dsr events | dsr requeue | dsr cascade-status")
 	}
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
 	switch args[0] {
 	case "deliver":
-		g := &service.GDPR{Pool: st.Pool, HTTPTimeout: cfg.WebhookTimeout, MaxAttempts: cfg.WebhookMaxAttempts}
+		g := &service.GDPR{Pool: st.Pool, HTTPTimeout: cfg.WebhookTimeout,
+			MaxAttempts: cfg.WebhookMaxAttempts, ClaimTTL: cfg.WorkerClaimTTL}
 		n, err := g.DeliverPending(ctx)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("delivered %d erasure event(s)\n", n)
+		return nil
+	case "requeue":
+		// Operator recovery for a claim stranded by a worker that died
+		// between the committed claim and the settle. `-all` ignores the
+		// grace period, for the case where the operator KNOWS no worker is
+		// running (e.g. after a crash loop).
+		fs := flag.NewFlagSet("dsr requeue", flag.ContinueOnError)
+		all := fs.Bool("all", false, "requeue every SENDING row regardless of claim age")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		ttl := cfg.WorkerClaimTTL
+		if *all {
+			ttl = time.Nanosecond
+		}
+		n, err := service.ReapStrandedErasureEvents(ctx, st.Pool, ttl)
+		if err != nil {
+			return err
+		}
+		m, err := service.ReapStrandedMail(ctx, st.Pool, ttl)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("requeued %d erasure event(s) and %d portal mail row(s) stranded in SENDING\n", n, m)
+		return nil
+	case "cascade-status":
+		// What an interrupted cascade left outstanding. Before the durable
+		// plan existed this was unanswerable: the parent's erasure deleted
+		// person_links, so nothing named the children (GDPR-ERASURE-4).
+		rows, err := st.Pool.Query(ctx, `
+			SELECT ec.erasure_id, ec.child_cid, ec.link_type, ec.status,
+			       COALESCE(ec.done_at::text,'')
+			  FROM erasure_cascade ec
+			 ORDER BY ec.status, ec.erasure_id DESC, ec.child_cid LIMIT 200`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		pending := 0
+		for rows.Next() {
+			var erasureID int64
+			var childCID, linkType, status, doneAt string
+			if err := rows.Scan(&erasureID, &childCID, &linkType, &status, &doneAt); err != nil {
+				return err
+			}
+			if status == "PENDING" {
+				pending++
+			}
+			fmt.Printf("erasure=%d child=%s type=%-9s %s %s\n", erasureID, childCID, linkType, status, doneAt)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if pending > 0 {
+			fmt.Printf("\n%d child erasure(s) OUTSTANDING - re-issue POST /v1/dsr/erase for the parent cid to resume\n", pending)
+		}
 		return nil
 	case "events":
 		rows, err := st.Pool.Query(ctx,
@@ -445,6 +610,15 @@ func anchorCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 	}
 	caFile := resolveCA(*ca, cfg)
 	root, stampedAt, err := audit.Anchor(ctx, st.Pool, cfg.TSAURL, caFile, *out)
+	if errors.Is(err, audit.ErrAlreadyAnchored) {
+		// Not a failure: the head has not moved since the last run, so
+		// there is nothing new to attest. Re-stamping it would write a
+		// second anchor row whose export can never match the first
+		// (AUDIT-CHAIN-4), which is why this is a no-op rather than a
+		// duplicate.
+		fmt.Printf("chain head %s... is already anchored - nothing new to stamp\n", root[:16])
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -479,36 +653,30 @@ func verifyAuditCmd(ctx context.Context, cfg config.Config, st *store.Store, arg
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
-	broken, reason, pending, err := audit.Verify(ctx, st.Pool)
+	// The same verdict function the HTTP endpoint uses, so the two surfaces
+	// cannot answer differently for the same database (AUDIT-CHAIN-3).
+	rep, err := audit.VerifyAll(ctx, st.Pool)
 	if err != nil {
 		return err
 	}
-	if broken != 0 {
-		return fmt.Errorf("audit chain BROKEN at chain position %d: %s", broken, reason)
+	if !rep.OK {
+		switch {
+		case rep.BrokenChainSeq != 0:
+			return fmt.Errorf("audit chain BROKEN at chain position %d: %s", rep.BrokenChainSeq, rep.Reason)
+		case rep.BadHour != "":
+			return fmt.Errorf("read buckets BROKEN for hour %s: %s", rep.BadHour, rep.Reason)
+		default:
+			return fmt.Errorf("%s", rep.Reason)
+		}
 	}
 	// The sealing window must never be discoverable only by reading code:
 	// the mode and the pending count are printed on every verification.
 	// Pending rows are information, not a break - they are protected by the
 	// append-only trigger and enter the chain on the sealer's next pass.
-	fmt.Printf("audit chain: intact (sealing mode %s, %d unsealed rows pending)\n",
-		audit.Mode(), pending)
-	// Read buckets (P4.2): every sealed hour's digest is recomputed from
-	// the stored buckets and checked against its chained hourly row.
-	badHour, bucketReason, pendingHours, err := audit.VerifyReadBuckets(ctx, st.Pool)
-	if err != nil {
-		return err
-	}
-	if badHour != "" {
-		return fmt.Errorf("read buckets BROKEN for hour %s: %s", badHour, bucketReason)
-	}
+	fmt.Printf("audit chain: intact (sealing mode %s, %d unsealed rows pending, oldest %.0fs)\n",
+		rep.Sealing, rep.Pending, rep.OldestPendingSeconds)
 	fmt.Printf("read buckets: intact (read mode %s, %d finished hours awaiting close)\n",
-		audit.ReadsMode(), pendingHours)
-	// Under sync mode, though, pending rows cannot be in-flight work: sync
-	// seals at insert and the server drains before serving. A backlog here
-	// means rows stranded outside the chain - fail visibly, with the fix.
-	if audit.Mode() == audit.ModeSync && pending > 0 {
-		return fmt.Errorf("%d unsealed rows under sync sealing: these are outside the chain and will not seal on their own; run `sunder sealer -once` with SUNDER_AUDIT_SEALING=async to drain them", pending)
-	}
+		rep.Reads, rep.PendingHours)
 
 	caFile := resolveCA(*caFlag, cfg)
 	if *anchorsDir == "" && cfg.AnchorDir != "" {
@@ -567,7 +735,7 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
-	ring := &service.KeyRing{Pool: st.Pool}
+	ring := &service.KeyRing{Pool: st.Pool, RetireGrace: cfg.KeyRetireGrace}
 	switch args[0] {
 	case "rotate":
 		fs := flag.NewFlagSet("keys rotate", flag.ContinueOnError)
@@ -596,16 +764,23 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		fs := flag.NewFlagSet("keys retire", flag.ContinueOnError)
 		kind := fs.String("kind", "", "key kind")
 		version := fs.String("version", "", "version to retire (e.g. v1)")
+		force := fs.Bool("force", false, "retire a pii-kek version still referenced by sealed data (that data becomes UNREADABLE)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
 		if *kind == "" || *version == "" {
 			return fmt.Errorf("-kind and -version are required")
 		}
-		if err := ring.Retire(ctx, *kind, *version); err != nil {
+		if err := ring.RetireWithForce(ctx, *kind, *version, *force); err != nil {
 			return err
 		}
-		fmt.Printf("retired %s/%s - it no longer matches lookups nor verifies tokens\n", *kind, *version)
+		fmt.Printf("retired %s/%s\n", *kind, *version)
+		// The propagation bound, as `rotate` already prints. Invalidate() is
+		// process-local, so a RUNNING replica keeps accepting the retired
+		// version until its ring cache expires - and for a retirement (an
+		// incident response, not routine rotation latency) that window is
+		// the thing the operator needs to know (DOCS-12).
+		fmt.Println("running servers stop accepting this version within 30s (keyring cache TTL) - restart the fleet to cut it off immediately")
 		fmt.Println("(for hmac kinds: rows still stored under this version stop matching; re-key first)")
 		return nil
 	case "rekey":
@@ -616,7 +791,7 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 			return err
 		}
 		eng := api.OpenEngine(cfg)
-		ring := &service.KeyRing{Pool: st.Pool}
+		ring := &service.KeyRing{Pool: st.Pool, RetireGrace: cfg.KeyRetireGrace}
 		if err := ring.EnsureAll(ctx, eng); err != nil {
 			return err
 		}
@@ -631,7 +806,19 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		}
 		fmt.Printf("rekey sweep: %d person(s), %d token(s) written, %d blob(s) re-encrypted, %d blob(s) undecryptable\n",
 			stats.Persons, stats.TokensInserted, stats.BlobsReenc, stats.Skipped)
-		fmt.Println("old versions can now be retired: sunder keys retire -kind <kind> -version <v>")
+		if stats.Raced > 0 {
+			// NOT a warning to be ignored: these rows were written by a
+			// concurrent request between this sweep's read and its write, so
+			// they are still on the old key/algorithm (TOKENS-LOOKUP-2).
+			fmt.Printf("  %d blob(s) were modified concurrently and NOT converted - re-run the sweep to pick them up\n",
+				stats.Raced)
+		}
+		fmt.Printf("  vaults re-wrapped: %d value token(s), %d record key(s), %d version blob(s), %d portal outbox row(s)\n",
+			stats.ValueTokensRewrapped, stats.RecordKeysRewrapped, stats.VersionsRewrapped, stats.OutboxRewrapped)
+		// Not a promise that retirement is safe - `keys retire` decides that
+		// for itself by refusing while any store still references the
+		// version (GAP-1).
+		fmt.Println("retire an old version with: sunder keys retire -kind <kind> -version <v>")
 		return nil
 	case "shamir-init":
 		fs := flag.NewFlagSet("keys shamir-init", flag.ContinueOnError)
@@ -804,16 +991,31 @@ func clientCmd(ctx context.Context, st *store.Store, args []string) error {
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
-	cred, err := auth.Create(ctx, st.Pool, auth.Client{
-		ID: *id, Name: *name, Scope: *scope,
-		AllowedActions:      acts,
-		Role:                *role,
-		AllowedAttributes:   allowedAttrs,
-		AllowedPurposes:     splitCSV(*purposes),
-		RateLimit:           *rate,
-		CredentialExpiresAt: expiresAt,
-	})
-	if err != nil {
+	// Creating a credential with an arbitrary action set is the mutation
+	// that decides who may read personal data; the chain has to carry it
+	// (OPS-CLI-CONFIG-3). The client row and its record commit together.
+	var cred string
+	expires := ""
+	if expiresAt != nil {
+		expires = expiresAt.UTC().Format(time.RFC3339)
+	}
+	if err := auditOperator(ctx, st.Pool, "client.create", map[string]any{
+		"client_id": *id, "scope": *scope, "role": *role,
+		"allowed_actions": acts, "allowed_purposes": splitCSV(*purposes),
+		"allowed_attributes": allowedAttrs, "rate_limit": *rate, "expires_at": expires,
+	}, func(tx pgx.Tx) error {
+		var cerr error
+		cred, cerr = auth.CreateTx(ctx, tx, auth.Client{
+			ID: *id, Name: *name, Scope: *scope,
+			AllowedActions:      acts,
+			Role:                *role,
+			AllowedAttributes:   allowedAttrs,
+			AllowedPurposes:     splitCSV(*purposes),
+			RateLimit:           *rate,
+			CredentialExpiresAt: expiresAt,
+		})
+		return cerr
+	}); err != nil {
 		return err
 	}
 	fmt.Println("credential (shown once, store it now):")
@@ -1033,7 +1235,15 @@ func bootstrapCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 		"comma-separated purposes for the admin client")
 	credFile := fs.String("credential-file", os.Getenv("SUNDER_BOOTSTRAP_CREDENTIAL_FILE"),
 		"unattended mode: file the credential is written to (created 0600; must not be a stream)")
-	ttl := fs.String("ttl", os.Getenv("SUNDER_BOOTSTRAP_TTL"), "credential lifetime (e.g. 90d); empty = non-expiring")
+	// The bootstrap admin holds admin.unlock, and a NON-EXPIRING credential
+	// holding admin.unlock is the exact state every other grant path refuses
+	// by name - it makes the bulk-read second factor a permanent
+	// self-service dump and removes any forced rotation of the omnipotent
+	// credential (AUTHZ-2). A concrete default is what makes the promise
+	// true on the default provisioning path; an operator who explicitly
+	// passes an empty -ttl now gets a loud refusal rather than that state.
+	ttl := fs.String("ttl", getenvDefault("SUNDER_BOOTSTRAP_TTL", "90d"),
+		"credential lifetime (e.g. 90d); empty = non-expiring, which admin.unlock forbids")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1058,7 +1268,11 @@ func bootstrapCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 	}
 	eng := api.OpenEngine(cfg)
 	ring := &service.KeyRing{Pool: st.Pool}
-	if err := ring.EnsureAll(ctx, eng); err != nil {
+	// `bootstrap` is the explicit "create this vault" act, so it is the one
+	// command allowed to mint. The mint itself still logs a WARN naming the
+	// key, which is what the DR runbook's restore step 3 tells the operator
+	// to watch for (OPS-CLI-CONFIG-1).
+	if err := ring.EnsureAllAllowingMint(ctx, eng); err != nil {
 		return fmt.Errorf("key bootstrap: %w", err)
 	}
 
@@ -1202,6 +1416,46 @@ func sealerCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 		return nil
 	}
 
+	// Liveness. The sealer deliberately logs and CONTINUES on error, so a
+	// process that can no longer reach the database (or that lost UPDATE on
+	// `audit`) stays Running and Ready forever while the unsealed window
+	// grows without bound - the one component whose absence silently
+	// disables tamper evidence shipped with no probe at all
+	// (OPS-CLI-CONFIG-8). /healthz answers 200 only while the last
+	// SUCCESSFUL pass is recent, so a wedged sealer is restarted.
+	//
+	// An HTTP endpoint rather than a heartbeat file: the runtime image is
+	// distroless, so an exec probe has no shell to run.
+	var lastOK atomic.Int64
+	lastOK.Store(time.Now().UnixNano())
+	staleAfter := cfg.AuditSealInterval * 20
+	if staleAfter < time.Minute {
+		staleAfter = time.Minute
+	}
+	if addr := getenvDefault("SUNDER_SEALER_HEALTH_ADDR", ""); addr != "" {
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+			age := time.Since(time.Unix(0, lastOK.Load()))
+			if age > staleAfter {
+				http.Error(w, fmt.Sprintf("no successful seal pass for %s", age.Truncate(time.Second)),
+					http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte("ok\n"))
+		})
+		hs := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := hs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				fmt.Fprintln(os.Stderr, "sealer health listener:", err)
+			}
+		}()
+		defer func() {
+			shCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = hs.Shutdown(shCtx)
+		}()
+		fmt.Printf("sealer: health endpoint on %s (stale after %s)\n", addr, staleAfter)
+	}
 	fmt.Printf("sealer: interval %s, delay %s, batch %d, reads %s\n",
 		cfg.AuditSealInterval, cfg.AuditSealDelay, cfg.AuditSealBatch, audit.ReadsMode())
 	ticker := time.NewTicker(cfg.AuditSealInterval)
@@ -1228,6 +1482,7 @@ func sealerCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 			if _, err := audit.CloseReadBuckets(ctx, st.Pool); err != nil && ctx.Err() == nil {
 				fmt.Fprintln(os.Stderr, "sealer (bucket close):", err)
 			}
+			lastOK.Store(time.Now().UnixNano())
 		}
 	}
 }

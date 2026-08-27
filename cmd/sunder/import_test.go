@@ -64,7 +64,7 @@ func TestImportCmd(t *testing.T) {
 	// The imported contact resolves through the SERVICE lookup path with
 	// the same keys the importer used.
 	eng := api.OpenEngine(cfg)
-	ring := &service.KeyRing{Pool: st.Pool}
+	ring := &service.KeyRing{Pool: st.Pool, RetireGrace: -1}
 	contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: crypto.NewPIIBox(eng), Ring: ring}
 	client := &auth.Client{ID: "crm", Scope: "crm",
 		AllowedActions: []string{auth.ActLookup, auth.ActAttributesRead}, AllowedPurposes: []string{"support"}}
@@ -297,7 +297,7 @@ func TestImportMintsDerivedTokens(t *testing.T) {
 	// The imported contact is findable through the fuzzy/partial paths of
 	// the same service the API uses.
 	eng := api.OpenEngine(cfg)
-	ring := &service.KeyRing{Pool: st.Pool}
+	ring := &service.KeyRing{Pool: st.Pool, RetireGrace: -1}
 	contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: crypto.NewPIIBox(eng), Ring: ring,
 		FuzzyName: true, PhoneSuffix: true}
 	client := &auth.Client{ID: "crm", Scope: "crm", AllowedActions: []string{auth.ActLookup}}
@@ -353,7 +353,7 @@ func TestImportFailsClosedOnBrokenKeystore(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	cfg := config.Config{Keystore: "file", KeystorePath: dir}
+	cfg := config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: dir}
 	f := filepath.Join(t.TempDir(), "c.jsonl")
 	if err := os.WriteFile(f, []byte(`{"email":"x@example.com"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -478,7 +478,7 @@ func TestImportDedupsAcrossKeyRotation(t *testing.T) {
 	// Rotate BOTH dedup identifier keys: the stored tokens are now under
 	// RETIRING versions while a fresh import tokenizes with the new ACTIVE.
 	eng := api.OpenEngine(cfg)
-	ring := &service.KeyRing{Pool: st.Pool}
+	ring := &service.KeyRing{Pool: st.Pool, RetireGrace: -1}
 	if err := ring.EnsureAll(ctx, eng); err != nil {
 		t.Fatal(err)
 	}

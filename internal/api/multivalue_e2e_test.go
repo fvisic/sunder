@@ -121,9 +121,14 @@ func TestRetirePurgesTokenRows(t *testing.T) {
 	grantLookup(t, e, "crm")
 	ctx := context.Background()
 
-	rec, _ := e.do(t, e.credCRM, "POST", "/v1/contacts", map[string]any{"email": "purge@example.com"})
+	rec, out := e.do(t, e.credCRM, "POST", "/v1/contacts", map[string]any{"email": "purge@example.com"})
 	if rec.Code != 201 {
 		t.Fatal(rec.Code)
+	}
+	original := out["cid"]
+	var personsBefore int
+	if err := e.srv.Store.Pool.QueryRow(ctx, `SELECT count(*) FROM persons`).Scan(&personsBefore); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := e.srv.Contacts.Ring.Rotate(ctx, OpenEngine(e.srv.Cfg), "hmac-email"); err != nil {
 		t.Fatal(err)
@@ -144,10 +149,26 @@ func TestRetirePurgesTokenRows(t *testing.T) {
 	if rec.Code != 404 {
 		t.Fatalf("v1-only identifier must stop matching after retire: %d", rec.Code)
 	}
-	// Re-registration under v2 restores it.
-	rec, _ = e.do(t, e.credCRM, "POST", "/v1/contacts", map[string]any{"email": "purge@example.com"})
+	// Re-registration under v2 restores it - as a NEW person. That fork is
+	// the real consequence of retiring the only key version an identifier
+	// was stored under, and the test used to discard the returned cid and
+	// never count `persons`, so it was neither asserted nor documented
+	// (TESTS-16). Assert it explicitly: it is a behaviour a maintainer must
+	// change deliberately, not discover.
+	rec, out = e.do(t, e.credCRM, "POST", "/v1/contacts", map[string]any{"email": "purge@example.com"})
 	if rec.Code != 201 {
 		t.Fatal(rec.Code)
+	}
+	if out["cid"] == original {
+		t.Fatal("unexpected: the pre-retire person was reused - if Retire now re-mints identifier tokens under the newest ACTIVE version, this test and the docs both need updating")
+	}
+	var personsAfter int
+	if err := e.srv.Store.Pool.QueryRow(ctx, `SELECT count(*) FROM persons`).Scan(&personsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if personsAfter != personsBefore+1 {
+		t.Fatalf("re-registration after a retire forks the person: expected %d persons, got %d",
+			personsBefore+1, personsAfter)
 	}
 	rec, _ = e.do(t, e.credCRM, "POST", "/v1/lookup", map[string]string{"email": "purge@example.com"})
 	if rec.Code != 200 {

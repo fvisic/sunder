@@ -120,7 +120,21 @@ sunder keys rekey -batch 500              # converts the backlog; rerun until
                                            # "0 blob(s) re-encrypted"
 ```
 
-Verify with `SELECT pii_alg, count(*) FROM cids WHERE pii_encrypted IS NOT NULL GROUP BY pii_alg;`.
+Verify **every** pii-kek-sealed store, not just `cids` - `value_tokens`,
+`person_record_keys`, `cid_blob_versions` and `portal_outbox` hold sealed
+data too, and checking `cids` alone reports a completed migration while the
+value vault and the record key that wraps every file DEK are still on the old
+algorithm:
+
+```sql
+SELECT 'cids' AS store, COALESCE(pii_alg,'(null)') AS alg, count(*)
+  FROM cids WHERE pii_encrypted IS NOT NULL GROUP BY 2
+UNION ALL SELECT 'cid_blob_versions', alg, count(*) FROM cid_blob_versions GROUP BY 2
+UNION ALL SELECT 'value_tokens', alg, count(*) FROM value_tokens GROUP BY 2
+UNION ALL SELECT 'person_record_keys', alg, count(*) FROM person_record_keys GROUP BY 2
+UNION ALL SELECT 'portal_outbox', alg, count(*) FROM portal_outbox GROUP BY 2
+ORDER BY 1, 2;
+```
 Full procedure, including the associated-data binding that makes a hostile
 `pii_alg` downgrade in the database fail authentication rather than decrypt
 under the wrong cipher: `docs/RUNBOOK-ALG-MIGRATION.md`.
@@ -145,3 +159,23 @@ under the wrong cipher: `docs/RUNBOOK-ALG-MIGRATION.md`.
   replicas, and an unknown-kid verification miss forces at most one reload
   per 5s (`InvalidateThrottled`), so a flood of tokens signed by an
   already-retired key cannot be used to hammer the keys table.
+
+## Rotation latency vs a retirement window
+
+Both are the same 30-second `KeyRing` cache TTL, and they are not the same
+risk.
+
+- After **`keys rotate`**, a replica may keep writing under the previous
+  ACTIVE version for up to 30s. Benign: both versions are live, and every
+  lookup matches across all live versions.
+- After **`keys retire`**, a replica may keep ACCEPTING the retired version
+  for up to 30s. If you are retiring because the key LEAKED, that is an
+  incident-response window - restart the fleet to cut it off immediately
+  rather than waiting the cache out.
+
+`keys retire` refuses a version that became `RETIRING` less than
+`SUNDER_KEY_RETIRE_GRACE` (default 60s) ago, for the opposite direction of
+the same problem: a replica still WRITING under the old version after the
+retirement's one-shot purge has run leaves search-token rows nothing will
+ever delete or match again. `-force` overrides it when you know no other
+replica is running.

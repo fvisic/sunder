@@ -79,13 +79,22 @@ sunder retention set -scope crm -days 365
 sunder retention run   # cron
 ```
 
-Wipes caller-scope blobs whose `updated_at` is older than the TTL (an actively maintained contact is never wiped just because it was first seen long ago), and prunes OTI rows expired more than 30 days. Search tokens survive a retention wipe - it is not an erasure.
+Wipes caller-scope blobs whose `updated_at` is older than the TTL (an actively maintained contact is never wiped just because it was first seen long ago), and prunes OTI rows expired more than 30 days.
+
+The sweep also deletes the person's **search tokens** - but only once
+NOTHING live remains for them anywhere: no attribute blob in any scope, no
+un-collected file, no standing share, no link, no live value token. A scope
+that still legitimately holds and serves the person's data keeps them
+resolvable. Only when the person's last datum is gone does the searchable
+identifier itself become the last datum, and then it goes too. See
+`docs/API.md` ("right to be forgotten" and the retention section) for the
+authoritative statement.
 
 ## Security notes
 
 - **Absence of a consent row is not denial.** Only an explicit `granted:false` blocks. This is deliberate: most reads happen under a contract or legitimate-interest basis that consent withdrawal must not silently break.
 - **`dsr.access` is restricted to the privacy-officer client's action grant**, not any authenticated client, because it is linkage-capable - it hands the caller every scope's pseudonym and data for one person in a single call.
 - **`dsr.export` does not apply per-attribute consent or purpose gating.** Portability is its own legal basis (Art. 20); a withdrawn marketing consent must not block the subject's right to their own data. This is why the action is granted like `scopes.issue` - privacy-officer and subject-request tooling only, never a general-purpose client.
-- **Consent decisions survive erasure**; attribute data does not. The `granted:false` accountability record stays for audit purposes even after the person is tombstoned.
+- **Consent STATE dies with the person.** Erasure deletes the `consents` rows along with everything else; the accountability record that survives is the immutable `consent.set` trail in the audit chain, which is append-only and never pruned. Query the chain, not the `consents` table, to reconstruct a lawful-basis history after an erasure.
 - **Bucketed read audit gives hour-granularity tamper evidence, not per-event.** The open bucket for the current hour can be altered by a DBA-level attacker without breaking a digest, until it seals; mutations (register, erase, consent, OTI) are always chained per event in both modes, never bucketed.
-- **Retention wipes the blob, not the search tokens or the person.** It is a data-minimization sweep, not an erasure - a later read finds an empty attribute, not a tombstoned person.
+- **Retention wipes the blob and, once nothing live remains, the search tokens - but never the person.** It is a data-minimization sweep, not an erasure: the person is not tombstoned, and a later read finds an empty attribute. A contact whose last datum has aged out does stop resolving through `POST /v1/lookup`, because keeping a keyed HMAC of their e-mail after every other trace is gone is itself a storage-limitation problem.

@@ -50,7 +50,21 @@ flowchart LR
 If `SUNDER_AUDIT_SEAL_EXTERNAL=false` (default), the API process seals
 in-process and this step is unnecessary. Set it to `true` for privilege
 separation - an API role with INSERT-only on `audit`, and a sealer role
-that may only UPDATE `prev_hash`/`hash`/`chain_seq`:
+with exactly these grants:
+
+```sql
+-- The sealer role. hash_v is part of the sealing UPDATE since migration
+-- 0033, and the same process closes read-bucket hours, which UPDATEs
+-- audit_read_buckets and INSERTs the hourly digest row into audit.
+GRANT SELECT, UPDATE (prev_hash, hash, chain_seq, hash_v) ON audit TO sunder_sealer;
+GRANT INSERT ON audit TO sunder_sealer;
+GRANT SELECT, UPDATE (sealed_at) ON audit_read_buckets TO sunder_sealer;
+GRANT USAGE, SELECT ON SEQUENCE audit_seq_seq TO sunder_sealer;
+```
+
+The sealer therefore **can** append to `audit` (it writes the hourly
+read-bucket digest), so the separation is "the API cannot seal or forge
+hashes over its own rows", not "the sealer cannot write rows".
 
 ```bash
 sunder sealer

@@ -72,12 +72,18 @@ pass, zero errors) Sunder is **+111% on writes, +69% on lookups and +61%
 on reads**, with p99 latency 2.7-3.4x lower - *while writing a hash-chained
 audit record per operation*.
 
-A later run on a 12-core server found the limit those numbers hide: the
-audit chain serializes on one advisory lock, so instance throughput is
-bounded by storage commit latency (~460 audited ops/s where `fdatasync`
-runs at 2,000/s) and does not scale past about four concurrent clients.
-Per-request latency is unaffected and stays ahead. The benchmark README
-carries both runs, the measured lock contention, and the design options.
+A later run on a 12-core server found the limit those numbers hide: under
+**synchronous** audit sealing the chain serializes on one advisory lock, and
+that lock - not storage commit latency - is the ceiling. Wait-event sampling
+puts 117 of 124 samples in `Lock/advisory` against 3 in `IO/WALSync`, so
+faster disks do not lift it. (An earlier version of this paragraph blamed
+`fdatasync`; that conclusion was measured and withdrawn.)
+
+Asynchronous sealing - the default since P4.1 - removes the lock from the
+request path entirely: appends take no lock and a single sealer chains
+settled rows in batches, at the cost of a bounded window in which a row is
+not yet in the chain. `docs/THREAT-MODEL.md` states that trade-off; the
+benchmark README carries both runs and the measured contention.
 
 ## What you get
 

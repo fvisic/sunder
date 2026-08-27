@@ -40,10 +40,15 @@ func newE2E(t *testing.T) *e2eEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{Keystore: "file", KeystorePath: t.TempDir()}
+	cfg := config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}
 	srv, err := New(cfg, st)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Erase dispatches its webhook delivery DETACHED from the request (H1),
+	// so the test must not tear the pool down under it.
+	if srv.GDPR != nil {
+		t.Cleanup(srv.GDPR.Drain)
 	}
 	return &e2eEnv{srv: srv, credCRM: credCRM, credDWH: credDWH}
 }

@@ -43,17 +43,34 @@ Supported algorithms: `aes256gcm` (default), `xchacha20poly1305`.
    ```
 
    The sweep decrypts each blob with its stored key/algorithm and re-encrypts
-   under the newest key and the configured algorithm. It is idempotent and
+   under the newest key and the configured algorithm. It covers **every**
+   pii-kek-sealed store: `cids`, `cid_blob_versions`, `value_tokens`,
+   `person_record_keys` and `portal_outbox`. It is idempotent and
    resumable - rerun until `blob(s) re-encrypted` reports `0`.
 
-4. **Verify:**
+   A row the sweep found modified by a concurrent request between its read
+   and its write is reported separately as `blob(s) were modified
+   concurrently and NOT converted`. That is not a warning to skim past: those
+   rows are still on the old algorithm, so rerun until it too reports `0`.
+
+4. **Verify - every store, not just `cids`:**
 
    ```sql
-   SELECT pii_alg, count(*) FROM cids WHERE pii_encrypted IS NOT NULL GROUP BY pii_alg;
+   SELECT 'cids' AS store, COALESCE(pii_alg,'(null)') AS alg, count(*)
+     FROM cids WHERE pii_encrypted IS NOT NULL GROUP BY 2
+   UNION ALL SELECT 'cid_blob_versions', alg, count(*) FROM cid_blob_versions GROUP BY 2
+   UNION ALL SELECT 'value_tokens', alg, count(*) FROM value_tokens GROUP BY 2
+   UNION ALL SELECT 'person_record_keys', alg, count(*) FROM person_record_keys GROUP BY 2
+   UNION ALL SELECT 'portal_outbox', alg, count(*) FROM portal_outbox GROUP BY 2
+   ORDER BY 1, 2;
    ```
 
-   Expect a single row with the new algorithm. Spot-check a read:
-   `GET /v1/contacts/{cid}/attributes/...` on a pre-migration contact.
+   Expect the new algorithm in every row. Checking `cids` alone is what let
+   an earlier version of this runbook report a completed migration while the
+   F4 value vault and the record key that wraps every file DEK were still on
+   the deprecated AEAD. Spot-check a read:
+   `GET /v1/contacts/{cid}/attributes/...` on a pre-migration contact, and a
+   detokenization of a pre-migration value token.
 
 5. **Retire the old key** once nothing references it:
 

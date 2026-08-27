@@ -269,6 +269,16 @@ func CreateTx(ctx context.Context, tx pgx.Tx, c Client) (string, error) {
 	if !clientIDPattern.MatchString(c.ID) {
 		return "", fmt.Errorf("client id must match %s", clientIDPattern)
 	}
+	// The unlock guard belongs on EVERY insert path, not just Create's.
+	// CreateTx was extracted from Create for bootstrap's transactional needs
+	// and this call was not carried across, so `sunder bootstrap` - the
+	// default provisioning path for every deployment - minted a
+	// NON-EXPIRING credential holding admin.unlock: exactly the state
+	// `client create`, `client grant` and `client rotate-secret -no-expiry`
+	// all refuse by name (AUTHZ-2).
+	if err := ValidateUnlockGrant(c.AllowedActions, c.CredentialExpiresAt); err != nil {
+		return "", err
+	}
 	secret, err := crypto.NewClientSecret()
 	if err != nil {
 		return "", err

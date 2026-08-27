@@ -275,8 +275,12 @@ purpose-gated, because portability is its own legal basis. That makes it a
 bulk read, to be granted as sparingly as `scopes.issue`.
 
 **Retention** is a per-scope TTL keyed on last activity, applied by a
-scheduled run. Search tokens survive a retention wipe, because retention is
-not erasure, and audit rows are never pruned.
+scheduled run. It wipes the blob and, once NOTHING live remains for the
+person anywhere - no blob in any scope, no un-collected file, no standing
+share, no link, no live value token - their search tokens too: keeping a
+keyed HMAC of someone's e-mail after every other trace is gone is itself a
+storage-limitation problem. The person is not tombstoned (retention is not
+erasure), and audit rows are never pruned.
 
 **The self-service privacy portal** lets a person see everything every scope
 stores about them, flip consents, and erase, without going through your

@@ -192,3 +192,62 @@ func TestAuditSurfaceRateLimitAndQueryErrors(t *testing.T) {
 		t.Fatalf("chain on a broken table must 500, got %d", rec.Code)
 	}
 }
+
+// AUDIT-CHAIN-3: the HTTP verdict must cover read buckets. It did not, so
+// the surface most likely to be wired to alerting answered ok:true while
+// `sunder verify-audit` reported the read log - where lookup,
+// attributes.read, files.read, shares.fetch, tokens.read and versions live -
+// as tampered.
+func TestAuditVerifyCoversReadBuckets(t *testing.T) {
+	e, credAuditor := auditEnv(t)
+	ctx := context.Background()
+	if audit.ReadsMode() != audit.ReadsBucketed {
+		t.Skip("read buckets are only attested under SUNDER_AUDIT_READS=bucketed")
+	}
+	registerFilip(t, e)
+
+	// A finished hour, sealed and chained.
+	if _, err := e.srv.Store.Pool.Exec(ctx,
+		`INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count, first_seen, last_seen)
+		 VALUES ('crm','op1','CID-A','attributes.read', date_trunc('hour', now()-interval '2 hours'), 7, now(), now())`); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := audit.CloseReadBuckets(ctx, e.srv.Store.Pool); err != nil || n != 1 {
+		t.Fatalf("close: %d %v", n, err)
+	}
+	if _, err := audit.SealOnce(ctx, e.srv.Store.Pool, 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	rec, out := e.doRaw(t, credAuditor, "GET", "/v1/admin/audit/verify")
+	if rec.Code != http.StatusOK || out["ok"] != true {
+		t.Fatalf("clean state must verify: %d %s", rec.Code, rec.Body.String())
+	}
+	if out["reads"] == nil {
+		t.Fatalf("the verdict must say which read mode it covers: %s", rec.Body.String())
+	}
+
+	// Tamper with the sealed bucket. The per-record chain is untouched, so
+	// only the bucket digest can catch it.
+	if _, err := e.srv.Store.Pool.Exec(ctx, `ALTER TABLE audit_read_buckets DISABLE TRIGGER USER`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.srv.Store.Pool.Exec(ctx,
+		`UPDATE audit_read_buckets SET count = 1 WHERE sealed_at IS NOT NULL`); err != nil {
+		t.Fatal(err)
+	}
+	rec, out = e.doRaw(t, credAuditor, "GET", "/v1/admin/audit/verify")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a tampered read log must be a verdict, not a 500: %d %s", rec.Code, rec.Body.String())
+	}
+	if out["ok"] != false || out["bad_hour"] == nil {
+		t.Fatalf("HTTP verify must report the tampered hour, as the CLI does: %s", rec.Body.String())
+	}
+	// And the two surfaces must agree.
+	rep, err := audit.VerifyAll(ctx, e.srv.Store.Pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.OK {
+		t.Fatal("VerifyAll and the endpoint must not disagree")
+	}
+}

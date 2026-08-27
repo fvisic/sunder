@@ -278,10 +278,10 @@ docker run -d --name bench-dbunker --network bench-net -p 127.0.0.1:3000:3000 \
 
 # 3. Run (fresh seed per round; write must precede lookup/read)
 for op in write lookup read; do
-  go run ./benchmark -target sunder     -base http://localhost:8080 -cred "$CRED" -op $op -n 5000 -c 16 -seed round1
+  SUNDER_CRED="$CRED" go run ./benchmark -target sunder     -base http://localhost:8080 -op $op -n 5000 -c 16 -seed round1
 done
 for op in write lookup read; do
-  go run ./benchmark -target databunker -base http://localhost:3000 -cred DEMO    -op $op -n 5000 -c 16 -seed round1
+  SUNDER_CRED=DEMO      go run ./benchmark -target databunker -base http://localhost:3000 -op $op -n 5000 -c 16 -seed round1
 done
 ```
 

@@ -65,6 +65,18 @@ public sealed class SunderConsentDeniedException : SunderException
         : base(code, status, detail) { }
 }
 
+/// <summary>
+/// 403 unlock_required - the credential IS entitled, but the call needs a
+/// single-use unlock token it did not present (POST /v1/admin/unlock, then
+/// X-Sunder-Unlock). Distinct from forbidden: the two call for opposite responses.
+/// </summary>
+public sealed class SunderUnlockRequiredException : SunderException
+{
+    /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
+    public SunderUnlockRequiredException(string code, int? status = null, string? detail = null)
+        : base(code, status, detail) { }
+}
+
 /// <summary>403 purpose_not_allowed - purpose outside the client's allowed purposes.</summary>
 public sealed class SunderPurposeNotAllowedException : SunderException
 {

@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -92,6 +93,14 @@ func (f *FileKeystore) Key(_ context.Context, name string) ([]byte, error) {
 	return b, nil
 }
 
+// mintedKeys counts key material created by this process, for the
+// sunder_keystore_minted_total gauge. Any non-zero value on a vault that is
+// not being bootstrapped is an incident.
+var mintedKeys atomic.Int64
+
+// MintedKeys reports how many keys this process has created.
+func MintedKeys() int64 { return mintedKeys.Load() }
+
 // Ensure generates the key if absent. The final path only ever appears via
 // an atomic rename of a fully-written temp file; an O_EXCL lock file elects
 // a single generator across processes sharing the directory.
@@ -149,6 +158,19 @@ func (f *FileKeystore) ensureLocked(_ context.Context, name string) error {
 }
 
 func (f *FileKeystore) writeKey(p string) error {
+	// The single choke point every file-driver mint funnels through. There
+	// was NO signal here at all: a process booting with a populated `keys`
+	// table and an empty keystore directory minted replacement material for
+	// versions that already had data encrypted under them, then reported
+	// healthy - /healthz 200, /readyz 200, nothing in the log. The DR
+	// runbook's restore step 3 ("if it mints a key that should have existed,
+	// you restored the wrong keystore: stop") had no way to be observed
+	// (OPS-CLI-CONFIG-1). KeyRing.EnsureAll refuses to reach this point for
+	// a version the data already references; this warning covers every other
+	// path, including a lost volume on a vault that is still empty.
+	slog.Warn("keystore: MINTING NEW key material - if this key was expected to exist, the keystore volume is lost or misconfigured and existing data is unrecoverable; stop and restore the correct keystore",
+		"path", p)
+	mintedKeys.Add(1)
 	key := make([]byte, 32)
 	if _, err := randRead(key); err != nil {
 		return err
@@ -230,6 +252,7 @@ func (v *VaultKeystore) Ensure(ctx context.Context, name string) error {
 	}
 	slog.Warn("keystore: minting NEW key material in vault; if this key was expected to exist, the mount may be wrong and existing data unrecoverable",
 		"name", name, "mount", v.Mount)
+	mintedKeys.Add(1)
 	// cas=0 makes the write fail if the secret appeared meanwhile; then the
 	// concurrent winner's key is authoritative.
 	body, _ := json.Marshal(map[string]any{

@@ -15,9 +15,6 @@ import (
 
 func (s *Server) handleShareCreate(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	in, ok := decode[struct {
 		CID          string   `json:"cid"`
 		Fields       []string `json:"fields"`
@@ -40,9 +37,6 @@ func (s *Server) handleShareCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	if err := s.Shares.Revoke(r.Context(), client, r.PathValue("uuid")); err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)
@@ -65,7 +59,9 @@ func (s *Server) handleShareFetchAuthed(w http.ResponseWriter, r *http.Request) 
 // an unauthenticated, unlimited endpoint that writes to the chain is a DoS
 // on that lock.
 func (s *Server) handleShareFetchPublic(w http.ResponseWriter, r *http.Request) {
-	ip := s.portalClientIP(r)
+	// The API listener's own header knob, not the portal's: this route is
+	// registered on the API mux (AUTHZ-5).
+	ip := s.apiClientIP(r)
 	if s.Limiter != nil && !s.Limiter.Allow("share-public:"+ip, publicShareRateLimit) {
 		s.Metrics.Inc(`sunder_ratelimited_total{client="share-public"}`)
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
