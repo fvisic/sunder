@@ -196,6 +196,30 @@ fixes generalise an existing guard rather than invent one.
 `SUNDER_API_CLIENT_IP_HEADER`, `SUNDER_SEALER_HEALTH_ADDR`. Booleans now
 accept `true/false`, `1/0`, `yes/no`, `on/off` and REFUSE anything else.
 
+### Phase 7 groundwork
+- **Cold-boot and multi-replica scenarios** run as their own CI job
+  (`ops/coldboot-scenarios.sh`): two processes migrating one empty database,
+  a second replica sharing the keystore (12/12 lookups must resolve across
+  both - what a re-minted key breaks), a key rotation under 200 concurrent
+  lookups, and a burst under the sealer. Each boots from nothing, because a
+  stack restarted onto existing data cannot reproduce any of them.
+  `docs-site/docs/admin/multi-replica.md` documents all four with sequence
+  diagrams, what an operator sees when each goes wrong, and how to recover.
+- **`ops/check-artifact-coverage.sh`** extends the shape of
+  `check-config-docs.sh` to the four artifacts that had no guard: Helm
+  reachability, Postman route coverage, SDK parity across all six languages,
+  and the docs-site mirror of the config reference. It immediately found that
+  **F4, F5 and F8 were not reachable through the Helm chart at all** - an
+  operator on Kubernetes could not enable the value vault's search knobs, the
+  file vault, public shares or attribute history. All fifteen variables are
+  now settable, and `files.storage=local` fails the render with its reason
+  rather than warning, because on a second replica it answers downloads with
+  200 and an empty body.
+- **The .NET SDK's published surface is enforced**: two of fourteen exception
+  constructors had shipped a release with no XML documentation and an
+  inconsistent signature. CS1591 is now an error in that project - with the
+  documentation file generated, the doc IS the artifact.
+
 ### Two more races the CI matrix caught during this release
 - **The file keystore could overwrite live key material.** `Ensure` reads,
   then queues on an O_EXCL lock. A caller that found no key, waited, and won

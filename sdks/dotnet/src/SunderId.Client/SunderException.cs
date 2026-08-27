@@ -54,14 +54,16 @@ public sealed class SunderForbiddenException : SunderException
 /// <summary>401 credential_expired - correct secret, past its expiry: rotate it.</summary>
 public sealed class SunderCredentialExpiredException : SunderException
 {
-    public SunderCredentialExpiredException(string code, int status, string? detail)
+    /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
+    public SunderCredentialExpiredException(string code, int? status = null, string? detail = null)
         : base(code, status, detail) { }
 }
 
 /// <summary>403 consent_denied - the data subject withdrew consent for this purpose.</summary>
 public sealed class SunderConsentDeniedException : SunderException
 {
-    public SunderConsentDeniedException(string code, int status, string? detail)
+    /// <summary>Creates the exception; see <see cref="SunderException" /> for the parameters.</summary>
+    public SunderConsentDeniedException(string code, int? status = null, string? detail = null)
         : base(code, status, detail) { }
 }
 
