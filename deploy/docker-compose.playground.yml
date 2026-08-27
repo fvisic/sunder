@@ -43,7 +43,7 @@ services:
           -purposes support,admin -rate 6000 | tail -1)
         vault=$$(/sunder client create -id pg-vault -name "Playground vault" -scope crm \
           -actions contacts.register,attributes.read,attributes.history,tokens.create,tokens.read,tokens.delete,admin.unlock,files.write,files.read,links.manage,shares.create,consent.manage,dsr.erase \
-          -purposes support -rate 6000 | tail -1)
+          -purposes support -rate 6000 -ttl 30d | tail -1)
         # Loopback URL on purpose: Sunder refuses plain-http webhooks to
         # anything but a loopback host, and that rule is worth keeping. The
         # deliver sidecar below shares the playground's network namespace,

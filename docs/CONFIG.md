@@ -202,6 +202,15 @@ security note limits it to trusted integration components) and
 `tokens.delete` on the service preset (destroying a value token is
 unrecoverable - admin keeps it).
 
+`admin.unlock` additionally requires an EXPIRING credential: `client create
+... -actions ...,admin.unlock -ttl 90d`. Granting it is refused on a
+non-expiring credential at create, at `client grant` (both `-add-actions`
+and `-role admin`, since the admin preset contains it), and by
+`rotate-secret -no-expiry` while the action is held. The unlock token
+itself is already 60-second single-use; a standing grant on a long-lived
+service credential would turn the strict search posture back into "always
+allowed, with an extra step".
+
 ## Value tokenization (F4)
 
 No configuration - the surface is gated by the `tokens.create` /
