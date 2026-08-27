@@ -22,6 +22,8 @@ sdks/java/target/
 CODE-REVIEW.md
 code_review_2.md
 PLAN.md
+# The Croatian plan is the owner's working copy - never pushed.
+PLAN.hr.md
 # IDE state
 .idea/
 
