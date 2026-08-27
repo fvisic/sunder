@@ -83,9 +83,14 @@ func (s *Server) handleScopesIssue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAttributeGet(w http.ResponseWriter, r *http.Request) {
+	client := auth.FromContext(r.Context())
 	val, err := s.Contacts.GetAttribute(r.Context(),
-		auth.FromContext(r.Context()), r.PathValue("cid"), r.PathValue("name"), r.URL.Query().Get("purpose"))
+		client, r.PathValue("cid"), r.PathValue("name"), r.URL.Query().Get("purpose"))
 	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			// Probing cids against the primary PII read is enumeration too.
+			s.noteMiss(client.ID)
+		}
 		s.logErr(r, err)
 		writeErr(w, err)
 		return

@@ -41,11 +41,6 @@ const migrateLockKey = 0x53554E4D // "SUNM"
 // simultaneous replica startups safe: the loser waits, then sees every
 // version as already applied.
 func (s *Store) Migrate(ctx context.Context) error {
-	_, err := s.Pool.Exec(ctx,
-		`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
-	if err != nil {
-		return err
-	}
 	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {
 		return err
@@ -62,6 +57,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrateLockKey); err != nil {
+		return err
+	}
+	// The bookkeeping table is created INSIDE the lock. `CREATE TABLE IF NOT
+	// EXISTS` is not atomic under concurrency - the existence check and the
+	// creation are separate steps, so two replicas booting against an empty
+	// database both pass the check and the loser fails with a duplicate key
+	// on pg_type_typname_nsp_index (a table creates its row type too). That
+	// is a crash loop on exactly the deployment this lock exists for.
+	if _, err := tx.Exec(ctx,
+		`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
 		return err
 	}
 	for _, name := range names {

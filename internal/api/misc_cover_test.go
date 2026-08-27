@@ -25,7 +25,7 @@ func TestOpenKeystoreDrivers(t *testing.T) {
 	if err := ks.Ensure(context.Background(), "hmac-email/v1"); err == nil {
 		t.Fatal("pkcs11 stub must error")
 	}
-	if _, ok := OpenKeystore(config.Config{Keystore: "file", KeystorePath: t.TempDir()}).(*crypto.CachingKeystore); !ok {
+	if _, ok := OpenKeystore(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}).(*crypto.CachingKeystore); !ok {
 		t.Fatal("file driver must be wrapped in the cache")
 	}
 }

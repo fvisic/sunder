@@ -81,11 +81,14 @@ correlate" is a test result on your screen, not a claim in a slide.
 
 | Setting | Default | Why |
 |---|---|---|
+| `SUNDER_URL` | `http://localhost:8080` | Base URL of the Sunder instance the playground drives (`-sunder`). |
+| `PLAYGROUND_SCENARIOS` | - | Directory of scenario JSON files (`-scenarios`); unset uses the ones built into the binary. |
 | `PLAYGROUND_LISTEN` | `127.0.0.1:8081` | Loopback. A non-loopback bind is **refused** unless `PLAYGROUND_PUBLIC=1` (or `-public`) is set: the process holds working credentials for the instance it demonstrates. |
 | `PLAYGROUND_RATE` | `120` req/min per IP | A reachable demo is also a way to spend someone else's database. |
 | `PLAYGROUND_CREDENTIAL_FILE` | - | `role=<client_id>.<secret>` lines, plus `webhook_secret=`. `PLAYGROUND_CRED_<ROLE>` overrides a single role. |
 | `PLAYGROUND_COOKIE_SECURE` | off | Set it when serving over TLS. |
-| `PLAYGROUND_CLIENT_IP_HEADER` | - | Behind a proxy, name the header explicitly (with `PLAYGROUND_TRUSTED_PROXY_HOPS`); a blindly trusted `X-Forwarded-For` is a rate-limit bypass. |
+| `PLAYGROUND_CLIENT_IP_HEADER` | - | Behind a proxy, name the header explicitly; a blindly trusted `X-Forwarded-For` is a rate-limit bypass. |
+| `PLAYGROUND_TRUSTED_PROXY_HOPS` | `0` | How many entries to skip from the RIGHT of that header. `0` takes the right-most, which is what the adjacent proxy appended - the left-most is whatever the caller sent, and reading it hands every requester a fresh rate-limit bucket. |
 
 Each visitor gets their own session: their own fake person (a unique
 e-mail and phone, so two visitors never dedup onto one record), their own

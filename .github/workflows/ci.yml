@@ -27,6 +27,13 @@ jobs:
             audit_reads: chained
           - audit_sealing: sync
             audit_reads: bucketed
+          # (async, chained): the fourth corner. Async sealing is the
+          # DEFAULT, so a leg that pairs it with per-event read chaining -
+          # the posture an operator picks when hour-granularity read
+          # evidence is not enough - was the one combination CI never ran
+          # (TESTS-11).
+          - audit_sealing: async
+            audit_reads: chained
     services:
       postgres:
         image: postgres:16
@@ -65,15 +72,23 @@ jobs:
       # run - so measuring the gate under -race produced a jittery number
       # right at the threshold. Run the detector for correctness, then a
       # deterministic non-race pass for the coverage number.
+      # -shuffle=on so an order dependency between tests is a failure rather
+      # than a latent assumption; -timeout so a deadlock (which is exactly
+      # what several of these tests probe for) fails loudly instead of
+      # hanging the job to its 6-hour ceiling; -count=1 so nothing is served
+      # from the build cache (TESTS-11).
       - name: Race detector
-        run: go test -race ./...
+        run: go test -race -shuffle=on -count=1 -timeout=25m ./...
       - name: Coverage gate
         run: |
-          go test -coverprofile=cover.out -coverpkg=./internal/...,./cmd/... ./...
-          TOTAL=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
-          echo "total coverage: ${TOTAL}%"
-          awk -v t="$TOTAL" 'BEGIN { exit (t >= 90.0 ? 0 : 1) }' || {
-            echo "::error::coverage ${TOTAL}% is below the 90% gate"; exit 1; }
+          go test -count=1 -timeout=25m -covermode=atomic \
+            -coverprofile=cover.out -coverpkg=./internal/...,./cmd/... ./...
+          go tool cover -func=cover.out | tail -1
+          # ops/coverage-gate.sh applies the //coverage:defensive exclusion
+          # list (see the header of that script) before comparing against the
+          # gate, and fails if a marker sits on a block that IS covered or if
+          # the excluded share grows past its ceiling.
+          ops/coverage-gate.sh cover.out 90.0
       - name: Vulnerability scan
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -205,6 +220,24 @@ jobs:
           docker compose -f deploy/docker-compose.yml \
                          -f deploy/docker-compose.playground.yml logs --tail=100 seed playground deliver
 
+  cold-boot:
+    # The conditions a customer's FIRST deployment meets and nothing else
+    # does: an empty database, an empty keystore, and two processes starting
+    # together. The migration race that crash-looped the whole stack was
+    # found by accident, because one leg happened to boot that way - this
+    # makes it deliberate. Every scenario tears down with `down -v`, so a
+    # stack restarted onto existing data can never mask a cold-boot bug.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cold-boot and multi-replica scenarios
+        run: ./ops/coldboot-scenarios.sh
+      - name: Stack logs on failure
+        if: failure()
+        run: |
+          docker compose -f deploy/docker-compose.yml \
+                         -f deploy/docker-compose.playground.yml logs --tail=80 || true
+
   docs-site:
     runs-on: ubuntu-latest
     steps:
@@ -216,5 +249,44 @@ jobs:
       # the guides cannot rot silently.
       - name: Build guides site
         run: |
-          pip install mkdocs-material
+          pip install mkdocs-material pyyaml
           cd docs-site && mkdocs build --strict
+
+      # Claims the project has measured and withdrawn, or that shipped
+      # features contradict. mkdocs --strict catches broken links, not
+      # statements that stopped being true (DOCS-11): a reviewer bounding
+      # scope from "deliberate non-goals", or an operator sizing hardware
+      # from a retracted throughput conclusion, is misled by prose that
+      # builds cleanly.
+      # DOCS-16: a knob the code reads and no table names is a knob an
+      # operator cannot find.
+      - name: Config reference covers every variable
+        run: ./ops/check-config-docs.sh
+
+      # The same shape, extended to the artifacts that had NO guard: the Helm
+      # chart, the Postman collection, SDK parity across all six languages,
+      # and the docs-site mirror of the config reference. v0.5.0 shipped with
+      # gaps in three of those four, every one found by a person asking.
+      - name: Every feature reaches every artifact
+        run: ./ops/check-artifact-coverage.sh
+
+      - name: Refuse retracted claims
+        run: |
+          set -e
+          fail=0
+          # A document may QUOTE a retracted claim in order to correct it;
+          # what must not survive is the assertive form.
+          check() {
+            if grep -rniI --include='*.md' -- "$1" README.md docs docs-site 2>/dev/null \
+               | grep -viE 'earlier|disproved|withdrawn|retracted|correction|corrected|used to|no longer'; then
+              echo "::error::retracted or contradicted claim found: $2"
+              fail=1
+            fi
+          }
+          check "bounded by storage commit latency" "the fdatasync throughput conclusion was measured and withdrawn (THREAT-MODEL: the advisory lock is the ceiling)"
+          check "privacy portal remains" "the self-service privacy portal has shipped"
+          check "no verifiable credentials" "predicate-based selective disclosure has shipped (P2.3)"
+          check "Search tokens survive a retention wipe" "the retention sweep deletes them once nothing live remains (S6)"
+          check "Consent decisions survive erasure" "erasure deletes consent STATE; the audit trail is the accountability record"
+          check "UPDATE only \`prev_hash\`/\`hash\`/\`chain_seq\`" "the sealing UPDATE also writes hash_v, and the sealer needs grants on audit_read_buckets (DOCS-1)"
+          exit $fail

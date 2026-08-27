@@ -61,3 +61,77 @@ groups:
         annotations:
           summary: "Spike of unauthenticated requests"
           description: "Possible credential stuffing against the API, or a client with a rotated-out credential still deployed."
+
+      # The audit sealing window. THREAT-MODEL.md calls this gauge "the
+      # alarm" for async sealing: a chain that stops being sealed stops being
+      # tamper-evident, and nothing else in the shipped monitoring notices.
+      # The gauge is fed in every sealing mode (sync, async, external).
+      - alert: SunderAuditSealerStalled
+        expr: sunder_audit_unsealed_rows{job="sunder"} > 1000
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "Audit chain sealing is falling behind ({{ $value }} unsealed rows)"
+          description: "Under SUNDER_AUDIT_SEAL_EXTERNAL the `sunder sealer` process is the only sealer - check that it is running and can reach the database. Unsealed rows carry no chain hash, so `sunder verify-audit` cannot cover them and an anchor does not attest them. See docs/RUNBOOK-AUDIT-VERIFY.md."
+
+      - alert: SunderAuditSealerStopped
+        expr: |
+          sunder_audit_unsealed_rows{job="sunder"} > 0
+            and deriv(sunder_audit_unsealed_rows{job="sunder"}[15m]) >= 0
+        for: 15m
+        labels: {severity: critical}
+        annotations:
+          summary: "Audit backlog is not draining"
+          description: "Unsealed rows have not decreased for 15 minutes. A stalled sealer with a LOW backlog never trips the threshold alert above; this is the one that catches it."
+
+      # Article 19 downstream notifications. SENDING means a worker claimed
+      # the event and has not yet recorded an outcome. It should be near zero
+      # at all times; a value that persists means notifications to the scopes
+      # that hold the person's records are stuck.
+      - alert: SunderErasureEventsStranded
+        expr: sunder_erasure_events_sending{job="sunder"} > 0
+        for: 30m
+        labels: {severity: critical}
+        annotations:
+          summary: "Erasure webhook events stuck in SENDING"
+          description: "{{ $value }} event(s) have been claimed but not settled for 30 minutes. The worker reaps its own stale claims each sweep, so a value that persists means delivery is failing to make progress. Inspect with `sunder dsr events`; force a requeue with `sunder dsr requeue -all` once no worker is running."
+
+      - alert: SunderErasureEventsFailed
+        expr: sunder_erasure_events_failed{job="sunder"} > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "An erasure notification was abandoned"
+          description: "A scope's webhook exhausted SUNDER_WEBHOOK_MAX_ATTEMPTS. That scope still holds the person's records and has NOT been told to delete them (GDPR Article 19). Fix the endpoint, then requeue: UPDATE erasure_events SET status='PENDING', attempts=0 WHERE status='FAILED'."
+
+      # Key material created by a running process. `sunder bootstrap` is the
+      # only legitimate source, and it is not `serve`. Any other non-zero
+      # value means a replica booted against a keystore that did not hold the
+      # material its data was written under.
+      - alert: SunderKeystoreMintedKeys
+        expr: sunder_keystore_minted_total{job="sunder"} > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Sunder minted {{ $value }} new key(s) at runtime"
+          description: "The keystore volume is lost, unmounted or pointed at the wrong path. Data written under the missing versions is unreadable. STOP the replica and restore the correct keystore before writing anything further - docs/RUNBOOK-BACKUP-DR.md."
+
+      # AES-256-GCM under random 96-bit nonces has a birthday bound: NIST SP
+      # 800-38D puts the safe ceiling at 2^32 invocations per key. The gauge
+      # is per-process and resets on restart, so it under-counts a key's
+      # lifetime use - alarm well before the bound, and rotate on the signal.
+      - alert: SunderKEKSealBudgetHigh
+        expr: max by (version) (sunder_kek_seals_total{job="sunder"}) > 536870912
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Key version {{ $labels.version }} is at {{ $value }} AES-GCM seals in one process"
+          description: "Half the per-process seal budget (2^30) is spent on this key version. Rotate it (`sunder keys rotate -kind pii-kek`) or migrate to SUNDER_PII_ALG=xchacha20poly1305, whose 192-bit nonces have no practical birthday bound - docs/RUNBOOK-ALG-MIGRATION.md."
+
+      # The shared rate-limit backend is unreachable. With
+      # SUNDER_REDIS_FAIL_CLOSED=false (the default) the limiter falls open,
+      # so limits are NOT being enforced while this fires.
+      - alert: SunderRateLimitBackendFailing
+        expr: increase(sunder_ratelimit_backend_failures_total{job="sunder"}[10m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Sunder cannot reach the Redis rate-limit backend"
+          description: "Rate-limit windows are not shared across replicas right now. With SUNDER_REDIS_FAIL_CLOSED=false the limiter fails OPEN, so the per-client limits are not being enforced; with true, lookups are being rejected. Check Redis reachability and credentials."

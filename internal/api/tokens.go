@@ -16,9 +16,6 @@ import (
 
 func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	in, ok := decode[service.TokenizeInput](w, r)
 	if !ok {
 		return
@@ -34,9 +31,6 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTokenRead(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	value, err := s.ValueTokens.Detokenize(r.Context(), client, r.PathValue("token"))
 	if err != nil {
 		s.logErr(r, err)
@@ -48,9 +42,6 @@ func (s *Server) handleTokenRead(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTokenDelete(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	if err := s.ValueTokens.Delete(r.Context(), client, r.PathValue("token")); err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)
@@ -78,9 +69,6 @@ func (s *Server) requireUnlock(w http.ResponseWriter, r *http.Request, purpose s
 
 func (s *Server) handleTokenBulkCreate(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	// Action and body shape are checked BEFORE the unlock token is spent
 	// (M7): a request that would never tokenize must not burn a single-use
 	// token or write an "intent spent" audit row.
@@ -114,9 +102,6 @@ func (s *Server) handleTokenBulkCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTokenBulkRead(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	if !client.Can(auth.ActTokensRead) {
 		writeErr(w, service.ErrForbidden)
 		return

@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"sort"
 	"sync/atomic"
@@ -181,10 +182,37 @@ func CloseReadBuckets(ctx context.Context, pool *pgxpool.Pool) (hours int, err e
 	for {
 		closed, err := closeOneHour(ctx, pool)
 		if err != nil || !closed {
+			if err == nil {
+				// An hour that carries a chained marker AND still has open
+				// buckets is skipped forever by the filter in closeOneHour.
+				// The only ways to reach that state are a forged
+				// audit.reads_hourly INSERT (AUDIT-CHAIN-2) or an extreme
+				// clock anomaly, and both mean real read events are being
+				// kept out of the chain. Silence is what made it permanent;
+				// say so on every pass.
+				if n, cerr := suppressedHours(ctx, pool); cerr == nil && n > 0 {
+					slog.Error("read-bucket hours are chained but still have OPEN buckets - their read events can never enter the hash chain; `sunder verify-audit` reports them BROKEN",
+						"hours", n)
+				}
+			}
 			return hours, err
 		}
 		hours++
 	}
+}
+
+// suppressedHours counts finished hours that have both a chained hourly
+// marker and still-open buckets.
+func suppressedHours(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	var n int64
+	err := pool.QueryRow(ctx, `
+		SELECT count(DISTINCT b.bucket_start) FROM audit_read_buckets b
+		 WHERE b.sealed_at IS NULL AND b.bucket_start < date_trunc('hour', now())
+		   AND EXISTS (
+			SELECT 1 FROM audit a
+			 WHERE a.action = 'audit.reads_hourly'
+			   AND (a.detail::jsonb)->>'hour' = to_char(b.bucket_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))`).Scan(&n)
+	return n, err
 }
 
 func closeOneHour(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
@@ -382,6 +410,18 @@ func VerifyReadBuckets(ctx context.Context, pool *pgxpool.Pool) (badHour string,
 		}
 	}
 	for hour := range recorded {
+		// Distinguish the two ways an hour can be recorded without sealed
+		// buckets: the buckets were removed, or they were never sealed
+		// because a marker for that hour already existed when the closer
+		// got there (AUDIT-CHAIN-2). The second is the forged-insert shape
+		// and it is repairable - by sealing that hour - while the first is
+		// not, so the operator must be able to tell them apart.
+		var open int64
+		if qerr := pool.QueryRow(ctx, `
+			SELECT count(*) FROM audit_read_buckets
+			 WHERE sealed_at IS NULL AND bucket_start = $1::timestamptz`, hour).Scan(&open); qerr == nil && open > 0 {
+			return hour, "chained hourly row exists while that hour's buckets are still OPEN (forged audit.reads_hourly insert?)", 0, nil
+		}
 		return hour, "chained hourly row exists but its sealed buckets are gone", 0, nil
 	}
 

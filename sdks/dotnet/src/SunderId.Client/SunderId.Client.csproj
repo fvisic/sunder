@@ -9,13 +9,20 @@
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- A public member with no XML doc is a warning the build prints and
+         nobody reads: two of the fourteen exception constructors carried one
+         for a whole release. With the documentation file generated, the doc
+         IS the artifact - so a missing one fails the build rather than
+         scrolling past. Scoped to CS1591 deliberately: this is about the
+         published surface, not a blanket warnings-as-errors policy. -->
+    <WarningsAsErrors>$(WarningsAsErrors);CS1591</WarningsAsErrors>
   </PropertyGroup>
 
   <PropertyGroup>
     <PackageId>SunderId.Client</PackageId>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/fvisic/sunder</RepositoryUrl>
-    <Version>0.1.0</Version>
+    <Version>0.5.0</Version>
     <Description>.NET SDK for Sunder, a pseudonymous identity provider. Thin client only: transport, auth, timeouts, retries and error mapping. Zero dependencies beyond the BCL. One package covers C#, F# and VB.NET.</Description>
     <PackageTags>sunder;identity;pseudonymization;privacy;cid</PackageTags>
     <RepositoryType>git</RepositoryType>

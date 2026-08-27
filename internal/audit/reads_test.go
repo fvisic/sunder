@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/fvisic/sunder/internal/store"
+	"time"
 )
 
 // setReads pins the read-audit mode for one test and restores the
@@ -307,12 +308,29 @@ func TestVerifyReadBucketsDetectsDuplicateHour(t *testing.T) {
 	setReads(t, ReadsBucketed)
 	s := testPool(t)
 	ctx := context.Background()
-	for i := 0; i < 2; i++ {
-		if err := Append(ctx, s.Pool, Entry{
-			ClientID: "_audit", Action: "audit.reads_hourly",
-			Detail: map[string]any{"hour": "2026-08-25T10:00:00Z", "digest": "d"}}); err != nil {
-			t.Fatal(err)
-		}
+	if err := Append(ctx, s.Pool, Entry{
+		ClientID: "_audit", Action: "audit.reads_hourly",
+		Detail: map[string]any{"hour": "2026-08-25T10:00:00Z", "digest": "d"}}); err != nil {
+		t.Fatal(err)
+	}
+	// AUDIT-CHAIN-2: a second marker for the same hour is refused by the
+	// unique index (migration 0036) rather than silently poisoning
+	// verification - and rather than letting a forged marker suppress a real
+	// hour's sealing forever.
+	if err := Append(ctx, s.Pool, Entry{
+		ClientID: "_audit", Action: "audit.reads_hourly",
+		Detail: map[string]any{"hour": "2026-08-25T10:00:00Z", "digest": "d2"}}); err == nil {
+		t.Fatal("a duplicate audit.reads_hourly marker must be refused by the database")
+	}
+	// The verify branch still has to hold for rows written before that index
+	// existed: drop it, create the duplicate, and assert the verdict.
+	if _, err := s.Pool.Exec(ctx, `DROP INDEX audit_reads_hourly_idx`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(ctx, s.Pool, Entry{
+		ClientID: "_audit", Action: "audit.reads_hourly",
+		Detail: map[string]any{"hour": "2026-08-25T10:00:00Z", "digest": "d2"}}); err != nil {
+		t.Fatal(err)
 	}
 	bad, why, _, err := VerifyReadBuckets(ctx, s.Pool)
 	if err != nil || bad == "" || !strings.Contains(why, "twice") {
@@ -604,5 +622,68 @@ func TestCloserSkipsAlreadySummarizedHour(t *testing.T) {
 	}
 	if pending != 1 {
 		t.Fatalf("the stranded hour must be pending: %d", pending)
+	}
+}
+
+// TESTS-7: TestSealDigestCoversExactlyTheSealedRows asserts that the
+// VERIFIER detects a digest/sealed-set mismatch - it says nothing about
+// whether closeOneHour can create one, so reverting the seal to the old
+// two-statement form (SELECT the rows, digest them, then UPDATE sealed_at)
+// leaves it green while silently reopening H11. This drives the
+// interleaving: a ReadEvent upsert commits for the hour being closed, and
+// the outcome must be all-or-nothing.
+func TestCloseIsAtomicAgainstAConcurrentReadEvent(t *testing.T) {
+	setMode(t, ModeAsync)
+	setReads(t, ReadsBucketed)
+	s := testPool(t)
+	ctx := context.Background()
+	hour := "date_trunc('hour', now()-interval '2 hours')"
+
+	// One open bucket in a finished hour.
+	if _, err := s.Pool.Exec(ctx, `
+		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count, first_seen, last_seen)
+		VALUES ('crm','op1','CID-A','attributes.read', `+hour+`, 3, now(), now())`); err != nil {
+		t.Fatal(err)
+	}
+
+	// A competing upsert for the SAME hour, held uncommitted so it lands in
+	// the middle of the close.
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_read_buckets (client_id, user_id, cid, action, bucket_start, count, first_seen, last_seen)
+		VALUES ('crm','op2','CID-B','attributes.read', `+hour+`, 1, now(), now())`); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+
+	closed := make(chan error, 1)
+	go func() {
+		_, err := CloseReadBuckets(ctx, s.Pool)
+		closed <- err
+	}()
+	// Give the closer time to reach (and, in the two-statement form, get
+	// past) its digest read before the competing row becomes visible.
+	time.Sleep(150 * time.Millisecond)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	// Whatever the interleaving, the late row is either fully inside the
+	// sealed set AND the digest, or fully outside both (still open, and so
+	// reported as a pending hour) - never split.
+	if bad, why, _, err := VerifyReadBuckets(ctx, s.Pool); err != nil || bad != "" {
+		t.Fatalf("a concurrent read event split the sealed set from its digest: %q %s %v", bad, why, err)
+	}
+	// A second pass closes whatever was left open, and it still verifies.
+	if _, err := CloseReadBuckets(ctx, s.Pool); err != nil {
+		t.Fatal(err)
+	}
+	if bad, why, _, err := VerifyReadBuckets(ctx, s.Pool); err != nil || bad != "" {
+		t.Fatalf("after the follow-up close: %q %s %v", bad, why, err)
 	}
 }

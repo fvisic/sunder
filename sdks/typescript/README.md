@@ -63,6 +63,52 @@ try {
 }
 ```
 
+## Beyond the handoff
+
+Consent, the data-subject rights endpoints, value tokenization, the file
+vault, cross-org shares, person links, attribute version history, external
+claims and the admin unlock are all wrapped:
+
+```ts
+// Consent gates attribute reads for that purpose, independently of the
+// client's own grant. The audit trail of consent SURVIVES erasure.
+await crm.setConsent(cid, "marketing", true);
+
+// Article 15 (org-wide), 20 (caller scope), 17 (org-wide, destructive).
+const access = await dpo.dsrAccess(cid);        // holdings + who accessed them
+const exported = await crm.dsrExport(cid);      // this scope's holdings
+await dpo.dsrErase(cid);                        // children LISTED, not erased
+await dpo.dsrErase(cid, ["guardian"]);          // named link types cascade
+
+// Value vault. Binding the token to a cid is what makes erasure destroy it.
+const token = await crm.tokenize({ value: iban, cid, unique: true });
+const value = await crm.detokenize(token);
+
+// Bulk routes ALWAYS need a single-use unlock token, whatever
+// SUNDER_SEARCH_UNLOCK is set to.
+const { unlock_token } = await crm.unlock("tokens");
+const tokens = await crm.tokenizeBulk(unlock_token, items);
+
+// Files are sealed under a key wrapped by the person's record key, so
+// erasing the person shreds them.
+const meta = await crm.uploadFile(cid, blob, "scan.pdf");
+const bytes = await crm.downloadFile(meta.id, "support");
+
+// A share is a SNAPSHOT, and partner_label is what the Article 15 answer
+// reports as the recipient.
+const share = await crm.createShare({
+  cid, fields: ["email"], partner_label: "partner-bank",
+  purpose: "kyc", ttl_seconds: 3600,
+});
+```
+
+Attribute the reads to an operator inside your system - it lands in the
+audit chain and in the Article 15 answer:
+
+```ts
+const crm = new SunderClient({ userId: "agent-7" });
+```
+
 ## Retry policy (baked in)
 
 - `lookupByEmail` / `lookupByPhone` / `lookupByName` and `issueOti` retry
@@ -70,6 +116,11 @@ try {
 - `verifyOti` is **never** blind-retried: the token is single-use, so a retry
   after an ambiguous network failure would legitimately return `TokenUsed`.
   The SDK surfaces that distinctly so *you* decide how to reconcile.
+
+Everything that destroys data or spends a single-use credential is attempted
+**exactly once**, for the same reason: `dsr_erase`/`dsrErase`/`DsrEraseAsync`,
+the token and file deletes, share revocation, unlink, and both bulk vault
+routes (they spend an unlock token).
 
 ## Development
 

@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -331,9 +332,14 @@ func TestNewSurfacesFailClosedOnAuditDenied(t *testing.T) {
 	}
 }
 
-// TestBulkAuditAndUnlockConcurrency covers the bulk audit-append path and
-// re-confirms single-use under concurrency for the new unlock surface.
-func TestBulkAuditAndUnlockConcurrency(t *testing.T) {
+// TestBulkOperationsWriteOneChainedAuditRow covers the bulk audit-append
+// path: one chained record per bulk call, not one per item.
+//
+// Renamed from TestBulkAuditAndUnlockConcurrency, which named two properties
+// it did not test - it contained no goroutine, no *service.Unlock and no
+// single-use assertion (TESTS-4). The property it claimed now has its own
+// test, TestUnlockIsSingleUseUnderConcurrency below.
+func TestBulkOperationsWriteOneChainedAuditRow(t *testing.T) {
 	e := newFaultEnv(t)
 	ctx := context.Background()
 	v := &service.ValueTokens{Pool: e.admin.Pool, Eng: e.svc.PII.Engine(), Ring: e.svc.Ring, Tok: e.svc.Tok}
@@ -762,3 +768,72 @@ func TestGDPRAndPortalQueryErrorBranches(t *testing.T) {
 }
 
 func testUnlockExpiry() *time.Time { t := time.Now().Add(24 * time.Hour); return &t }
+
+// TESTS-4: the single-use unlock token is the second factor gating the two
+// bulk surfaces - the highest bulk-exfiltration potential in the product.
+// Its correctness rests on Consume being a genuine atomic CAS, and nothing
+// tested that: every existing unlock test spends tokens one at a time, so a
+// refactor to SELECT-then-UPDATE would let two concurrent bulk reads both
+// succeed on one declaration of intent, with a single admin.unlock.use row
+// understating what happened.
+func TestUnlockIsSingleUseUnderConcurrency(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	unlock := &service.Unlock{Pool: e.admin.Pool}
+	expiry := time.Now().Add(time.Hour)
+	// A real clients row: unlock_tokens carries a foreign key to it.
+	client := &auth.Client{ID: "bulkops", Name: "Bulk ops", Scope: "crm",
+		AllowedActions:      []string{auth.ActAdminUnlock, auth.ActTokensRead},
+		AllowedPurposes:     []string{"bulk"},
+		CredentialExpiresAt: &expiry, RateLimit: 100}
+	if _, err := auth.Create(ctx, e.admin.Pool, *client); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _, err := unlock.Issue(ctx, client, "bulk")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const racers = 16
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, racers)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			errs[i] = unlock.Consume(ctx, client, "bulk", token)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	winners := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, service.ErrUnlockRequired):
+		default:
+			t.Fatalf("racer %d: unexpected error %v", i, err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d racers consumed one single-use token - it is not an atomic CAS", winners)
+	}
+	// The accountability trail must agree with what happened.
+	var used int
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit WHERE action='admin.unlock.use'`).Scan(&used); err != nil {
+		t.Fatal(err)
+	}
+	if used != 1 {
+		t.Fatalf("expected exactly one admin.unlock.use audit row, got %d", used)
+	}
+	// And it stays spent.
+	if err := unlock.Consume(ctx, client, "bulk", token); !errors.Is(err, service.ErrUnlockRequired) {
+		t.Fatalf("a spent token must stay spent, got %v", err)
+	}
+}

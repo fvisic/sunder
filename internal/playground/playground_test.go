@@ -27,12 +27,26 @@ type fakeSunder struct {
 	erased     map[string]bool
 	usedToken  map[string]bool
 	authSeen   []string
+	// Phase 8 surfaces: value tokens, shares and links, modelled only as far
+	// as the walkthroughs assert. The fake is the anti-rot check that a
+	// scenario references coherent endpoints; the live e2e is the truth.
+	shared      map[string]bool     // "<cid>|<attr>" -> authorized by the issuer
+	tokenShares map[string][]string // oti token -> attributes it authorizes
+	bySuffix    map[string]string   // last 8 phone digits -> cid
+	tokens      map[string]string   // token -> value
+	byValue     map[string]string   // "<cid>|<value>" -> token (unique dedup)
+	shares      map[string]string   // uuid -> "<cid>|<purpose>"
+	revoked     map[string]bool
 }
 
 func newFakeSunder() *fakeSunder {
 	return &fakeSunder{
 		registered: map[string]string{}, withdrawn: map[string]bool{},
 		erased: map[string]bool{}, usedToken: map[string]bool{},
+		shared: map[string]bool{}, tokenShares: map[string][]string{},
+		bySuffix: map[string]string{},
+		tokens:   map[string]string{}, byValue: map[string]string{},
+		shares: map[string]string{}, revoked: map[string]bool{},
 	}
 }
 
@@ -49,11 +63,38 @@ func (f *fakeSunder) handler() http.Handler {
 		f.seq++
 		cid := fmt.Sprintf("crm-cid-%d", f.seq)
 		f.registered[in.Email], f.registered[in.Phone] = cid, cid
+		if d := onlyDigits(in.Phone); len(d) >= 8 {
+			f.bySuffix[d[len(d)-8:]] = cid
+		}
 		writeJSON(w, 201, map[string]string{"cid": cid})
 	})
 	mux.HandleFunc("POST /v1/lookup", func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ Email, Phone, Name string }
+		var in struct {
+			Email       string `json:"email"`
+			Phone       string `json:"phone"`
+			Name        string `json:"name"`
+			PhoneSuffix string `json:"phone_suffix"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&in)
+		// A narrowed credential may not look anyone up by an identifier kind
+		// outside its allowlist - otherwise 200-vs-404 is still an oracle.
+		if narrowed(r) && (in.Email != "" || in.Phone != "" || in.PhoneSuffix != "" || in.Name != "") {
+			writeJSON(w, 403, map[string]string{"error": "forbidden"})
+			return
+		}
+		if in.PhoneSuffix != "" {
+			if len(in.PhoneSuffix) < 8 {
+				writeJSON(w, 400, map[string]string{"error": "validation", "detail": "phone_suffix needs at least 8 digits"})
+				return
+			}
+			cid, ok := f.bySuffix[in.PhoneSuffix]
+			if !ok || f.erased[cid] {
+				writeJSON(w, 404, map[string]string{"error": "not_found"})
+				return
+			}
+			writeJSON(w, 200, map[string]string{"cid": cid})
+			return
+		}
 		if in.Email == "" && in.Phone == "" {
 			writeJSON(w, 400, map[string]string{"error": "validation", "detail": "a name is not an identifier"})
 			return
@@ -70,7 +111,7 @@ func (f *fakeSunder) handler() http.Handler {
 		writeJSON(w, 200, map[string]string{"cid": cid})
 	})
 	mux.HandleFunc("GET /v1/contacts/{cid}/attributes/{name}", func(w http.ResponseWriter, r *http.Request) {
-		cid, purpose := r.PathValue("cid"), r.URL.Query().Get("purpose")
+		cid, purpose, name := r.PathValue("cid"), r.URL.Query().Get("purpose"), r.PathValue("name")
 		switch {
 		case purpose == "":
 			writeJSON(w, 403, map[string]string{"error": "purpose_not_allowed"})
@@ -78,12 +119,24 @@ func (f *fakeSunder) handler() http.Handler {
 			writeJSON(w, 404, map[string]string{"error": "not_found"})
 		case f.withdrawn[cid+"/"+purpose]:
 			writeJSON(w, 403, map[string]string{"error": "consent_denied"})
+		// A narrowed credential may read only the names on its allowlist,
+		// and only under a purpose it holds.
+		case narrowed(r) && (name != narrowAllowedAttr || purpose != narrowAllowedPurpose):
+			writeJSON(w, 403, map[string]string{"error": "forbidden"})
+		// In a RECEIVING scope only the attributes the issuer authorized
+		// exist at all - the rest were never copied across.
+		case strings.HasPrefix(cid, "erp-cid-") && !f.shared[cid+"|"+name]:
+			writeJSON(w, 404, map[string]string{"error": "not_found"})
 		default:
-			writeJSON(w, 200, map[string]string{"name": r.PathValue("name"), "value": "ana@example.com"})
+			writeJSON(w, 200, map[string]string{"name": name, "value": "ana@example.com"})
 		}
 	})
 	mux.HandleFunc("POST /v1/oti", func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ CID, Purpose string }
+		var in struct {
+			CID             string   `json:"cid"`
+			Purpose         string   `json:"purpose"`
+			ShareAttributes []string `json:"share_attributes"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		switch {
 		case in.CID == "":
@@ -91,7 +144,12 @@ func (f *fakeSunder) handler() http.Handler {
 		case f.withdrawn[in.CID+"/"+in.Purpose]:
 			writeJSON(w, 403, map[string]string{"error": "consent_denied"})
 		default:
-			writeJSON(w, 201, map[string]string{"token": "oti-token-" + in.CID})
+			tok := "oti-token-" + in.CID
+			// Remember WHICH attributes the issuer authorized: an attribute
+			// that was never shared must be ABSENT in the receiving scope,
+			// not merely hidden.
+			f.tokenShares[tok] = append([]string(nil), in.ShareAttributes...)
+			writeJSON(w, 201, map[string]string{"token": tok})
 		}
 	})
 	mux.HandleFunc("POST /v1/oti/verify", func(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +160,12 @@ func (f *fakeSunder) handler() http.Handler {
 			return
 		}
 		f.usedToken[in.Token] = true
-		writeJSON(w, 200, map[string]string{"cid": "erp-cid-1"})
+		f.seq++
+		cid := fmt.Sprintf("erp-cid-%d", f.seq)
+		for _, a := range f.tokenShares[in.Token] {
+			f.shared[cid+"|"+a] = true
+		}
+		writeJSON(w, 200, map[string]string{"cid": cid})
 	})
 	mux.HandleFunc("POST /v1/consent", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -116,6 +179,16 @@ func (f *fakeSunder) handler() http.Handler {
 			return
 		}
 		f.withdrawn[in.CID+"/"+in.Purpose] = !*in.Granted
+		if !*in.Granted {
+			// A withdrawal REVOKES the person's standing shares for that
+			// purpose - permanently. Re-granting does not resurrect a link
+			// that was already handed out; a new one must be minted.
+			for id, owner := range f.shares {
+				if owner == in.CID+"|"+in.Purpose {
+					f.revoked[id] = true
+				}
+			}
+		}
 		writeJSON(w, 200, map[string]any{"cid": in.CID, "purpose": in.Purpose, "granted": *in.Granted})
 	})
 	mux.HandleFunc("GET /v1/consent/{cid}", func(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +213,220 @@ func (f *fakeSunder) handler() http.Handler {
 			{"chain_seq": 1, "action": "register", "client_id": "crm", "hash": "aa", "prev_hash": ""},
 		}})
 	})
+	// --- F4 value tokens ---------------------------------------------------
+	mux.HandleFunc("POST /v1/tokens", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Type, Value, CID string
+			Unique           bool
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if in.Value == "" {
+			writeJSON(w, 400, map[string]string{"error": "validation"})
+			return
+		}
+		if in.Type == "card" && !luhnOK(in.Value) {
+			writeJSON(w, 400, map[string]string{"error": "validation", "detail": "luhn"})
+			return
+		}
+		key := in.CID + "|" + in.Value
+		if in.Unique {
+			if tok, ok := f.byValue[key]; ok {
+				writeJSON(w, 201, map[string]string{"token": tok})
+				return
+			}
+		}
+		f.seq++
+		tok := fmt.Sprintf("VT-%d", f.seq)
+		f.tokens[tok] = in.Value
+		if in.Unique {
+			f.byValue[key] = tok
+		}
+		writeJSON(w, 201, map[string]string{"token": tok})
+	})
+	mux.HandleFunc("GET /v1/tokens/{token}", func(w http.ResponseWriter, r *http.Request) {
+		v, ok := f.tokens[r.PathValue("token")]
+		if !ok {
+			writeJSON(w, 404, map[string]string{"error": "not_found"})
+			return
+		}
+		writeJSON(w, 200, map[string]string{"value": v})
+	})
+	mux.HandleFunc("DELETE /v1/tokens/{token}", func(w http.ResponseWriter, r *http.Request) {
+		tok := r.PathValue("token")
+		if _, ok := f.tokens[tok]; !ok {
+			writeJSON(w, 404, map[string]string{"error": "not_found"})
+			return
+		}
+		delete(f.tokens, tok)
+		writeJSON(w, 200, map[string]string{"status": "deleted"})
+	})
+	mux.HandleFunc("POST /v1/tokens/bulk/read", func(w http.ResponseWriter, r *http.Request) {
+		// Bulk ALWAYS needs the unlock header - the refusal is the lesson.
+		if r.Header.Get("X-Sunder-Unlock") == "" {
+			writeJSON(w, 403, map[string]string{"error": "unlock_required"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"values": []string{}})
+	})
+	mux.HandleFunc("POST /v1/admin/unlock", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 201, map[string]string{"unlock_token": "unlock-value", "expires_at": "2030-01-01T00:00:00Z"})
+	})
+
+	// --- F5 file vault (metadata only) --------------------------------------
+	mux.HandleFunc("GET /v1/contacts/{cid}/files", func(w http.ResponseWriter, r *http.Request) {
+		cid, purpose := r.PathValue("cid"), r.URL.Query().Get("purpose")
+		switch {
+		case purpose == "":
+			writeJSON(w, 400, map[string]string{"error": "validation", "detail": "purpose required"})
+		case f.erased[cid]:
+			writeJSON(w, 404, map[string]string{"error": "not_found"})
+		case f.withdrawn[cid+"/"+purpose]:
+			writeJSON(w, 403, map[string]string{"error": "consent_denied"})
+		default:
+			writeJSON(w, 200, map[string]any{"files": []any{}})
+		}
+	})
+
+	// --- F6 attribute history ------------------------------------------------
+	mux.HandleFunc("GET /v1/contacts/{cid}/versions", func(w http.ResponseWriter, r *http.Request) {
+		if f.erased[r.PathValue("cid")] {
+			writeJSON(w, 404, map[string]string{"error": "not_found"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"versions": []any{
+			map[string]any{"version_no": 1, "written_by": "crm", "written_at": "2026-01-01T00:00:00Z"},
+			map[string]any{"version_no": 2, "written_by": "crm", "written_at": "2026-01-02T00:00:00Z"},
+		}})
+	})
+	mux.HandleFunc("GET /v1/contacts/{cid}/versions/{version}/attributes/{name}", func(w http.ResponseWriter, r *http.Request) {
+		cid, purpose := r.PathValue("cid"), r.URL.Query().Get("purpose")
+		switch {
+		case purpose == "":
+			writeJSON(w, 400, map[string]string{"error": "validation", "detail": "purpose required"})
+		case f.erased[cid]:
+			writeJSON(w, 404, map[string]string{"error": "not_found"})
+		default:
+			writeJSON(w, 200, map[string]string{"value": "bronze"})
+		}
+	})
+
+	// --- F8 shared records ---------------------------------------------------
+	mux.HandleFunc("POST /v1/shares", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			CID, Purpose string
+			Fields       []string
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if in.CID == "" || in.Purpose == "" || len(in.Fields) == 0 {
+			writeJSON(w, 400, map[string]string{"error": "validation"})
+			return
+		}
+		f.seq++
+		id := fmt.Sprintf("share-%d", f.seq)
+		f.shares[id] = in.CID + "|" + in.Purpose
+		writeJSON(w, 201, map[string]any{"uuid": id, "expires_at": "2030-01-01T00:00:00Z"})
+	})
+	mux.HandleFunc("GET /v1/shares/{uuid}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("uuid")
+		owner, ok := f.shares[id]
+		// Absent, revoked, erased and consent-withdrawn are ONE answer.
+		if !ok || f.revoked[id] {
+			writeJSON(w, 404, map[string]string{"error": "not_found"})
+			return
+		}
+		cid, _, _ := strings.Cut(owner, "|")
+		if f.erased[cid] {
+			writeJSON(w, 404, map[string]string{"error": "not_found"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"fields": map[string]string{"loyalty_tier": "gold"}})
+	})
+	mux.HandleFunc("DELETE /v1/shares/{uuid}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("uuid")
+		owner, ok := f.shares[id]
+		cid, purpose, _ := strings.Cut(owner, "|")
+		// A consent withdrawal already revoked it: nothing live left to revoke.
+		if !ok || f.revoked[id] || f.withdrawn[cid+"/"+purpose] {
+			writeJSON(w, 404, map[string]string{"error": "not_found"})
+			return
+		}
+		f.revoked[id] = true
+		writeJSON(w, 200, map[string]string{"status": "revoked"})
+	})
+
+	// --- F7 links -------------------------------------------------------------
+	mux.HandleFunc("POST /v1/links", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			ParentCID string `json:"parent_cid"`
+			ChildCID  string `json:"child_cid"`
+			LinkType  string `json:"link_type"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		switch in.LinkType {
+		case "guardian", "member", "owner":
+		default:
+			writeJSON(w, 400, map[string]string{"error": "validation", "detail": "link_type"})
+			return
+		}
+		writeJSON(w, 201, map[string]string{"status": "linked"})
+	})
+	mux.HandleFunc("GET /v1/contacts/{cid}/links", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"links": []any{}})
+	})
+
 	return mux
+}
+
+// narrowAllowedAttr / narrowAllowedPurpose mirror the seeded narrowed
+// credential: one attribute name, one purpose.
+const (
+	narrowAllowedAttr    = "loyalty_tier"
+	narrowAllowedPurpose = "support"
+)
+
+// narrowed reports whether the caller is the deliberately narrowed
+// credential. Roles authenticate as "<role>.secret-value" in these tests, so
+// the role name is readable from the header - which is exactly the property
+// the walkthrough demonstrates: the narrowing lives on the CREDENTIAL.
+func narrowed(r *http.Request) bool {
+	return strings.HasPrefix(r.Header.Get("Authorization"), "Bearer narrow.")
+}
+
+// onlyDigits keeps the decimal digits of s.
+func onlyDigits(s string) string {
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			out = append(out, r)
+		}
+	}
+	return string(out)
+}
+
+// luhnOK is the fake's card check: the walkthrough asserts that a non-Luhn
+// "card" value is refused, so the fake has to actually decide.
+func luhnOK(s string) bool {
+	var digits []int
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits = append(digits, int(r-'0'))
+		}
+	}
+	if len(digits) < 12 {
+		return false
+	}
+	sum, alt := 0, false
+	for i := len(digits) - 1; i >= 0; i-- {
+		d := digits[i]
+		if alt {
+			if d *= 2; d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+		alt = !alt
+	}
+	return sum%10 == 0
 }
 
 func embedded(t *testing.T) []*Scenario {
@@ -734,7 +1020,7 @@ func TestRateLimitBucketsAreSeparate(t *testing.T) {
 	srv := httptest.NewServer(pg.Handler())
 	defer srv.Close()
 
-	body := `{"event":"erase","scope":"crm","cid":"c","erasure_id":1}`
+	body := `{"event":"erase","scope":"crm","cid":"CID-GF2A7VXTNP","erasure_id":1}`
 	if code := postWebhook(t, srv.URL, body, sign("s3cret", body)); code != 200 {
 		t.Fatalf("first delivery: %d", code)
 	}

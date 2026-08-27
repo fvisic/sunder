@@ -184,8 +184,15 @@ func serveConn(ctx context.Context, conn net.Conn, eng Engine) {
 		resp := signerResp{OK: err == nil, Out: out}
 		if err != nil {
 			resp.Error = err.Error()
-			if errors.Is(err, ErrVerifyFailed) {
+			switch {
+			case errors.Is(err, ErrVerifyFailed):
 				resp.Code = "verify_failed"
+			case errors.Is(err, ErrDecrypt):
+				// The classification has to survive the socket: a caller on
+				// the other side must still be able to tell "this payload is
+				// unopenable" from "the signer is restarting"
+				// (QUEUE-WORKER-5).
+				resp.Code = "decrypt_failed"
 			}
 		}
 		if werr := writeFrame(conn, resp); werr != nil {
@@ -243,6 +250,9 @@ func (r *RemoteEngine) call(ctx context.Context, req signerReq) ([]byte, error) 
 		if resp.Code == "verify_failed" {
 			return nil, fmt.Errorf("%w: %s", ErrVerifyFailed, resp.Error)
 		}
+		if resp.Code == "decrypt_failed" {
+			return nil, fmt.Errorf("%w: %s", ErrDecrypt, resp.Error)
+		}
 		return nil, errors.New(resp.Error)
 	}
 	return resp.Out, nil
@@ -251,7 +261,7 @@ func (r *RemoteEngine) call(ctx context.Context, req signerReq) ([]byte, error) 
 func (r *RemoteEngine) attempt(ctx context.Context, req signerReq, allowRetry bool) (signerResp, error) {
 	conn, pooled, err := r.get()
 	if err != nil {
-		return signerResp{}, fmt.Errorf("signer unreachable: %w", err)
+		return signerResp{}, fmt.Errorf("%w: signer unreachable: %v", ErrEngineUnavailable, err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
@@ -267,7 +277,7 @@ func (r *RemoteEngine) attempt(ctx context.Context, req signerReq, allowRetry bo
 		if pooled && allowRetry {
 			return r.attempt(ctx, req, false)
 		}
-		return signerResp{}, fmt.Errorf("signer write: %w", err)
+		return signerResp{}, fmt.Errorf("%w: signer write: %v", ErrEngineUnavailable, err)
 	}
 	if err := readFrame(conn, &resp); err != nil {
 		_ = conn.Close()
@@ -278,7 +288,7 @@ func (r *RemoteEngine) attempt(ctx context.Context, req signerReq, allowRetry bo
 			// fresh-dial retry is still safe for a POOLED conn only.
 			return r.attempt(ctx, req, false)
 		}
-		return signerResp{}, fmt.Errorf("signer read: %w", err)
+		return signerResp{}, fmt.Errorf("%w: signer read: %v", ErrEngineUnavailable, err)
 	}
 	_ = conn.SetDeadline(time.Time{})
 	r.put(conn)

@@ -78,7 +78,7 @@ func (s *Session) replace(vars map[string]string) {
 // separately from the generator so Validate can accept references to them
 // without constructing a session.
 func builtinVarNames() []string {
-	return []string{"demo_email", "demo_phone", "demo_name", "unique", "miss_email"}
+	return []string{"demo_email", "demo_phone", "demo_phone_suffix", "demo_name", "unique", "miss_email"}
 }
 
 // newSessionVars mints the per-visitor demo identity. Unique per session on
@@ -93,14 +93,34 @@ func builtinVarNames() []string {
 // reloads comes from storing them in the session, not from being
 // reproducible.
 func newSessionVars(unique string) map[string]string {
+	// E.164: +385 plus a mobile-shaped subscriber number.
+	phone := "+3859" + randomDigits(9)
 	return map[string]string{
-		"unique":    unique,
-		"demo_name": "Ana Horvat",
-		// E.164: +385 plus a mobile-shaped subscriber number.
-		"demo_phone": "+3859" + randomDigits(9),
-		"demo_email": fmt.Sprintf("ana.horvat+%s@example.com", unique),
-		"miss_email": fmt.Sprintf("nobody-%s@example.com", unique),
+		"unique":     unique,
+		"demo_name":  "Ana Horvat",
+		"demo_phone": phone,
+		// The partial-lookup key (F2): the LAST EIGHT digits, which is what
+		// a caller reads off a screen or hears on a call. Derived here so a
+		// walkthrough cannot drift from the number it was minted for.
+		"demo_phone_suffix": lastDigits(phone, 8),
+		"demo_email":        fmt.Sprintf("ana.horvat+%s@example.com", unique),
+		"miss_email":        fmt.Sprintf("nobody-%s@example.com", unique),
 	}
+}
+
+// lastDigits returns the last n decimal digits of s (ignoring "+" and any
+// separators), or everything it has when there are fewer.
+func lastDigits(s string, n int) string {
+	digits := make([]rune, 0, len(s))
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits = append(digits, r)
+		}
+	}
+	if len(digits) > n {
+		digits = digits[len(digits)-n:]
+	}
+	return string(digits)
 }
 
 // Sessions is a TTL map of visitor state. Bounded on purpose: an unbounded
@@ -203,6 +223,19 @@ func (s *Sessions) TTL() time.Duration { return s.ttl }
 
 // Count reports how many sessions are live (used by the status endpoint and
 // the tests).
+// AllForTest returns every live session. Test-only seam: the inbox is
+// scoped to a visitor's PSEUDONYMS (GAP-5), and a test that cannot run a
+// scenario against a live vault has no other way to put one in the session.
+func (s *Sessions) AllForTest() []*Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Session, 0, len(s.byID))
+	for _, sess := range s.byID {
+		out = append(out, sess)
+	}
+	return out
+}
+
 func (s *Sessions) Count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

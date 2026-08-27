@@ -325,7 +325,7 @@ func TestErasureRacingAnExternalClaim(t *testing.T) {
 	}
 	// The merge itself must refuse, not just the pre-check.
 	admin := &service.Contacts{Pool: e.admin.Pool, Tok: e.svc.Tok, PII: e.svc.PII,
-		Ring: &service.KeyRing{Pool: e.admin.Pool}}
+		Ring: &service.KeyRing{Pool: e.admin.Pool, RetireGrace: -1}}
 	if err := admin.MergeIntoBlobForTest(ctx, tx, cid, map[string]string{"resurrected": "yes"}); err == nil {
 		t.Fatal("the locking write must refuse a tombstoned CID, not only the pre-check")
 	}

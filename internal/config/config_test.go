@@ -329,3 +329,41 @@ func TestFileVaultConfigValidation(t *testing.T) {
 		t.Fatal("bad versions TTL must be rejected")
 	}
 }
+
+// DOCS-7: CONFIG.md promises a typo can never silently fall back to a
+// default. Boolean settings were `os.Getenv(k) == "true"`, so `1` - which
+// most container tooling produces - silently selected the OPPOSITE security
+// posture from the one the configuration declared.
+func TestBooleanTyposAreRefusedNotIgnored(t *testing.T) {
+	t.Setenv("SUNDER_DB_URL", "postgres://x/y")
+	for _, v := range []string{"1", "TRUE", "True", "yes", "on"} {
+		t.Setenv("SUNDER_REDIS_FAIL_CLOSED", v)
+		c, err := FromEnv()
+		if err != nil {
+			t.Fatalf("%q must be accepted as true: %v", v, err)
+		}
+		if !c.RedisFailClosed {
+			t.Fatalf("%q must mean true, not a silent false", v)
+		}
+	}
+	for _, v := range []string{"0", "no", "off", "FALSE"} {
+		t.Setenv("SUNDER_REDIS_FAIL_CLOSED", v)
+		c, err := FromEnv()
+		if err != nil {
+			t.Fatalf("%q must be accepted as false: %v", v, err)
+		}
+		if c.RedisFailClosed {
+			t.Fatalf("%q must mean false", v)
+		}
+	}
+	t.Setenv("SUNDER_REDIS_FAIL_CLOSED", "maybe")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("an unrecognised boolean must fail startup, not default to false")
+	}
+	// The empty string means unset.
+	t.Setenv("SUNDER_REDIS_FAIL_CLOSED", "")
+	c, err := FromEnv()
+	if err != nil || c.RedisFailClosed {
+		t.Fatalf("an empty value must mean unset: %v %v", c.RedisFailClosed, err)
+	}
+}

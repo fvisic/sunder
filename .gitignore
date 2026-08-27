@@ -16,8 +16,14 @@ coverage.out
 # Java build output (Maven); regenerable, never committed.
 sdks/java/target/
 
-# Internal review notes: findings, resolution log, work in progress.
+# Internal review notes and roadmap: findings, resolution logs, work in
+# progress. They describe what is not built yet and what a reviewer found
+# before it was fixed - neither belongs in a public tree.
 CODE-REVIEW.md
+code_review_2.md
+PLAN.md
+# The Croatian plan is the owner's working copy - never pushed.
+PLAN.hr.md
 # IDE state
 .idea/
 

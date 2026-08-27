@@ -13,6 +13,11 @@ package api
 // hide gaps, so tighten the heuristic before loosening the threshold.
 
 import (
+	"context"
+	"github.com/fvisic/sunder/internal/auth"
+	"github.com/fvisic/sunder/internal/config"
+	"github.com/fvisic/sunder/internal/testutil"
+	"net/http/httptest"
 	"os"
 	"regexp"
 	"strings"
@@ -96,5 +101,64 @@ func TestEveryRouteIsExercised(t *testing.T) {
 		if !registered[key] {
 			t.Errorf("exemption %q matches no registered route - remove it", key)
 		}
+	}
+}
+
+// The credential-less share fetch is the only unauthenticated route on the
+// API listener, and its per-IP limit is the ONLY control on it - so the
+// limited branch must actually refuse, and it must key off the API
+// listener's own client-IP setting, not the portal's (AUTHZ-5).
+func TestPublicShareFetchIsPerIPLimited(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewDB(t)
+	cred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "crm", Name: "CRM", Scope: "crm",
+		AllowedActions:  []string{auth.ActContactsRegister, auth.ActSharesCreate, auth.ActAttributesRead},
+		AllowedPurposes: []string{"support"}, RateLimit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
+		SharesPublic: true}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &e2eEnv{srv: srv, credCRM: cred}
+	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{
+		"email": "public-share@example.com", "attributes": map[string]string{"tier": "gold"}})
+	cid := out["cid"]
+	_, out = e.do(t, cred, "POST", "/v1/shares", map[string]any{
+		"cid": cid, "fields": []string{"tier"}, "partner_label": "p",
+		"purpose": "support", "ttl_seconds": 3600})
+	uuid := out["uuid"]
+	if uuid == "" {
+		t.Fatalf("share not created: %v", out)
+	}
+
+	fetch := func(ip string) int {
+		req := httptest.NewRequest("GET", "/v1/shares/"+uuid, nil)
+		req.RemoteAddr = ip + ":1000"
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	// Credential-less, and it works.
+	if code := fetch("203.0.113.7"); code != 200 {
+		t.Fatalf("a public share fetch must need no credential: %d", code)
+	}
+	// The budget is per IP, so a different source is unaffected...
+	if code := fetch("203.0.113.8"); code != 200 {
+		t.Fatalf("the limit must be per source IP: %d", code)
+	}
+	// ...and the same source is eventually refused.
+	limited := false
+	for i := 0; i < publicShareRateLimit+5; i++ {
+		if fetch("203.0.113.7") == 429 {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Fatalf("the only control on the credential-less route must actually refuse after %d requests", publicShareRateLimit)
 	}
 }

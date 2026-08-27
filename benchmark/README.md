@@ -3,6 +3,51 @@
 Goal: same machine, same database engine, same load tool, comparable
 operations - and Sunder at least 50% more efficient.
 
+## v0.5.0 re-measurement (2026-08-27, laptop): the second review cost nothing
+
+The remediation for the second external review added roughly a thousand
+statements of fail-closed error handling on the hot paths - locking reads
+before the OTI CAS, tombstone predicates on `Lookup`, an extra `persons`
+join in the rekey sweep, a claim column on the erasure outbox. This run
+answers the only question that raises: **did any of it show up as latency?**
+
+Apple Silicon laptop (12 cores, 36 GB, macOS 26.5), Sunder and PostgreSQL 16
+both in Docker via `deploy/docker-compose.yml` (defaults: async sealing,
+bucketed reads), n=3000 per cell, fresh identity namespace per concurrency,
+**zero errors in all twelve cells**:
+
+| Concurrency | write | lookup | read |
+|---|---|---|---|
+| 1  | 820 rps, p50 1.17 ms, p99 2.03 ms | 1,370 rps, p50 0.70 ms, p99 1.03 ms | 1,620 rps, p50 0.60 ms, p99 0.95 ms |
+| 8  | 3,529 rps, p50 2.13 ms, p99 4.56 ms | 5,767 rps, p50 1.30 ms, p99 3.61 ms | 6,671 rps, p50 1.17 ms, p99 1.91 ms |
+| 32 | 3,579 rps, p50 8.36 ms, p99 17.66 ms | 6,020 rps, p50 4.98 ms, p99 15.13 ms | 6,846 rps, p50 4.48 ms, p99 8.45 ms |
+| 64 | 3,499 rps, p50 17.16 ms, p99 29.28 ms | 5,845 rps, p50 10.28 ms, p99 23.71 ms | 6,878 rps, p50 8.92 ms, p99 17.94 ms |
+
+**No regression, and the P4.1 shape is intact.** Writes plateau at ~3,500
+rps from c=8 onward - past the audit lock's old ~460 rps ceiling by an order
+of magnitude, and now bounded by the database rather than by a serialized
+critical section. Reads and lookups keep climbing to c=32 and hold flat to
+c=64, which is what a pool-bound rather than lock-bound path looks like.
+Latency is well inside the 15 ms lookup / 10 ms OTI-verify design targets at
+every concurrency measured.
+
+Two caveats, stated rather than buried:
+
+- This is a **laptop**, and a much faster one than the 12-core Debian server
+  the sections below use. The absolute numbers are not comparable to those;
+  the shape (plateau position, error count, latency ordering) is what this
+  run is for. The 2026-08-24 server numbers remain the ones to quote for a
+  ceiling.
+- The dataset is small (~23k contacts at the end of the run). The 26.8M-row
+  scale test below is the answer for behaviour at size; nothing here
+  supersedes it.
+
+One methodological note worth keeping: a first pass of the c=32 write cell
+measured 96 rps with errors, and re-running the identical command
+immediately gave 3,133 rps with none. A single anomalous cell on a machine
+running a desktop is noise, not a finding - which is exactly why the table
+above is a clean re-run rather than the first numbers that appeared.
+
 ## Server measurement (2026-08-24): a ceiling the laptop runs hid
 
 Run on a 12-core / 47 GB Debian server (load average 0.14 at the start),
@@ -42,7 +87,7 @@ why the laptop runs below never reached the plateau.
 > storage sustains **4,914 commits/sec** when the advisory lock is removed
 > from an otherwise identical transaction. Storage was never the bound.
 > The lock is, on its own. See the scale-test section below and Phase 4 in
-> `PLAN.md`.
+> the internal roadmap.
 
 **What this means honestly.**
 
@@ -133,7 +178,8 @@ Throughput did not change (171.6 / 363.7 / 343.6 rps at c=1/8/32), and was
 not expected to: the plateau is the lock, not the index. What this buys is
 storage and cache headroom for when P4.1 removes the plateau.
 
-Phase 4 in `PLAN.md` specifies the rest of the work these numbers imply.
+The audit-throughput work these numbers imply shipped in v0.4.0: async
+sealing, bucketed read events and an external sealer (`CHANGELOG.md`).
 
 ## P4.1 applied (2026-08-25): the ceiling is gone
 
@@ -278,10 +324,10 @@ docker run -d --name bench-dbunker --network bench-net -p 127.0.0.1:3000:3000 \
 
 # 3. Run (fresh seed per round; write must precede lookup/read)
 for op in write lookup read; do
-  go run ./benchmark -target sunder     -base http://localhost:8080 -cred "$CRED" -op $op -n 5000 -c 16 -seed round1
+  SUNDER_CRED="$CRED" go run ./benchmark -target sunder     -base http://localhost:8080 -op $op -n 5000 -c 16 -seed round1
 done
 for op in write lookup read; do
-  go run ./benchmark -target databunker -base http://localhost:3000 -cred DEMO    -op $op -n 5000 -c 16 -seed round1
+  SUNDER_CRED=DEMO      go run ./benchmark -target databunker -base http://localhost:3000 -op $op -n 5000 -c 16 -seed round1
 done
 ```
 

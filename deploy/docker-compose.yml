@@ -49,6 +49,11 @@ services:
       SUNDER_FILES_STORAGE: local
       SUNDER_FILES_DIR: /keystore/files
       SUNDER_VERSIONS_KEEP: "5"
+      # F1/F2 derived search: OFF by default in production (each widens the
+      # search surface). The demo stack turns them on so the walkthroughs
+      # can show what narrowing-only, single-hit search actually does.
+      SUNDER_SEARCH_FUZZY_NAME: "true"
+      SUNDER_SEARCH_PHONE_SUFFIX: "true"
     volumes:
       - keystore:/keystore
     ports:

@@ -194,6 +194,7 @@ security-critical exists in five copies.
 No central or multi-tenant deployment (a multi-tenant instance holding CID
 mappings for many companies would recreate the super-target this design
 eliminates - small operators should get *managed single-tenant*
-instances). No verifiable credentials / selective disclosure yet, no
-cross-organization federation, no national-identifier storage or
-resolution - the schema has no column for one, by design.
+instances). No cross-organization federation, no national-identifier storage or
+resolution - the schema has no column for one, by design. (Predicate-based
+selective disclosure and the self-service privacy portal were once listed
+here as non-goals; both have shipped - see `docs/THREAT-MODEL.md`.)

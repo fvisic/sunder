@@ -37,6 +37,7 @@ makes a mismatch loud - missing-key errors - never silent.
 | PostgreSQL | persons, tokens, cids+blobs, clients, consents, audit chain, anchors, keys metadata | everything |
 | Key material | keystore (file dir or Vault) | tokens unmatchable, PII undecryptable - data loss even with a perfect DB backup |
 | Exported anchors | `.tsr` files (anchor dir / write-once storage) | tamper evidence against a DB-level attacker |
+| **File vault objects** | `SUNDER_FILES_DIR` (local driver) or the S3 bucket | **uploaded files unrecoverable - and the loss is INVISIBLE.** Every `files` row survives in the database with its name, size, sha256, wrapped DEK and record key, so inventory reports, `readyz` and `verify-audit` all look clean. It surfaces only when someone downloads a file. |
 
 ## Back it up
 
@@ -53,11 +54,22 @@ tar czf - /etc/sunder/keystore | gpg --encrypt -r backups@example.org > keystore
 # Vault keystore: snapshot on the same schedule as the DB
 vault operator raft snapshot save vault-$(date +%F).snap
 
-# 3. Anchors: sync the export directory to write-once storage - this copy
+# 3. File vault objects (only when SUNDER_FILES_STORAGE is set).
+#    s3: bucket versioning + replication, or a snapshot on the DB schedule.
+#    local: back up the directory alongside the keystore - and EVERY
+#    instance's directory, which is one reason `local` is single-instance only.
+tar czf - /var/lib/sunder/files | gpg --encrypt -r backups@example.org > files-$(date +%F).tgz.gpg
+
+# 4. Anchors: sync the export directory to write-once storage - this copy
 #    is the whole point, it must live where a database attacker cannot reach
 sunder anchor -out /var/sunder/anchors
 aws s3 sync /var/sunder/anchors s3://org-anchors-worm/sunder/ --sse aws:kms
 ```
+
+The unit is three-way once the file vault is on, and the ordering cuts both
+ways: restoring the object store WITHOUT the matching `person_record_keys`
+rows leaves the ciphertext permanently unopenable - crypto-shredding does
+not distinguish an Article 17 erasure from a bad restore.
 
 Keep backups in a different failure domain than the primary.
 
@@ -91,6 +103,21 @@ Read the `verify-audit` output:
 
 **5. Spot-check one contact end to end**: lookup -> attribute read -> OTI
 issue/verify, exactly as a real client would.
+
+**6. With the file vault enabled, download one file** and compare the
+received byte count against the response's `Content-Length`:
+
+```sh
+curl -sD- -o /tmp/restored.bin \
+  -H "Authorization: Bearer $CLIENT_TOKEN" \
+  "https://sunder.internal:8443/v1/files/$FILE_ID?purpose=support" | grep -i content-length
+wc -c /tmp/restored.bin
+```
+
+Nothing else in this procedure can detect a missing object store: `Peek`
+answers from database metadata, so the response is a 200 with the right
+headers and a truncated - possibly empty - body. Steps 1-5 all pass with the
+entire file vault gone.
 
 ## Keystore mismatch symptoms
 

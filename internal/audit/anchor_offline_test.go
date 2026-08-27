@@ -6,6 +6,7 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -102,8 +103,27 @@ func TestAnchorFullFlowWithFakeTSA(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outDir, root+".tsr")); err != nil {
 		t.Fatalf("export missing: %v", err)
 	}
+	// Re-anchoring an UNCHANGED head is a no-op, not a second row whose
+	// export can never match the first (AUDIT-CHAIN-4).
+	again, _, err := Anchor(ctx, s.Pool, srv.URL, "", outDir)
+	if !errors.Is(err, ErrAlreadyAnchored) || again != root {
+		t.Fatalf("re-anchoring an unchanged head must be a no-op: root=%q err=%v", again, err)
+	}
+	var anchors int
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_anchor`).Scan(&anchors); err != nil {
+		t.Fatal(err)
+	}
+	if anchors != 1 {
+		t.Fatalf("a second anchor row was written for the same root: %d", anchors)
+	}
+
 	// With a CA, a token that does not cover the actual chain head must be
-	// rejected BEFORE persisting (fixture covers a different digest).
+	// rejected BEFORE persisting (fixture covers a different digest). Move
+	// the head first, or the no-op above short-circuits it.
+	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "lookup"}); err != nil {
+		t.Fatal(err)
+	}
+	sealAll(t, s)
 	if _, _, err := Anchor(ctx, s.Pool, srv.URL, vendoredCA, outDir); err == nil {
 		t.Fatal("mismatched token must not be stored when a CA is available")
 	}
@@ -378,5 +398,81 @@ func TestAnchorEnvironmentErrors(t *testing.T) {
 	// detection is what would flag a deleted export).
 	if _, err := VerifyAnchors(ctx, s.Pool, "", "/definitely/not/a/dir"); err != nil {
 		t.Fatalf("a missing export directory must not fail the chain check: %v", err)
+	}
+}
+
+// AUDIT-CHAIN-4: the daily cron re-anchors whenever the head has not moved -
+// an idle instance, a weekend, or a stalled sealer, which freezes the head by
+// construction. A second row for one root shares one export filename while
+// its token differs, so verification reported the anchor evidence as altered
+// forever, unrepairably (audit_anchor is append-only).
+func TestReAnchoringAnUnchangedHeadKeepsVerificationClean(t *testing.T) {
+	needsOpenSSL(t)
+	s := testPool(t)
+	ctx := context.Background()
+	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "lookup"}); err != nil {
+		t.Fatal(err)
+	}
+	sealAll(t, s)
+	srv := fakeTSA(t, 200, fixture(t))
+	outDir := t.TempDir()
+
+	root, _, err := Anchor(ctx, s.Pool, srv.URL, "", outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Three more cron runs with no intervening audit write.
+	for i := 0; i < 3; i++ {
+		if _, _, err := Anchor(ctx, s.Pool, srv.URL, "", outDir); !errors.Is(err, ErrAlreadyAnchored) {
+			t.Fatalf("run %d: expected a no-op, got %v", i, err)
+		}
+	}
+	results, err := VerifyAnchors(ctx, s.Pool, "", outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected exactly one anchor row, got %d", len(results))
+	}
+	for _, r := range results {
+		if r.FileState != "ok" {
+			t.Fatalf("anchor %d (root %s) reports %q - a routine re-run poisoned the cross-check",
+				r.ID, r.Root, r.FileState)
+		}
+	}
+	// And the database refuses a duplicate outright.
+	if _, err := s.Pool.Exec(ctx,
+		`INSERT INTO audit_anchor (root_hash, tsa_url, stamped_at, tsr) VALUES ($1,'x','y','\x00'::bytea)`,
+		root); err == nil {
+		t.Fatal("a second anchor row for one root must be refused by the database")
+	}
+}
+
+// The export is written BEFORE the row commits, so a failure to export
+// cannot leave an undeletable row pointing at a file that does not exist.
+func TestAnchorDoesNotCommitWithoutItsExport(t *testing.T) {
+	needsOpenSSL(t)
+	s := testPool(t)
+	ctx := context.Background()
+	if err := Append(ctx, s.Pool, Entry{ClientID: "crm", Action: "lookup"}); err != nil {
+		t.Fatal(err)
+	}
+	sealAll(t, s)
+	srv := fakeTSA(t, 200, fixture(t))
+
+	// An unwritable export directory: a file, not a directory.
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Anchor(ctx, s.Pool, srv.URL, "", blocked); err == nil {
+		t.Fatal("an unwritable export directory must fail the anchor")
+	}
+	var anchors int
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_anchor`).Scan(&anchors); err != nil {
+		t.Fatal(err)
+	}
+	if anchors != 0 {
+		t.Fatalf("a failed export left %d undeletable anchor row(s) behind", anchors)
 	}
 }

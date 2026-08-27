@@ -52,6 +52,13 @@ var (
 	ErrConsentDenied = &sentinel{"consent_denied"}
 	// ErrPurposeNotAllowed - the purpose is outside the client's grants (403).
 	ErrPurposeNotAllowed = &sentinel{"purpose_not_allowed"}
+	// ErrUnlockRequired - the credential IS entitled, but the call needs a
+	// single-use unlock token it did not present (403). Mint one with
+	// POST /v1/admin/unlock and send it as X-Sunder-Unlock. Deliberately
+	// distinct from ErrForbidden: "declare bulk/fuzzy intent first" and
+	// "you lack the action" call for opposite responses, and without its own
+	// sentinel it fell through to the generic 403 mapping (DOCS-13).
+	ErrUnlockRequired = &sentinel{"unlock_required"}
 	// ErrAudienceMismatch - the token is addressed to another scope (403).
 	ErrAudienceMismatch = &sentinel{"audience_mismatch"}
 	// ErrNotFound - no such contact in the caller's scope (404). Also
@@ -83,6 +90,7 @@ var codeMap = map[string]*sentinel{
 	"forbidden":           ErrForbidden,
 	"consent_denied":      ErrConsentDenied,
 	"purpose_not_allowed": ErrPurposeNotAllowed,
+	"unlock_required":     ErrUnlockRequired,
 	"audience_mismatch":   ErrAudienceMismatch,
 	"not_found":           ErrNotFound,
 	"validation":          ErrValidation,

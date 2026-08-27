@@ -70,6 +70,31 @@ if [[ -z "$TAG" ]]; then
 fi
 IMAGE="${REPO}:${TAG}"
 
+# The bootstrap Job runs `sunder bootstrap`, which opens a crypto engine and
+# ensures key material BEFORE it touches the clients table - so it needs the
+# same keystore configuration the Deployment gets, not just the database
+# secret. Without it, config.FromEnv defaults to the FILE driver rooted at
+# ./keystore, the O_EXCL lock write returns EROFS on the Job's read-only root
+# filesystem, and every customer onboarding stops at the bootstrap step
+# (OPS-CLI-CONFIG-7). The Deployment reads these from the chart's sunder.env
+# helper; the Job is hand-written here, so the two are read from the same
+# values file to keep them from drifting again.
+KEYSTORE_TYPE="$(read_value keystore.type vault)"
+if [[ "$KEYSTORE_TYPE" != "vault" ]]; then
+  echo "keystore.type must be 'vault' (the chart supports no other), got '${KEYSTORE_TYPE}'" >&2
+  exit 1
+fi
+VAULT_ADDR_V="$(read_value keystore.vault.addr '')"
+VAULT_MOUNT_V="$(read_value keystore.vault.mount '')"
+VAULT_SECRET_V="$(read_value keystore.vault.existingSecret '')"
+for pair in "keystore.vault.addr:${VAULT_ADDR_V}" "keystore.vault.mount:${VAULT_MOUNT_V}" \
+            "keystore.vault.existingSecret:${VAULT_SECRET_V}"; do
+  if [[ -z "${pair#*:}" ]]; then
+    echo "${pair%%:*} must be set in ${VALUES}: the bootstrap Job cannot reach the keystore without it" >&2
+    exit 1
+  fi
+done
+
 echo "==> namespace ${NS}"
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
 kubectl label namespace "$NS" sunder-customer="$CUSTOMER" --overwrite
@@ -112,8 +137,19 @@ spec:
           envFrom:
             - secretRef: {name: sunder-db}
           env:
+            - {name: SUNDER_KEYSTORE, value: vault}
+            - {name: SUNDER_VAULT_ADDR, value: "${VAULT_ADDR_V}"}
+            - {name: SUNDER_VAULT_MOUNT, value: "${VAULT_MOUNT_V}"}
+            - name: SUNDER_VAULT_TOKEN
+              valueFrom:
+                secretKeyRef: {name: ${VAULT_SECRET_V}, key: SUNDER_VAULT_TOKEN}
             - name: SUNDER_BOOTSTRAP_PURPOSES
               value: "${SUNDER_BOOTSTRAP_PURPOSES:-admin}"
+            # The bootstrap admin holds admin.unlock, which the vault refuses
+            # to grant to a credential with no expiry (AUTHZ-2): a standing
+            # unlock grant makes the bulk-read second factor permanent.
+            - name: SUNDER_BOOTSTRAP_TTL
+              value: "${SUNDER_BOOTSTRAP_TTL:-90d}"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

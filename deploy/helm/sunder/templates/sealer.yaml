@@ -19,6 +19,7 @@ spec:
         app.kubernetes.io/name: sunder-sealer
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      securityContext: {{- include "sunder.podSecurityContext" . | nindent 8 }}
       containers:
         - name: sealer
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -30,7 +31,36 @@ spec:
                   name: {{ .Values.database.existingSecret }}
                   key: SUNDER_DB_URL
             {{- include "sunder.auditEnv" . | nindent 12 }}
+            # /healthz answers 200 only while the last SUCCESSFUL seal pass
+            # is recent. The sealer logs-and-continues on error by design, so
+            # without this a process that lost UPDATE on `audit` or cannot
+            # reach the database stays Running and Ready forever while the
+            # unsealed window grows without bound (OPS-CLI-CONFIG-8).
+            - name: SUNDER_SEALER_HEALTH_ADDR
+              value: ":8081"
+          ports:
+            - {name: health, containerPort: 8081}
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext: {{- include "sunder.containerSecurityContext" . | nindent 12 }}
           resources:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {memory: 128Mi}
+---
+# replicas: 1 is deliberate (one sealer owns the chain lock), so an eviction
+# is a tamper-evidence outage until the replacement is Ready. A PDB stops a
+# node drain from taking the only sealer down voluntarily.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-sunder-sealer
+  labels: {{- include "sunder.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sunder-sealer
+      app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}

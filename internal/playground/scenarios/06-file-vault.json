@@ -1,0 +1,86 @@
+{
+  "id": "file-vault",
+  "title": "A document that stops existing the moment the person is forgotten",
+  "summary": "Files are encrypted per person, not per system: the key that unwraps a person's documents is one database row. Erasure deletes that row, and every document of that person becomes unreadable at commit time - no storage round trip, no cleanup job to trust.",
+  "doc": "concepts/file-vault.md",
+  "roles": [
+    {
+      "name": "vault",
+      "label": "Document service",
+      "scope": "crm",
+      "actions": ["contacts.register", "attributes.read", "files.write", "files.read", "consent.manage", "dsr.erase"],
+      "purposes": ["support"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "The person whose document this is",
+      "note": "Every file hangs off a pseudonym, never off a name or an identifier.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {"email": "{{demo_email}}", "phone": "{{demo_phone}}", "name": "{{demo_name}}"},
+      "expect": 201,
+      "capture": {"crm_cid": "cid"}
+    },
+    {
+      "label": "Listing without a stated purpose is refused",
+      "note": "Metadata IS disclosure - a filename like 'otkaz-2026.pdf' says plenty. So listing carries the same purpose and consent gate as reading the content, and it is audited the same way.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/files",
+      "expect": 400
+    },
+    {
+      "label": "With a purpose, the list is empty",
+      "note": "Nothing stored yet. Note that the empty answer is still an audited read: 'who looked' is recorded even when there was nothing to see.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/files?purpose=support",
+      "expect": 200
+    },
+    {
+      "label": "The person withdraws consent for support",
+      "note": "Before uploading anything, watch consent govern the file surface too - the same decision that blocks an attribute read blocks the documents.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/consent",
+      "body": {"cid": "{{crm_cid}}", "purpose": "support", "granted": false},
+      "expect": 200
+    },
+    {
+      "label": "Listing is now refused",
+      "note": "Consent is enforced at the vault, not in the calling application. Nothing about the caller changed.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/files?purpose=support",
+      "expect": 403
+    },
+    {
+      "label": "Consent restored",
+      "note": "Withdrawal is reversible and both decisions stay on the record.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/consent",
+      "body": {"cid": "{{crm_cid}}", "purpose": "support", "granted": true},
+      "expect": 200
+    },
+    {
+      "label": "Erase the person",
+      "note": "This is the step the whole feature exists for. Erasure deletes the person's record key - the one row that unwraps every per-file key they have. Their documents do not need to be found and deleted; they become undecryptable in the same transaction.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/dsr/erase",
+      "body": {"cid": "{{crm_cid}}"},
+      "expect": 200
+    },
+    {
+      "label": "The document surface is gone with them",
+      "note": "The pseudonym still resolves to a tombstone - client references never break - but there is nothing left to list, and no key left to read anything with.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/files?purpose=support",
+      "expect": 404
+    }
+  ]
+}

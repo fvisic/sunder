@@ -185,6 +185,7 @@ func TestDeliverPendingDefaultHTTPClient(t *testing.T) {
 	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err != nil {
 		t.Fatal(err)
 	}
+	e.gdpr.Drain() // the erase-time delivery is detached
 	if n, err := e.gdpr.DeliverPending(ctx); err != nil || n != 1 {
 		t.Fatalf("retry with default client: %d %v", n, err)
 	}
@@ -304,6 +305,7 @@ func TestWebhookRedirectIsNotFollowed(t *testing.T) {
 	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err != nil {
 		t.Fatal(err)
 	}
+	e.gdpr.Drain() // the erase-time delivery is detached
 	var status string
 	if err := e.admin.Pool.QueryRow(ctx,
 		`SELECT status FROM erasure_events LIMIT 1`).Scan(&status); err != nil {
@@ -336,7 +338,7 @@ func TestVerifyAfterSigningKeyRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Rotate the OTI signing key out from under the cached ring.
-	adminRing := &service.KeyRing{Pool: e.admin.Pool}
+	adminRing := &service.KeyRing{Pool: e.admin.Pool, RetireGrace: -1}
 	if _, err := adminRing.Rotate(ctx, e.oti.Eng, "oti-sign"); err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +359,7 @@ func TestNewestWithoutActiveVersion(t *testing.T) {
 	if _, err := e.admin.Pool.Exec(ctx, `DELETE FROM keys WHERE kind='hmac-name'`); err != nil {
 		t.Fatal(err)
 	}
-	ring := &service.KeyRing{Pool: e.admin.Pool}
+	ring := &service.KeyRing{Pool: e.admin.Pool, RetireGrace: -1}
 	if _, err := ring.Newest(ctx, "hmac-name"); err == nil {
 		t.Fatal("kind without an ACTIVE version must error")
 	}
@@ -477,8 +479,10 @@ func TestShareIntoScopeShortCircuits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// attributes.read is required to issue a token carrying attributes: an
+	// OTI that carries them IS a delegated read (TOKENS-LOOKUP-6).
 	billing := &auth.Client{ID: "billing", Scope: "billing",
-		AllowedActions:  []string{auth.ActOTIIssue, auth.ActOTIVerify},
+		AllowedActions:  []string{auth.ActOTIIssue, auth.ActOTIVerify, auth.ActAttributesRead},
 		AllowedPurposes: []string{"support"}}
 	tok2, _, err := e.oti.Issue(ctx, billing, billingCID, "support", "crm", []string{"tier"})
 	if err != nil {

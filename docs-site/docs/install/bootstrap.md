@@ -83,7 +83,7 @@ below).
 | `-scope` | `SUNDER_BOOTSTRAP_SCOPE` | `admin` | Admin client scope |
 | `-purposes` | `SUNDER_BOOTSTRAP_PURPOSES` | `admin` | Comma-separated; an admin with no purposes cannot read an attribute or issue an OTI |
 | `-credential-file` | `SUNDER_BOOTSTRAP_CREDENTIAL_FILE` | - | Created `0600`; must be a real file |
-| `-ttl` | `SUNDER_BOOTSTRAP_TTL` | - (non-expiring) | e.g. `90d` |
+| `-ttl` | `SUNDER_BOOTSTRAP_TTL` | `90d` | Credential lifetime, e.g. `90d`. The bootstrap admin holds `admin.unlock`, and a NON-EXPIRING credential holding it is refused - a standing unlock grant makes the bulk-read second factor a permanent self-service dump and removes any forced rotation of the omnipotent credential. An explicitly empty value is therefore an error, not "forever". |
 
 ## Credential-file rules
 

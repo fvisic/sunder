@@ -24,7 +24,20 @@ const portalSessionCookie = "sunder_portal"
 // bypass, and behind an ingress RemoteAddr alone collapses every citizen
 // into one bucket.
 func (s *Server) portalClientIP(r *http.Request) string {
-	if h := s.Cfg.PortalClientIPHeader; h != "" {
+	return s.clientIP(r, s.Cfg.PortalClientIPHeader)
+}
+
+// apiClientIP is portalClientIP for the API listener. The two sockets have
+// DIFFERENT trust boundaries - the portal sits behind the proxy the header
+// is configured for, the API may not - so one knob must not govern both
+// (AUTHZ-5). SUNDER_API_CLIENT_IP_HEADER is unset by default, which means
+// RemoteAddr: an unconfigured deployment cannot be handed a spoofed bucket.
+func (s *Server) apiClientIP(r *http.Request) string {
+	return s.clientIP(r, s.Cfg.APIClientIPHeader)
+}
+
+func (s *Server) clientIP(r *http.Request, header string) string {
+	if h := header; h != "" {
 		if v := r.Header.Get(h); v != "" {
 			// The RIGHT-most entry is the address the adjacent proxy
 			// appended; the left-most is whatever the caller sent, so

@@ -34,7 +34,7 @@ services:
         umask 077
         crm=$$(/sunder client create -id pg-crm -name "Playground CRM" -scope crm \
           -actions contacts.register,lookup,attributes.read,oti.issue,consent.manage \
-          -purposes support,create_order -rate 6000 | tail -1)
+          -purposes support,create_order,escalation_notify -rate 6000 | tail -1)
         erp=$$(/sunder client create -id pg-erp -name "Playground ERP" -scope erp \
           -actions oti.verify,attributes.read \
           -purposes create_order -rate 6000 | tail -1)
@@ -48,6 +48,14 @@ services:
         # anything but a loopback host, and that rule is worth keeping. The
         # deliver sidecar below shares the playground's network namespace,
         # so 127.0.0.1:8081 there IS the playground.
+        notifier=$$(/sunder client create -id pg-notifier -name "Playground notifier" -scope notifier \
+          -actions oti.verify,attributes.read,consent.manage \
+          -purposes escalation_notify -rate 6000 | tail -1)
+        # A DELIBERATELY narrowed credential: it may read exactly one
+        # attribute name, which also stops it looking anyone up by e-mail.
+        narrow=$$(/sunder client create -id pg-narrow -name "Playground narrowed reader" -scope crm \
+          -actions lookup,attributes.read -attributes loyalty_tier \
+          -purposes support -rate 6000 | tail -1)
         auditor=$$(/sunder client create -id pg-auditor -name "Playground auditor" -scope crm \
           -actions audit.verify \
           -purposes support -rate 6000 | tail -1)
@@ -60,11 +68,13 @@ services:
           echo "erp=$$erp"
           echo "privacy=$$privacy"
           echo "vault=$$vault"
+          echo "notifier=$$notifier"
+          echo "narrow=$$narrow"
           echo "auditor=$$auditor"
           echo "webhook_secret=$$secret"
         } > "$$tmp"
         mv "$$tmp" /creds/playground.env
-        echo "seeded 5 demo clients and the erasure webhook"
+        echo "seeded 7 demo clients and the erasure webhook"
     volumes:
       - creds:/creds
     depends_on:

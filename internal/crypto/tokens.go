@@ -18,6 +18,13 @@ const (
 	KeyHMACEmail = "hmac-email"
 	KeyHMACPhone = "hmac-phone"
 	KeyHMACName  = "hmac-name"
+	// KeyHMACValue keys the value-token dedup hash. It has its OWN kind
+	// because value tokens seal card numbers, IBANs and national ids:
+	// borrowing hmac-email meant that leaking the e-mail SEARCH key handed
+	// an attacker an offline dictionary attack over every tokenized value,
+	// contradicting the separate-key-per-attribute rationale a few lines up
+	// (CRYPTO-3).
+	KeyHMACValue = "hmac-value"
 	KeyPIIKEK    = "pii-kek"
 )
 

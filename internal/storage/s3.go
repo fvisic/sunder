@@ -392,20 +392,49 @@ func (d *s3Driver) Put(ctx context.Context, key string, r io.Reader, size int64)
 		return fmt.Errorf("storage: s3 put %q: %d bytes exceeds the %d byte limit", key, size, int64(maxPutSize))
 	}
 
-	// Read one byte past the declared size so an over-long reader is caught
-	// rather than silently truncated.
-	buf := bytes.NewBuffer(make([]byte, 0, size))
-	n, err := io.Copy(buf, io.LimitReader(r, size+1))
-	if err != nil {
-		return fmt.Errorf("storage: s3 put %q: read body: %w", key, err)
+	// SigV4 needs sha256(body) before the body is sent, so the body has to
+	// be materialised. It already IS: every caller hands us a fully-buffered
+	// sealed body. Re-buffering it made peak upload memory ~4x the payload
+	// rather than the 1x the H8 semaphore's bound is documented from - an
+	// operator sizing containers from that formula gets OOM-killed by
+	// legitimate concurrent uploads (FILES-STORAGE-2).
+	//
+	// Specifically, io.Copy into a bytes.Buffer takes Buffer.ReadFrom, which
+	// calls grow(512) after the last full read; with len == cap it cannot
+	// resize in place and reallocates to ~2x. The io.LimitReader wrapper -
+	// there to catch an over-long reader - is also what hides the
+	// WriterTo/zero-copy path that would have made the second buffer free.
+	var body []byte
+	switch src := r.(type) {
+	case *bytes.Buffer:
+		if int64(src.Len()) == size {
+			body = src.Bytes()
+		}
+	case *bytes.Reader:
+		if int64(src.Len()) == size {
+			body = make([]byte, size)
+			if _, err := io.ReadFull(src, body); err != nil {
+				return fmt.Errorf("storage: s3 put %q: read body: %w", key, err)
+			}
+		}
 	}
-	if n != size {
-		return fmt.Errorf("storage: s3 put %q: got %d bytes, want %d", key, n, size)
+	if body == nil {
+		// Exact-size read, then a one-byte probe - so an over-long reader is
+		// still caught rather than silently truncated, without the
+		// reallocation ReadFrom's growth strategy forces.
+		body = make([]byte, size)
+		if _, err := io.ReadFull(r, body); err != nil {
+			return fmt.Errorf("storage: s3 put %q: read body: %w", key, err)
+		}
+		var probe [1]byte
+		if n, _ := r.Read(probe[:]); n != 0 {
+			return fmt.Errorf("storage: s3 put %q: got more than %d bytes", key, size)
+		}
 	}
-	sum := sha256.Sum256(buf.Bytes())
+	sum := sha256.Sum256(body)
 	payloadHash := hex.EncodeToString(sum[:])
 
-	req, err := d.newRequest(ctx, http.MethodPut, key, bytes.NewReader(buf.Bytes()), size, payloadHash)
+	req, err := d.newRequest(ctx, http.MethodPut, key, bytes.NewReader(body), size, payloadHash)
 	if err != nil {
 		return err
 	}

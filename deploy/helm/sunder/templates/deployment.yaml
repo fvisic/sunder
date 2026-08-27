@@ -1,6 +1,17 @@
 {{- if ne .Values.keystore.type "vault" }}
 {{- fail "this chart supports keystore.type=vault only: the file driver needs a shared writable volume, which would CrashLoopBackOff under readOnlyRootFilesystem" }}
 {{- end }}
+{{- /*
+  OPS-CLI-CONFIG-5: three of the four CronJobs run `sunder` subcommands that
+  call st.Migrate before doing their work, under image.opsTag - a tag with no
+  template-level relationship to image.tag. Skewing the two makes a nightly
+  anchor or retention job apply schema (and destructive data) migrations from
+  a binary that is not the one serving traffic. provision.sh already refuses
+  an unpinned tag for the same reason; this refuses a skewed one.
+*/}}
+{{- if ne (trimSuffix "-ops" .Values.image.opsTag) .Values.image.tag }}
+{{- fail (printf "image.opsTag (%s) does not match image.tag (%s): the ops image applies schema migrations from the cron jobs, so a skewed tag migrates the database with a binary the API pods are not running. Set opsTag to \"%s-ops\" (or override both deliberately)." .Values.image.opsTag .Values.image.tag .Values.image.tag) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,6 +39,19 @@ spec:
             - {containerPort: {{ .Values.portal.listenPort }}, name: portal}
             {{- end }}
           env: {{- include "sunder.env" . | nindent 12 }}
+          # `serve` applies pending migrations BEFORE it listens, in one
+          # transaction under a blocking advisory lock, so neither the port
+          # nor /healthz answers while that runs. With only a liveness probe
+          # (period 10s, default failureThreshold 3) the kubelet SIGKILLs the
+          # pod ~30s in, rolling the whole migration back and recording
+          # nothing - a rollout that should be slow-but-successful becomes a
+          # permanent crash loop that can never converge (OPS-CLI-CONFIG-6).
+          # A startupProbe is exactly the mechanism for slow init: liveness
+          # does not start until it passes.
+          startupProbe:
+            tcpSocket: {port: http}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
           {{- if .Values.tls.mtlsSecretName }}
           # mTLS: kubelet HTTPS probes present no client certificate, and a
           # configured client CA sets RequireAndVerifyClientCert - so an

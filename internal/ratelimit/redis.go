@@ -183,9 +183,8 @@ func (l *RedisLimiter) Failures() int64 {
 
 // failed decides what an unreachable Redis means. Fail-open is defensible
 // for authenticated callers (degrade abuse control, not availability) but
-// not on the unauthenticated portal surface, where it would turn a
-// rate-limited endpoint into a line-rate one. Portal buckets
-// are prefixed "portal:" and always fail CLOSED.
+// not where the limit is itself the security control. The prefixes listed in
+// failed() below always fail CLOSED regardless of SUNDER_REDIS_FAIL_CLOSED.
 func (l *RedisLimiter) failed(key string) bool {
 	l.mu.Lock()
 	l.failures++
@@ -197,11 +196,27 @@ func (l *RedisLimiter) failed(key string) bool {
 	}
 	// Fail-open degrades abuse control rather than availability, which is
 	// defensible for a plain authenticated lookup. It is NOT defensible
-	// where the limit is what protects a shared resource: the
-	// unauthenticated portal surface and the external-claims
-	// endpoint, whose every call takes the global audit lock, so losing the
-	// limit lets one client serialise the instance.
-	for _, mustFailClosed := range []string{"portal:", "claims:"} {
+	// where the limit IS the security control, or where it protects a
+	// shared resource:
+	//
+	//   portal:       the unauthenticated citizen surface.
+	//   claims:       every call takes the global audit lock, so losing the
+	//                 limit lets one client serialise the instance.
+	//   authfail:     the ONLY brute-force throttle on bearer credentials.
+	//                 Failing open here turns a Redis outage into an open
+	//                 credential-stuffing window (AUTHZ-3).
+	//   share-public: the only control on the credential-less
+	//                 GET /v1/shares/{uuid}, which is unauthenticated AND
+	//                 writes to the audit chain on every call.
+	//   audit-verify: a full chain walk per request.
+	//   audit-chain:  the same, paginated.
+	//
+	// These are not governed by SUNDER_REDIS_FAIL_CLOSED: an operator
+	// choosing availability for ordinary reads is not choosing to disable
+	// credential-stuffing protection.
+	for _, mustFailClosed := range []string{
+		"portal:", "claims:", "authfail:", "share-public:", "audit-verify:", "audit-chain:",
+	} {
 		if strings.HasPrefix(key, mustFailClosed) {
 			return false
 		}

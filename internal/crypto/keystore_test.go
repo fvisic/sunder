@@ -1,12 +1,14 @@
 package crypto
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -124,12 +126,23 @@ func TestFileKeystoreConcurrentEnsure(t *testing.T) {
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	errs := make([]error, 16)
+	got := make([][]byte, 16)
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			// Separate instances simulate separate processes on a shared dir.
-			errs[i] = (&FileKeystore{Dir: dir}).Ensure(ctx, "race/v1")
+			ks := &FileKeystore{Dir: dir}
+			if errs[i] = ks.Ensure(ctx, "race/v1"); errs[i] != nil {
+				return
+			}
+			// Read back the key THIS racer ended up with. Asserting only
+			// that Ensure returned nil proves nothing: writeKey always
+			// generates fresh bytes and publishes them by rename, so with
+			// the O_EXCL generator election removed all 16 would mint, all
+			// 16 would rename, and every Ensure would still return nil -
+			// while live key material was being overwritten (TESTS-5).
+			got[i], errs[i] = ks.Key(ctx, "race/v1")
 		}(i)
 	}
 	wg.Wait()
@@ -138,8 +151,76 @@ func TestFileKeystoreConcurrentEnsure(t *testing.T) {
 			t.Fatal(errs[i])
 		}
 	}
-	if _, err := (&FileKeystore{Dir: dir}).Key(ctx, "race/v1"); err != nil {
+	for i := 1; i < 16; i++ {
+		if !bytes.Equal(got[i], got[0]) {
+			t.Fatalf("racers disagreed on key material: racer %d got different bytes from racer 0 - a concurrent Ensure overwrote live key material", i)
+		}
+	}
+	// Exactly one key file, and no debris to confuse a later reader.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		t.Fatal(err)
+	}
+	var keys, junk []string
+	for _, e := range entries {
+		switch {
+		case strings.Contains(e.Name(), ".tmp"), strings.HasSuffix(e.Name(), ".lock"):
+			junk = append(junk, e.Name())
+		default:
+			keys = append(keys, e.Name())
+		}
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected exactly one key file, got %v", keys)
+	}
+	if len(junk) != 0 {
+		t.Fatalf("temp/lock debris left behind: %v", junk)
+	}
+}
+
+// The stale-lock reclaim branch is the second way into writeKey, and it is
+// the one that abandons mutual exclusion: two processes that both see an
+// aged lock both proceed. ensureLocked's re-read is what must win, so
+// EXISTING material can never be overwritten by a reclaim (TESTS-5).
+func TestFileKeystoreStaleLockReclaimNeverOverwrites(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	ks := &FileKeystore{Dir: dir}
+
+	// Pre-plant real material...
+	if err := ks.Ensure(ctx, "reclaim/v1"); err != nil {
+		t.Fatal(err)
+	}
+	original, err := ks.Key(ctx, "reclaim/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ...and an ABANDONED lock beside it, older than the reclaim window.
+	lock := ks.path("reclaim/v1") + ".lock"
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().Add(-60 * time.Second)
+	if err := os.Chtimes(lock, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = (&FileKeystore{Dir: dir}).Ensure(ctx, "reclaim/v1")
+		}()
+	}
+	wg.Wait()
+
+	after, err := (&FileKeystore{Dir: dir}).Key(ctx, "reclaim/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, original) {
+		t.Fatal("a stale-lock reclaim overwrote existing key material - everything sealed under the old key is permanently unreadable")
 	}
 }
 
@@ -299,5 +380,49 @@ func TestVaultKeystoreUnreachable(t *testing.T) {
 	}
 	if _, err := v.Key(ctx, "hmac-email/v1"); err == nil {
 		t.Fatal("an unreachable Vault must fail Key")
+	}
+}
+
+// TestEnsureDoesNotOverwriteAKeyMintedWhileWaitingForTheLock pins the exact
+// window the concurrent test can only hit by scheduling luck.
+//
+// The sequence: racer B reads no key, blocks on the O_EXCL lock; racer A wins
+// it, mints, renames the key into place and releases; B then wins the same
+// lock. B's decision to mint was made BEFORE A's key existed - so without a
+// re-check under the lock it overwrites live key material, and everything
+// already encrypted under A's key becomes permanently unreadable. Ensure
+// returns nil either way, which is what made this invisible: the only visible
+// symptom is two readers disagreeing about the key bytes.
+//
+// afterLockWon plays A's part deterministically, from inside B's own call.
+func TestEnsureDoesNotOverwriteAKeyMintedWhileWaitingForTheLock(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	ks := &FileKeystore{Dir: dir}
+
+	// The key another process minted while this caller queued for the lock.
+	winner := bytes.Repeat([]byte{0xA5}, 32)
+	var placed bool
+	afterLockWon = func(keyPath string) {
+		if placed {
+			return
+		}
+		placed = true
+		if err := os.WriteFile(keyPath, winner, 0o600); err != nil {
+			t.Fatalf("stage the winner's key: %v", err)
+		}
+	}
+	t.Cleanup(func() { afterLockWon = nil })
+
+	if err := ks.Ensure(ctx, "race/v1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ks.Key(ctx, "race/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, winner) {
+		t.Fatal("Ensure minted over key material that already existed - every " +
+			"blob encrypted under the previous key is now unreadable")
 	}
 }

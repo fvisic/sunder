@@ -10,6 +10,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -17,7 +18,29 @@ import (
 
 	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
+	"github.com/fvisic/sunder/internal/crypto"
 )
+
+// versionAADCurrent is the AAD layout new snapshots are sealed under.
+// aad_v 1 is the legacy layout, where the snapshot was bound to the cid
+// alone - i.e. to exactly the same associated data as the live blob.
+const versionAADCurrent int16 = 2
+
+// versionAAD is the generation-discriminated binding a snapshot is sealed
+// to. Distinct from the live blob's binding (the bare cid) and distinct per
+// generation, so no ciphertext can be transplanted between them.
+func versionAAD(cid string, versionNo int64) string {
+	return cid + "\x00v" + strconv.FormatInt(versionNo, 10)
+}
+
+// versionBoundTo returns the AAD subject for a stored snapshot, honouring
+// the layout it was actually sealed under.
+func versionBoundTo(cid string, versionNo int64, aadV int16) string {
+	if aadV < 2 {
+		return cid
+	}
+	return versionAAD(cid, versionNo)
+}
 
 // VersionMeta is one history entry (metadata only, never the values).
 type VersionMeta struct {
@@ -31,8 +54,8 @@ type VersionMeta struct {
 // the overwrite commit together - history can never miss a generation nor
 // record one that did not land. No-op when versioning is off or the row
 // has no blob yet.
-func (c *Contacts) appendVersion(ctx context.Context, tx pgx.Tx, cid, writtenBy string, oldBlob []byte, oldKeyID, oldAlg string) error {
-	if c.VersionsKeep == 0 || len(oldBlob) == 0 {
+func (c *Contacts) appendVersion(ctx context.Context, tx pgx.Tx, cid, writtenBy string, oldAttrs map[string]string) error {
+	if c.VersionsKeep == 0 || len(oldAttrs) == 0 {
 		return nil
 	}
 	var next int64
@@ -40,10 +63,29 @@ func (c *Contacts) appendVersion(ctx context.Context, tx pgx.Tx, cid, writtenBy 
 		`SELECT COALESCE(max(version_no),0)+1 FROM cid_blob_versions WHERE cid=$1`, cid).Scan(&next); err != nil {
 		return err
 	}
+	// RE-SEAL, never copy the bytes.
+	//
+	// A snapshot used to be the outgoing live blob stored verbatim with its
+	// own key_id/alg - which made every generation and the live row AEAD
+	// INTERCHANGEABLE for a given cid: writing an old cid_blob_versions.blob
+	// (plus its key_id/alg) over cids.pii_encrypted decrypted perfectly,
+	// silently rolling an Article 16 rectification back with no
+	// cryptographic trace (CRYPTO-5). Binding the generation into the AAD
+	// makes that transplant fail to open. The plaintext is already in hand
+	// here - mergeIntoBlob decrypted it a moment ago - so this costs one
+	// extra seal, inside the same transaction.
+	keyID, err := c.Ring.Newest(ctx, crypto.KeyPIIKEK)
+	if err != nil {
+		return err
+	}
+	blob, err := c.PII.Encrypt(ctx, versionAAD(cid, next), keyID, oldAttrs)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO cid_blob_versions (cid, version_no, blob, key_id, alg, written_by)
-		 VALUES ($1,$2,$3,$4,$5,$6)`,
-		cid, next, oldBlob, oldKeyID, oldAlg, writtenBy); err != nil {
+		`INSERT INTO cid_blob_versions (cid, version_no, blob, key_id, alg, written_by, aad_v)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		cid, next, blob, keyID, c.PII.Algorithm(), writtenBy, versionAADCurrent); err != nil {
 		return err
 	}
 	// Count-based cap: keep only the newest VersionsKeep rows (a positive
@@ -118,16 +160,17 @@ func (c *Contacts) GetVersionAttribute(ctx context.Context, client *auth.Client,
 	}
 	var blob []byte
 	var keyID, alg string
+	var aadV int16
 	err := c.Pool.QueryRow(ctx,
-		`SELECT blob, key_id, alg FROM cid_blob_versions WHERE cid=$1 AND version_no=$2`,
-		cid, versionNo).Scan(&blob, &keyID, &alg)
+		`SELECT blob, key_id, alg, aad_v FROM cid_blob_versions WHERE cid=$1 AND version_no=$2`,
+		cid, versionNo).Scan(&blob, &keyID, &alg, &aadV)
 	if err == pgx.ErrNoRows {
 		return "", ErrNotFound
 	}
 	if err != nil {
 		return "", err
 	}
-	attrs, err := c.PII.Decrypt(ctx, cid, blob, keyID, alg)
+	attrs, err := c.PII.Decrypt(ctx, versionBoundTo(cid, versionNo, aadV), blob, keyID, alg)
 	if err != nil {
 		return "", err
 	}

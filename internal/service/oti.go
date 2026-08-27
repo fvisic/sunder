@@ -120,6 +120,18 @@ func (o *OTI) IssueFull(ctx context.Context, client *auth.Client, in IssueInput)
 			return "", time.Time{}, ErrForbidden
 		}
 	}
+	// An OTI that carries attributes or predicates IS a delegated read, and
+	// the read boundary is `attributes.read` - shares.Create requires it for
+	// exactly this reason. Without it, a credential provisioned WITHOUT read
+	// access (the whole point of the `custom` role) could still exfiltrate
+	// attribute VALUES into a cooperating scope via share_attributes, and
+	// read attribute BITS back to itself via a self-addressed predicate
+	// token (TOKENS-LOOKUP-6). CanReadAttribute passes unconditionally on an
+	// empty allowlist, so it was the only remaining gate and it gated
+	// nothing.
+	if (len(shareAttrs) > 0 || len(in.SharePredicates) > 0) && !client.Can(auth.ActAttributesRead) {
+		return "", time.Time{}, ErrForbidden
+	}
 	// Scope ownership FIRST (see GetAttribute: the consent hook on a raw
 	// caller CID would leak foreign-CID existence via the 403/404 split).
 	if _, err := o.Contacts.personForClientCID(ctx, client, cid); err != nil {
@@ -157,6 +169,17 @@ func (o *OTI) IssueFull(ctx context.Context, client *auth.Client, in IssueInput)
 		return "", time.Time{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Re-check liveness INSIDE the transaction. The personForClientCID above
+	// runs on the pool, and between it and this INSERT sit a consent read, a
+	// key-ring lookup and a signer round trip - an erasure landing in that
+	// window ran its `UPDATE oti SET status='REVOKED' WHERE status='VALID'`
+	// against a row that did not exist yet, so a signed, VALID handoff token
+	// for a forgotten person committed afterwards (GDPR-ERASURE-6). Either
+	// the erasure waits here and its revoke covers our row, or we wait and
+	// see the tombstone.
+	if _, err := lockPersonRows(ctx, tx, cid); err != nil {
+		return "", time.Time{}, err
+	}
 	if shareAttrs == nil {
 		shareAttrs = []string{}
 	}
@@ -283,11 +306,50 @@ func (o *OTI) VerifyFull(ctx context.Context, client *auth.Client, token, purpos
 	// One transaction end to end: a failure anywhere rolls the row back to
 	// VALID (no burned-but-undelivered handoffs) and the audit record commits
 	// with the consumption or not at all.
+	//
+	// A deadlock victim here would burn a legitimate handoff while the OTI's
+	// short window ticks (its USED transition rolls back with the rest, so
+	// the token is not consumed) - retry rather than 500.
+	var out *VerifyOutcome
+	err = retryOnDeadlock(func() error {
+		var rerr error
+		out, rerr = o.verifyFullOnce(ctx, client, claims, purpose, audience)
+		return rerr
+	})
+	return out, err
+}
+
+func (o *OTI) verifyFullOnce(ctx context.Context, client *auth.Client, claims otiClaims, purpose, audience string) (*VerifyOutcome, error) {
 	tx, err := o.Pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Take the person locks BEFORE the oti row, in erasePerson's order.
+	//
+	// The single-use CAS used to be this transaction's FIRST lock, and the
+	// persons/cids locks came later - through ensureCID's foreign key or
+	// shareIntoScope's FOR UPDATE - while erasePerson takes cids and persons
+	// first and revokes outstanding tokens LAST. That is a textbook ABBA:
+	// PostgreSQL aborted one side with 40P01, and which side lost was its
+	// choice, so an Article 17 erasure could be the victim (DB-TXN-3).
+	//
+	// The same read is the in-transaction tombstone check this path never
+	// had. Relying on erasePerson's revoke to fence it out cannot work: that
+	// revoke is the erasure's last mutation while the CAS was our first, so
+	// an erasure that started first still lost the race - and this path does
+	// not merely write PII, it CREATES the cids row that holds it, outside
+	// the set the erasure enumerated and queued webhooks for
+	// (TOKENS-LOOKUP-5). Indistinguishable from a forged token on purpose:
+	// a "this person was erased" oracle is what the REVOKED branch avoids.
+	personID, err := lockPersonRows(ctx, tx, claims.CID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, ErrTokenInvalid
+		}
+		return nil, err
+	}
 
 	// Atomic single-use transition - the replay guard (no TOCTOU). The row's
 	// cid/purpose/audience are matched against the SIGNED claims as defense
@@ -326,15 +388,34 @@ func (o *OTI) VerifyFull(ctx context.Context, client *auth.Client, token, purpos
 		return nil, err
 	}
 
-	// Map to the verifier's scope: same person, the verifier's own pseudonym.
-	var personID string
-	if err := tx.QueryRow(ctx,
-		`SELECT person_id FROM cids WHERE cid=$1`, issuerCID).Scan(&personID); err != nil {
-		return nil, err
-	}
+	// Map to the verifier's scope: same person, the verifier's own
+	// pseudonym. personID and the person's row locks were taken before the
+	// CAS (see above), so ensureCID cannot race an erasure here.
 	verifierCID, err := ensureCID(ctx, tx, personID, client.Scope)
 	if err != nil {
 		return nil, err
+	}
+	// M3: filter by the VERIFIER's attribute allowlist BEFORE anything is
+	// copied or evaluated.
+	//
+	// The filter used to run AFTER tx.Commit, compensating an
+	// already-durable write with stripSharedAttr - an unlocked
+	// read-modify-write on the pool with no compare-and-set, no version
+	// snapshot and no audit row. Two things followed: a forbidden value was
+	// persisted in the verifier's blob before any check (and stayed there
+	// for good if the strip failed, e.g. on a cancelled request context, at
+	// which point the OTI is already USED and nothing re-runs it), and the
+	// strip could clobber a concurrent register's merge (AUTHZ-4).
+	// Compensating a committed write with a second unsynchronised write is
+	// not equivalent to not making it. Not copying it is.
+	if client.AllowedAttributes != nil {
+		kept := shareAttrs[:0]
+		for _, a := range shareAttrs {
+			if client.CanReadAttribute(a) {
+				kept = append(kept, a)
+			}
+		}
+		shareAttrs = kept
 	}
 	// Copy issuer-authorized attributes into the verifier-scope blob so
 	// delayed, just-in-time reads work without the verifier storing PII.
@@ -347,6 +428,26 @@ func (o *OTI) VerifyFull(ctx context.Context, client *auth.Client, token, purpos
 	var preds []Predicate
 	if err := json.Unmarshal(predsJSON, &preds); err != nil {
 		return nil, err
+	}
+	// A predicate is a one-bit oracle for its attribute, so the allowlist
+	// gates it too - and again before evaluation, so the audit detail
+	// records what was actually disclosed rather than what was requested.
+	if client.AllowedAttributes != nil {
+		keptPreds := preds[:0]
+		for _, pr := range preds {
+			if client.CanReadAttribute(pr.Attr) {
+				keptPreds = append(keptPreds, pr)
+			}
+		}
+		preds = keptPreds
+	}
+	// A self-addressed token is not a handoff, it is a read of one's own
+	// scope - and shareIntoScope already short-circuits on it. Evaluating
+	// predicates for it turned an OTI into an oracle that answers attribute
+	// questions without going through GetAttribute's purpose and consent
+	// gates (TOKENS-LOOKUP-6). Same short-circuit, same reason.
+	if issuerCID == verifierCID {
+		preds = nil
 	}
 	predResults, err := o.evalPredicates(ctx, tx, issuerCID, preds)
 	if err != nil {
@@ -376,72 +477,12 @@ func (o *OTI) VerifyFull(ctx context.Context, client *auth.Client, token, purpos
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	// M3: filter the disclosure by the VERIFIER's attribute allowlist. A
-	// predicate is a one-bit oracle for its attribute, so a narrowed
-	// verifier must receive neither the shared value nor the predicate
-	// result for an attribute outside its allowlist. shareIntoScope has
-	// already run, so also strip any just-copied value it may not read.
-	if client.AllowedAttributes != nil {
-		kept := shared[:0]
-		for _, a := range shared {
-			if client.CanReadAttribute(a) {
-				kept = append(kept, a)
-			} else {
-				// Undo the copy into this scope's blob for a forbidden attr.
-				if err := o.stripSharedAttr(ctx, verifierCID, a); err != nil {
-					return nil, err
-				}
-			}
-		}
-		shared = kept
-		fpr := predResults[:0]
-		for _, pr := range predResults {
-			if client.CanReadAttribute(pr.Attr) {
-				fpr = append(fpr, pr)
-			}
-		}
-		predResults = fpr
-	}
 	return &VerifyOutcome{CID: verifierCID, Shared: shared, Predicates: predResults}, nil
 }
 
 // shareIntoScope copies the listed attributes from the issuer's blob into
 // the verifier's blob (issuer values win on conflict; missing attributes are
 // silently absent). Returns the names actually copied, for the audit record.
-// stripSharedAttr removes one attribute from a verifier-scope blob, used to
-// undo a share the verifier's allowlist forbids (M3). Best-effort within a
-// fresh transaction: the value was written by shareIntoScope moments ago.
-func (o *OTI) stripSharedAttr(ctx context.Context, cid, name string) error {
-	var blob []byte
-	var keyID, alg string
-	err := o.Pool.QueryRow(ctx,
-		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1`,
-		cid).Scan(&blob, &keyID, &alg)
-	if err != nil || len(blob) == 0 {
-		return err
-	}
-	attrs, err := o.Contacts.PII.Decrypt(ctx, cid, blob, keyID, alg)
-	if err != nil {
-		return err
-	}
-	if _, ok := attrs[name]; !ok {
-		return nil
-	}
-	delete(attrs, name)
-	newKey, err := o.Ring.Newest(ctx, crypto.KeyPIIKEK)
-	if err != nil {
-		return err
-	}
-	fresh, err := o.Contacts.PII.Encrypt(ctx, cid, newKey, attrs)
-	if err != nil {
-		return err
-	}
-	_, err = o.Pool.Exec(ctx,
-		`UPDATE cids SET pii_encrypted=$2, pii_key_id=$3, pii_alg=$4, updated_at=now() WHERE cid=$1`,
-		cid, fresh, newKey, o.Contacts.PII.Algorithm())
-	return err
-}
-
 func (o *OTI) shareIntoScope(ctx context.Context, tx pgx.Tx, issuerCID, verifierCID string, attrs []string) ([]string, error) {
 	shared := []string{}
 	if len(attrs) == 0 || issuerCID == verifierCID {
@@ -464,10 +505,18 @@ func (o *OTI) shareIntoScope(ctx context.Context, tx pgx.Tx, issuerCID, verifier
 	var dstBlob []byte
 	var dstKey, dstAlg string
 	// FOR UPDATE: the merge into the verifier blob must not race a
-	// concurrent register/verify on the same cid.
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm') FROM cids WHERE cid=$1 FOR UPDATE`,
-		verifierCID).Scan(&dstBlob, &dstKey, &dstAlg); err != nil {
+	// concurrent register/verify on the same cid. The persons join carries
+	// the tombstone predicate every other blob writer holds locally, so no
+	// future caller can reintroduce a path that lands PII on an erased
+	// person (TOKENS-LOOKUP-5).
+	switch err := tx.QueryRow(ctx,
+		`SELECT COALESCE(c.pii_encrypted,''::bytea), COALESCE(c.pii_key_id,'v1'), COALESCE(c.pii_alg,'aes256gcm')
+		   FROM cids c JOIN persons p ON p.id = c.person_id
+		  WHERE c.cid=$1 AND p.erased_at IS NULL FOR UPDATE OF c`,
+		verifierCID).Scan(&dstBlob, &dstKey, &dstAlg); {
+	case err == pgx.ErrNoRows:
+		return nil, ErrTokenInvalid
+	case err != nil:
 		return nil, err
 	}
 	dst := map[string]string{}
