@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cold-boot and multi-replica scenarios (PLAN.md, Phase 7.3).
+# Cold-boot and multi-replica scenarios.
 #
 # The migration race that crash-looped the whole stack was found by accident:
 # one CI leg happened to start two processes against an empty volume. Neither

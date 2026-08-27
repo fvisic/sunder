@@ -87,7 +87,7 @@ why the laptop runs below never reached the plateau.
 > storage sustains **4,914 commits/sec** when the advisory lock is removed
 > from an otherwise identical transaction. Storage was never the bound.
 > The lock is, on its own. See the scale-test section below and Phase 4 in
-> `PLAN.md`.
+> the internal roadmap.
 
 **What this means honestly.**
 
@@ -178,7 +178,8 @@ Throughput did not change (171.6 / 363.7 / 343.6 rps at c=1/8/32), and was
 not expected to: the plateau is the lock, not the index. What this buys is
 storage and cache headroom for when P4.1 removes the plateau.
 
-Phase 4 in `PLAN.md` specifies the rest of the work these numbers imply.
+The audit-throughput work these numbers imply shipped in v0.4.0: async
+sealing, bucketed read events and an external sealer (`CHANGELOG.md`).
 
 ## P4.1 applied (2026-08-25): the ceiling is gone
 
