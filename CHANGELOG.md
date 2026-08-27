@@ -316,4 +316,4 @@ green at 90.2%.
   multiplier.
 
 ## v0.3.0 and earlier
-See the git history and `PLAN.md` (Phases 1, 2, 4, 5).
+See the git history.
