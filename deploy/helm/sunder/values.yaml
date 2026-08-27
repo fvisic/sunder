@@ -113,6 +113,54 @@ tunables:
   # FRESH bucket. Set it only when a proxy you control writes it.
   apiClientIpHeader: ""  # SUNDER_API_CLIENT_IP_HEADER
 
+# Derived search indexes (F1/F2). Both OFF by default: each widens the search
+# surface and adds token rows per contact. Enabling either on an existing
+# dataset means "flip the value, then run `sunder keys rekey`" - the sweep
+# backfills the derived tokens from the encrypted blobs.
+search:
+  fuzzyName: false      # SUNDER_SEARCH_FUZZY_NAME: phonetic name narrowing
+  phoneSuffix: false    # SUNDER_SEARCH_PHONE_SUFFIX: last-8-digit phone lookup
+  # Strict posture: fuzzy and partial lookups additionally spend a 60-second
+  # single-use unlock token. Off by default because a pre-flight round trip
+  # per caller-ID lookup kills that flow; BULK surfaces require one regardless.
+  unlock: false         # SUNDER_SEARCH_UNLOCK
+
+# Cross-org shares (F6).
+shares:
+  # When true, GET /v1/shares/{uuid} needs no credential - the UUID IS the
+  # bearer. Logged as a startup warning, and rate-limited per IP via
+  # tunables.apiClientIpHeader, which behind an ingress you must set for the
+  # limit to mean anything.
+  public: false         # SUNDER_SHARES_PUBLIC
+
+# Attribute version history (F8). Version history is personal data: the
+# retention sweep prunes it and erasure destroys it like any other blob.
+versions:
+  keep: ""              # SUNDER_VERSIONS_KEEP, e.g. "5" (0 = off, max 1000)
+  ttl: ""               # SUNDER_VERSIONS_TTL, e.g. "365d" (0s = count cap only)
+
+# File vault (F5). Off unless storage is set.
+#
+# `local` is deliberately NOT offered here: ciphertext would live in a
+# per-process directory while metadata and the wrapped DEK live in the shared
+# database, so a second replica answers a download with 200 and an empty body.
+# On Kubernetes that is not a configuration choice, it is a data-loss shape.
+files:
+  storage: ""           # SUNDER_FILES_STORAGE: "" (disabled) or "s3"
+  maxMB: ""             # SUNDER_FILES_MAX_MB, 1-256 with the s3 driver
+  # Simultaneous uploads. A single-PUT body is buffered whole, so peak upload
+  # memory is roughly this times maxMB - size it against the pod's limit.
+  maxConcurrentUploads: ""  # SUNDER_FILES_MAX_CONCURRENT_UPLOADS (default 4)
+  s3:
+    endpoint: ""        # SUNDER_FILES_S3_ENDPOINT, https
+    bucket: ""          # SUNDER_FILES_S3_BUCKET
+    region: ""          # SUNDER_FILES_S3_REGION (default us-east-1)
+    pathStyle: false    # SUNDER_FILES_S3_PATH_STYLE, true for MinIO
+    # Access key id and secret come from a Secret with keys
+    # SUNDER_FILES_S3_ACCESS_KEY and SUNDER_FILES_S3_SECRET_KEY - never from
+    # values.yaml, which lands in the release manifest.
+    existingSecret: ""
+
 anchor:
   enabled: true
   schedule: "17 2 * * *"       # daily; only a 32-byte digest leaves the cluster

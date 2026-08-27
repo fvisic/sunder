@@ -119,6 +119,73 @@ capabilities: {drop: [ALL]}
 - name: SUNDER_KEYSTORE_ALLOW_MINT
   value: "true"
 {{- end }}
+{{- if .Values.search.fuzzyName }}
+- name: SUNDER_SEARCH_FUZZY_NAME
+  value: "true"
+{{- end }}
+{{- if .Values.search.phoneSuffix }}
+- name: SUNDER_SEARCH_PHONE_SUFFIX
+  value: "true"
+{{- end }}
+{{- if .Values.search.unlock }}
+- name: SUNDER_SEARCH_UNLOCK
+  value: "true"
+{{- end }}
+{{- if .Values.shares.public }}
+- name: SUNDER_SHARES_PUBLIC
+  value: "true"
+{{- end }}
+{{- with .Values.versions.keep }}
+- name: SUNDER_VERSIONS_KEEP
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.versions.ttl }}
+- name: SUNDER_VERSIONS_TTL
+  value: {{ . | quote }}
+{{- end }}
+{{- if .Values.files.storage }}
+{{- if ne .Values.files.storage "s3" }}
+{{- fail "files.storage must be \"s3\": the local driver keeps ciphertext in a per-process directory while its metadata and wrapped DEK live in the shared database, so a second replica answers a download with 200 and an empty body" }}
+{{- end }}
+- name: SUNDER_FILES_STORAGE
+  value: {{ .Values.files.storage | quote }}
+{{- with .Values.files.maxMB }}
+- name: SUNDER_FILES_MAX_MB
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.files.maxConcurrentUploads }}
+- name: SUNDER_FILES_MAX_CONCURRENT_UPLOADS
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.files.s3.endpoint }}
+- name: SUNDER_FILES_S3_ENDPOINT
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.files.s3.bucket }}
+- name: SUNDER_FILES_S3_BUCKET
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.files.s3.region }}
+- name: SUNDER_FILES_S3_REGION
+  value: {{ . | quote }}
+{{- end }}
+{{- if .Values.files.s3.pathStyle }}
+- name: SUNDER_FILES_S3_PATH_STYLE
+  value: "true"
+{{- end }}
+{{- with .Values.files.s3.existingSecret }}
+- name: SUNDER_FILES_S3_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ . }}
+      key: SUNDER_FILES_S3_ACCESS_KEY
+- name: SUNDER_FILES_S3_SECRET_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ . }}
+      key: SUNDER_FILES_S3_SECRET_KEY
+{{- end }}
+{{- end }}
 {{- include "sunder.auditEnv" . }}
 {{- if .Values.audit.sealer.enabled }}
 - name: SUNDER_AUDIT_SEAL_EXTERNAL

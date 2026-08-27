@@ -231,7 +231,7 @@ jobs:
       # the guides cannot rot silently.
       - name: Build guides site
         run: |
-          pip install mkdocs-material
+          pip install mkdocs-material pyyaml
           cd docs-site && mkdocs build --strict
 
       # Claims the project has measured and withdrawn, or that shipped
@@ -244,6 +244,13 @@ jobs:
       # operator cannot find.
       - name: Config reference covers every variable
         run: ./ops/check-config-docs.sh
+
+      # The same shape, extended to the artifacts that had NO guard: the Helm
+      # chart, the Postman collection, SDK parity across all six languages,
+      # and the docs-site mirror of the config reference. v0.5.0 shipped with
+      # gaps in three of those four, every one found by a person asking.
+      - name: Every feature reaches every artifact
+        run: ./ops/check-artifact-coverage.sh
 
       - name: Refuse retracted claims
         run: |
