@@ -16,6 +16,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/fvisic/sunder/internal/auth"
+	"github.com/fvisic/sunder/internal/service"
 )
 
 // A transient mailer failure must not lose the login link.
@@ -184,10 +187,40 @@ func TestPortalStartTimingDoesNotSeparate(t *testing.T) {
 		misses = append(misses, call(fmt.Sprintf("ghost%d@example.com", i), i))
 		hits = append(hits, call(fmt.Sprintf("known%d@example.com", i), i))
 	}
+	// (1) The constant-time FLOOR is real. Nothing asserted this, so
+	// deleting the floor did not fail the test as long as both branches
+	// sped up together - and the floor is the whole mechanism (TESTS-2).
+	floor := service.PortalStartFloor()
+	// A small tolerance for timer granularity; the point is that a response
+	// cannot come back in single-digit milliseconds.
+	tolerance := 3 * time.Millisecond
+	for i, d := range append(append([]time.Duration{}, hits...), misses...) {
+		if d+tolerance < floor {
+			t.Fatalf("sample %d returned in %s, below the %s constant-time floor - the floor is not being applied", i, d, floor)
+		}
+	}
+
 	sort.Slice(hits, func(i, j int) bool { return hits[i] < hits[j] })
 	sort.Slice(misses, func(i, j int) bool { return misses[i] < misses[j] })
-	t.Logf("hit  min=%s median=%s max=%s", hits[0], hits[n/2], hits[n-1])
-	t.Logf("miss min=%s median=%s max=%s", misses[0], misses[n/2], misses[n-1])
+	hitMed, missMed := hits[n/2], misses[n/2]
+	t.Logf("hit  min=%s median=%s max=%s", hits[0], hitMed, hits[n-1])
+	t.Logf("miss min=%s median=%s max=%s", misses[0], missMed, misses[n-1])
+
+	// (2) A LOCATION statistic. The old assertion - "the fastest hit is not
+	// slower than the slowest miss" - fails only on complete disjointness,
+	// so a handler whose known-address branch was systematically 15ms
+	// slower passed unconditionally as long as the noisy tails overlapped.
+	// An attacker taking the median of nine probes separates that easily.
+	delta := hitMed - missMed
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > 8*time.Millisecond {
+		t.Fatalf("median hit %s vs median miss %s (delta %s): the branches separate on a location statistic, which is all an attacker needs",
+			hitMed, missMed, delta)
+	}
+
+	// (3) The cheap disjointness check, kept.
 	if hits[0] > misses[n-1] {
 		t.Fatalf("perfect separation: slowest miss %s < fastest hit %s - single-shot enumeration",
 			misses[n-1], hits[0])
@@ -277,47 +310,142 @@ func TestPortalSessionEdgeInputs(t *testing.T) {
 	}
 }
 
-// P6/P7: the portal listener carries the full timeout set, and the two
-// delivery queues drain concurrently so one hanging mailer cannot starve
-// the other.
-func TestPortalListenerTimeoutsAndConcurrentDrain(t *testing.T) {
+// TestDeliveryQueuesDrainConcurrently: a hanging mailer must not starve the
+// erasure-webhook queue - an Article 17 delivery path.
+//
+// This test used to seed only ONE of the two queues it claimed to test in
+// parallel: no erasure event was ever queued, so GDPR.DeliverPending's claim
+// SELECT returned nothing and finished in microseconds. Replacing the two
+// goroutines with two SEQUENTIAL calls left the elapsed time unchanged and
+// the test still passed, so it could not distinguish concurrent from
+// sequential drain at all (TESTS-1). Both queues carry slow work now, and
+// the assertion is on the RENDEZVOUS rather than on wall-clock: it is exact
+// under load instead of a threshold that flakes.
+func TestDeliveryQueuesDrainConcurrently(t *testing.T) {
 	e := newPortalEnv(t)
 	ctx := context.Background()
 	e.register(t, "concurrent@example.com")
 
-	// A mailer that hangs longer than one tick.
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(400 * time.Millisecond)
-		w.WriteHeader(200)
-	}))
-	defer slow.Close()
-	if _, err := e.srv.Store.Pool.Exec(ctx,
-		`UPDATE webhooks SET url=$1 WHERE scope='_portal'`, slow.URL); err != nil {
+	// Both endpoints block until BOTH have been entered. Sequential drain
+	// can never satisfy that (the first would wait for a request the second
+	// sweep has not made yet); concurrent drain always does. A rendezvous
+	// rather than a wall-clock threshold, so the assertion is exact under
+	// CI load instead of flaky.
+	mailIn, eraseIn := make(chan struct{}), make(chan struct{})
+	var mailOnce, eraseOnce sync.Once
+	rendezvous := func(mine chan struct{}, once *sync.Once, other chan struct{}) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			once.Do(func() { close(mine) })
+			select {
+			case <-other:
+			case <-time.After(5 * time.Second):
+			}
+			w.WriteHeader(200)
+		}
+	}
+
+	// Seed the ERASURE queue FIRST, while the crm scope still has no
+	// webhook: Erase dispatches a detached delivery of its own, and letting
+	// that hit the rendezvous handler would consume the erasure side before
+	// the test starts.
+	victim := e.register(t, "erase-me@example.com")
+	officer := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions: []string{auth.ActDSRErase}, AllowedPurposes: []string{"support"}}
+	if _, _, _, err := e.srv.GDPR.EraseWithCascade(ctx, officer, victim, nil); err != nil {
 		t.Fatal(err)
 	}
-	// A fast erasure webhook for the crm scope.
-	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-	}))
-	defer fast.Close()
+	e.srv.GDPR.Drain()
+
+	mailer := httptest.NewServer(rendezvous(mailIn, &mailOnce, eraseIn))
+	defer mailer.Close()
+	if _, err := e.srv.Store.Pool.Exec(ctx,
+		`UPDATE webhooks SET url=$1 WHERE scope='_portal'`, mailer.URL); err != nil {
+		t.Fatal(err)
+	}
+	eraseHook := httptest.NewServer(rendezvous(eraseIn, &eraseOnce, mailIn))
+	defer eraseHook.Close()
 	if _, err := e.srv.Store.Pool.Exec(ctx,
 		`INSERT INTO webhooks (scope, url, secret) VALUES ('crm', $1, 's')
-		 ON CONFLICT (scope) DO UPDATE SET url=$1`, fast.URL); err != nil {
+		 ON CONFLICT (scope) DO UPDATE SET url=$1`, eraseHook.URL); err != nil {
 		t.Fatal(err)
 	}
+	// The event was settled NO_WEBHOOK a moment ago (no endpoint existed);
+	// with one registered it is deliverable again.
+	if _, err := e.srv.Store.Pool.Exec(ctx,
+		`UPDATE erasure_events SET status='PENDING', attempts=0, claimed_at=NULL`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed the MAIL queue.
 	if rec, _ := e.call(t, "", "POST", "/portal/api/start", `{"email":"concurrent@example.com"}`); rec.Code != 202 {
 		t.Fatal("start")
 	}
 
-	// Both sweeps in parallel: the erasure queue must not wait for the
-	// hanging mailer.
-	start := time.Now()
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = e.srv.Portal.DeliverPendingMail(ctx) }()
-	go func() { defer wg.Done(); _, _ = e.srv.GDPR.DeliverPending(ctx) }()
-	wg.Wait()
-	if elapsed := time.Since(start); elapsed > 900*time.Millisecond {
-		t.Fatalf("the two queues must drain concurrently, took %s", elapsed)
+	var mailErr, eraseErr error
+	var mailed, delivered int
+	go func() { defer wg.Done(); mailed, mailErr = e.srv.Portal.DeliverPendingMail(ctx) }()
+	go func() { defer wg.Done(); delivered, eraseErr = e.srv.GDPR.DeliverPending(ctx) }()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the two queues did not drain concurrently: each endpoint waits for the other to be entered, so a sequential drain deadlocks until the 5s handler timeout")
+	}
+	if mailErr != nil || eraseErr != nil {
+		t.Fatalf("sweeps: mail=%v erase=%v", mailErr, eraseErr)
+	}
+	if mailed != 1 || delivered != 1 {
+		t.Fatalf("both sweeps must have delivered one item: mail=%d erase=%d", mailed, delivered)
+	}
+}
+
+// The portal listener's timeout set: the claim the old test's NAME made and
+// its body never checked (TESTS-1). The portal is the UNAUTHENTICATED public
+// surface, so a slow-loris there is cheaper for an attacker than anywhere
+// else - every timeout must be set, and set to the API listener's values.
+func TestPortalListenerCarriesTheFullTimeoutSet(t *testing.T) {
+	e := newPortalEnv(t)
+	e.srv.Cfg.PortalListen = "127.0.0.1:0"
+	e.srv.Cfg.Listen = "127.0.0.1:0"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- e.srv.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-runDone })
+
+	var portal, api *http.Server
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		portal, api = e.srv.ServersForTest()
+		if portal != nil && api != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if portal == nil {
+		t.Fatal("the portal listener was never constructed")
+	}
+	for _, tc := range []struct {
+		name          string
+		portalD, apiD time.Duration
+	}{
+		{"ReadHeaderTimeout", portal.ReadHeaderTimeout, api.ReadHeaderTimeout},
+		{"ReadTimeout", portal.ReadTimeout, api.ReadTimeout},
+		{"WriteTimeout", portal.WriteTimeout, api.WriteTimeout},
+		{"IdleTimeout", portal.IdleTimeout, api.IdleTimeout},
+	} {
+		if tc.portalD == 0 {
+			t.Errorf("portal listener %s is unset - the unauthenticated surface must not be slow-loris-able", tc.name)
+			continue
+		}
+		// The portal may be STRICTER than the API (it is: a shorter read
+		// budget for an unauthenticated surface), never looser.
+		if tc.apiD != 0 && tc.portalD > tc.apiD {
+			t.Errorf("portal listener %s (%s) is looser than the API listener's (%s)", tc.name, tc.portalD, tc.apiD)
+		}
 	}
 }

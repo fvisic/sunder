@@ -3,6 +3,26 @@ app.kubernetes.io/name: sunder
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
+{{- /*
+  One security baseline for EVERY workload. The Deployment had both blocks,
+  the anchor and retention CronJobs only the pod-level one, and the sealer
+  Deployment and verify-audit CronJob neither - so under `restricted` Pod
+  Security Admission the Deployment is rejected visibly while the CronJob is
+  admitted and only its Jobs fail at creation time, silently stopping daily
+  tamper-evidence verification (OPS-CLI-CONFIG-11).
+*/}}
+{{- define "sunder.podSecurityContext" -}}
+runAsNonRoot: true
+runAsUser: 65532
+seccompProfile: {type: RuntimeDefault}
+{{- end }}
+
+{{- define "sunder.containerSecurityContext" -}}
+allowPrivilegeEscalation: false
+readOnlyRootFilesystem: true
+capabilities: {drop: [ALL]}
+{{- end }}
+
 {{- define "sunder.env" -}}
 - name: SUNDER_DB_URL
   valueFrom:

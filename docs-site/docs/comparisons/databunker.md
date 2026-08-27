@@ -109,7 +109,7 @@ CRED=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client cr
   -id bench -name Bench -scope crm \
   -actions contacts.register,lookup,attributes.read -purposes benchmark -rate 10000000 | tail -1)
 
-go run ./benchmark -target sunder -base http://localhost:8080 -cred "$CRED" -op write -n 5000 -c 16 -seed round1
+SUNDER_CRED="$CRED" go run ./benchmark -target sunder -base http://localhost:8080 -op write -n 5000 -c 16 -seed round1
 ```
 
 Full setup (including standing up Databunker on its own PostgreSQL) is in `benchmark/README.md`.

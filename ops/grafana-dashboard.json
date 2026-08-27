@@ -1,51 +1,240 @@
 {
-  "title": "Sunder",
-  "uid": "sunder-main",
-  "schemaVersion": 39,
-  "tags": ["sunder"],
-  "time": {"from": "now-6h", "to": "now"},
-  "templating": {"list": [{"name": "job", "type": "query", "datasource": null, "query": "label_values(sunder_requests_total, job)", "refresh": 2}]},
-  "panels": [
-    {
-      "id": 1, "type": "timeseries", "title": "Request rate by handler",
-      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (handler) (rate(sunder_requests_total{job=\"$job\"}[5m]))", "legendFormat": "{{handler}}"}]
-    },
-    {
-      "id": 2, "type": "timeseries", "title": "p99 latency by handler (target: verify <10ms, lookup/attr <15ms, issue <20ms)",
-      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
-      "fieldConfig": {"defaults": {"unit": "s"}},
-      "targets": [{"expr": "histogram_quantile(0.99, sum by (handler, le) (rate(sunder_request_seconds_bucket{job=\"$job\"}[5m])))", "legendFormat": "{{handler}}"}]
-    },
-    {
-      "id": 3, "type": "timeseries", "title": "5xx error rate",
-      "gridPos": {"x": 0, "y": 8, "w": 8, "h": 8},
-      "targets": [{"expr": "sum by (handler) (rate(sunder_requests_total{job=\"$job\", code=~\"5..\"}[5m]))", "legendFormat": "{{handler}}"}]
-    },
-    {
-      "id": 4, "type": "timeseries", "title": "Lookup misses by client (enumeration signal)",
-      "gridPos": {"x": 8, "y": 8, "w": 8, "h": 8},
-      "targets": [{"expr": "sum by (client) (rate(sunder_lookup_misses_total{job=\"$job\"}[5m]))", "legendFormat": "{{client}}"}]
-    },
-    {
-      "id": 5, "type": "timeseries", "title": "Rate-limited requests by client",
-      "gridPos": {"x": 16, "y": 8, "w": 8, "h": 8},
-      "targets": [{"expr": "sum by (client) (rate(sunder_ratelimited_total{job=\"$job\"}[5m]))", "legendFormat": "{{client}}"}]
-    },
-    {
-      "id": 6, "type": "stat", "title": "Auth failures (401) / min",
-      "gridPos": {"x": 0, "y": 16, "w": 6, "h": 6},
-      "targets": [{"expr": "sum(rate(sunder_requests_total{job=\"$job\", code=\"401\"}[5m])) * 60"}]
-    },
-    {
-      "id": 7, "type": "stat", "title": "Requests / s (total)",
-      "gridPos": {"x": 6, "y": 16, "w": 6, "h": 6},
-      "targets": [{"expr": "sum(rate(sunder_requests_total{job=\"$job\"}[5m]))"}]
-    },
-    {
-      "id": 8, "type": "timeseries", "title": "Consent / DSR / OTI denials (403,409,410) by code",
-      "gridPos": {"x": 12, "y": 16, "w": 12, "h": 6},
-      "targets": [{"expr": "sum by (code) (rate(sunder_requests_total{job=\"$job\", code=~\"403|409|410\"}[5m]))", "legendFormat": "{{code}}"}]
-    }
+ "title": "Sunder",
+ "uid": "sunder-main",
+ "schemaVersion": 39,
+ "tags": [
+  "sunder"
+ ],
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "job",
+    "type": "query",
+    "datasource": null,
+    "query": "label_values(sunder_requests_total, job)",
+    "refresh": 2
+   }
   ]
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "timeseries",
+   "title": "Request rate by handler",
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "expr": "sum by (handler) (rate(sunder_requests_total{job=\"$job\"}[5m]))",
+     "legendFormat": "{{handler}}"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "timeseries",
+   "title": "p99 latency by handler (target: verify <10ms, lookup/attr <15ms, issue <20ms)",
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    }
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.99, sum by (handler, le) (rate(sunder_request_seconds_bucket{job=\"$job\"}[5m])))",
+     "legendFormat": "{{handler}}"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "timeseries",
+   "title": "5xx error rate",
+   "gridPos": {
+    "x": 0,
+    "y": 8,
+    "w": 8,
+    "h": 8
+   },
+   "targets": [
+    {
+     "expr": "sum by (handler) (rate(sunder_requests_total{job=\"$job\", code=~\"5..\"}[5m]))",
+     "legendFormat": "{{handler}}"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "timeseries",
+   "title": "Lookup misses by client (enumeration signal)",
+   "gridPos": {
+    "x": 8,
+    "y": 8,
+    "w": 8,
+    "h": 8
+   },
+   "targets": [
+    {
+     "expr": "sum by (client) (rate(sunder_lookup_misses_total{job=\"$job\"}[5m]))",
+     "legendFormat": "{{client}}"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "type": "timeseries",
+   "title": "Rate-limited requests by client",
+   "gridPos": {
+    "x": 16,
+    "y": 8,
+    "w": 8,
+    "h": 8
+   },
+   "targets": [
+    {
+     "expr": "sum by (client) (rate(sunder_ratelimited_total{job=\"$job\"}[5m]))",
+     "legendFormat": "{{client}}"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "type": "stat",
+   "title": "Auth failures (401) / min",
+   "gridPos": {
+    "x": 0,
+    "y": 16,
+    "w": 6,
+    "h": 6
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(sunder_requests_total{job=\"$job\", code=\"401\"}[5m])) * 60"
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "type": "stat",
+   "title": "Requests / s (total)",
+   "gridPos": {
+    "x": 6,
+    "y": 16,
+    "w": 6,
+    "h": 6
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(sunder_requests_total{job=\"$job\"}[5m]))"
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "Consent / DSR / OTI denials (403,409,410) by code",
+   "gridPos": {
+    "x": 12,
+    "y": 16,
+    "w": 12,
+    "h": 6
+   },
+   "targets": [
+    {
+     "expr": "sum by (code) (rate(sunder_requests_total{job=\"$job\", code=~\"403|409|410\"}[5m]))",
+     "legendFormat": "{{code}}"
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "type": "timeseries",
+   "title": "Audit chain: unsealed rows (THE ALARM)",
+   "description": "THREAT-MODEL calls this the alarm for the async sealing window: rows here carry no chain hash, so verify-audit cannot cover them and an anchor does not attest them. It should oscillate near zero. A value that does not come back down means the sealer is dead or crash-looping - under SUNDER_AUDIT_SEAL_EXTERNAL that is the `sunder sealer` process. Paired with the SunderAuditSealerStalled and SunderAuditSealerStopped alert rules.",
+   "gridPos": {
+    "x": 0,
+    "y": 22,
+    "w": 12,
+    "h": 6
+   },
+   "targets": [
+    {
+     "expr": "max(sunder_audit_unsealed_rows{job=\"$job\"})",
+     "legendFormat": "unsealed"
+    }
+   ]
+  },
+  {
+   "id": 10,
+   "type": "timeseries",
+   "title": "Erasure notifications stuck (SENDING) / abandoned (FAILED)",
+   "description": "Article 19 downstream notifications. SENDING means a worker claimed the event and has not recorded an outcome; it should be transient. A persistent value means the scopes that hold the person's records are not being told to delete them. FAILED (the second series) means an endpoint exhausted its attempts - that scope still holds the data.",
+   "gridPos": {
+    "x": 12,
+    "y": 22,
+    "w": 12,
+    "h": 6
+   },
+   "targets": [
+    {
+     "expr": "max(sunder_erasure_events_sending{job=\"$job\"})",
+     "legendFormat": "sending"
+    },
+    {
+     "expr": "max(sunder_erasure_events_failed{job=\"$job\"})",
+     "legendFormat": "failed"
+    }
+   ]
+  },
+  {
+   "id": 11,
+   "type": "timeseries",
+   "title": "Key material minted at runtime",
+   "description": "`sunder bootstrap` is the only legitimate source, and it is not `serve`. Any non-zero value on a serving process means the keystore volume is lost, unmounted or pointed at the wrong path: data written under the missing versions is unreadable. Stop the replica and restore the correct keystore before writing anything further.",
+   "gridPos": {
+    "x": 0,
+    "y": 28,
+    "w": 12,
+    "h": 6
+   },
+   "targets": [
+    {
+     "expr": "max(sunder_keystore_minted_total{job=\"$job\"})",
+     "legendFormat": "minted"
+    }
+   ]
+  },
+  {
+   "id": 12,
+   "type": "timeseries",
+   "title": "Rate-limit backend failures (Redis)",
+   "description": "Every limiter decision that fell back because Redis was unreachable. Security-critical buckets (authfail:, share-public:, portal:, claims:, audit-*) fail CLOSED regardless; the rest follow SUNDER_REDIS_FAIL_CLOSED, which defaults to fail-open. A sustained non-zero rate means abuse control is degraded fleet-wide.",
+   "gridPos": {
+    "x": 12,
+    "y": 28,
+    "w": 12,
+    "h": 6
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(sunder_ratelimit_backend_failures_total{job=\"$job\"}[5m]))",
+     "legendFormat": "failures/s"
+    }
+   ]
+  }
+ ]
 }

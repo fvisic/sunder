@@ -19,7 +19,11 @@ sets none of the new variables behaves identically after an upgrade.
 | Variable | Default | Description |
 |---|---|---|
 | `SUNDER_KEYSTORE` | `file` | `file`, `vault` or `pkcs11` (stub). |
-| `SUNDER_KEYSTORE_PATH` | `./keystore` | Key directory for the `file` driver. |
+| `SUNDER_KEYSTORE_PATH` | `./keystore` | Key directory for the `file` driver. Note this default is **relative**: a process started from a different working directory looks at a different keystore. |
+| `SUNDER_API_CLIENT_IP_HEADER` | - | header name (e.g. `X-Forwarded-For`) whose right-most entry is the client IP on the **API** listener, used by the per-IP limit on the credential-less share fetch. Unset means `RemoteAddr`. Deliberately separate from `SUNDER_PORTAL_CLIENT_IP_HEADER`: the two listeners have different trust boundaries, and trusting a header on a socket nothing appends to hands every requester a fresh rate-limit bucket. |
+| `SUNDER_KEYSTORE_ALLOW_MINT` | `false` | Let `serve` create key material for a version that live data was already written under. Off by default, because minting there does not recover anything - it manufactures a vault that cannot read its own contents and reports healthy (`/healthz` 200, every lookup a 404). A first boot against a vault with **no** data still mints without this: nothing references the missing versions. `sunder bootstrap` always mints; it is the explicit "create this vault" act. |
+
+**A mint is always loud.** Creating key material logs `keystore: MINTING NEW key material` at WARN naming the key, and moves the `sunder_keystore_minted_total` gauge (`ops/prometheus-alerts.yaml` alerts on it). On any process other than a deliberate `bootstrap`, a non-zero value means the keystore volume is lost, unmounted or pointed at the wrong path - stop and restore it before writing anything further (`docs/RUNBOOK-BACKUP-DR.md`).
 | `SUNDER_VAULT_ADDR` / `SUNDER_VAULT_TOKEN` | - | Required for the `vault` driver (KV v2). |
 | `SUNDER_VAULT_MOUNT` | `secret` | KV v2 mount point. |
 | `SUNDER_SIGNER_SOCKET` | - | When set, ALL cryptography runs in a separate `sunder signer` process reachable on this Unix socket; this process then never holds key material and needs no keystore configuration. The signer is started with `sunder signer -socket <path>` and needs the keystore variables but no database. See the signer split section in `docs/ARCHITECTURE.md`. |
@@ -54,10 +58,12 @@ notes before changing it.
 | Variable | Default | Range | Description |
 |---|---|---|---|
 | `SUNDER_OTI_TTL` | `5m` | `30s`–`24h` | One-time-identifier lifetime (Go duration, e.g. `90s`, `15m`). An OTI is a bearer credential: a longer TTL widens the window in which an intercepted token is usable. Raise it only when the receiving system genuinely cannot verify within 5 minutes (slow queue consumers, batch handoffs); shorten it for same-network service-to-service handoffs. |
-| `SUNDER_PII_ALG` | `aes256gcm` | `aes256gcm` \| `xchacha20poly1305` | AEAD used for **newly written** PII blobs. Reads always follow the algorithm stored with each blob, so changing this is safe on a live system; convert the backlog with `sunder keys rekey` (see `docs/RUNBOOK-ALG-MIGRATION.md`). |
+| `SUNDER_PII_ALG` | `aes256gcm` | `aes256gcm` \| `xchacha20poly1305` | AEAD used for **newly written** PII blobs. Reads always follow the algorithm stored with each blob, so changing this is safe on a live system; convert the backlog with `sunder keys rekey` (see `docs/RUNBOOK-ALG-MIGRATION.md`). **AES-256-GCM uses 96-bit random nonces, which carry a birthday bound** (NIST SP 800-38D: 2^32 invocations per key). One long-lived `pii-kek` seals attribute blobs, version history, value tokens, file DEKs and portal payloads, plus a full re-seal per rotation, so a high-volume instance accumulates. `sunder_kek_seals_total{version=...}` tracks it per process and a WARN fires at 2^30; `xchacha20poly1305`'s 192-bit nonces make random nonces unconditionally safe and need no accounting. |
 | `SUNDER_WEBHOOK_TIMEOUT` | `5s` | `1s`–`5m` | Per-delivery HTTP timeout for erasure webhooks. |
 | `SUNDER_WEBHOOK_MAX_ATTEMPTS` | `10` | ≥ `1` | Failed deliveries before an erasure event is marked `FAILED` (audited). A higher cap tolerates flakier receivers but lets one dead endpoint occupy the retry queue longer. |
-| `SUNDER_DELIVER_INTERVAL` | `1m` | `5s`–`1h` | Cadence of the background webhook retry worker. `Erase` always attempts one inline delivery regardless. |
+| `SUNDER_DELIVER_INTERVAL` | `1m` | `5s`–`1h` | Cadence of the background webhook retry worker. `Erase` also dispatches one immediate delivery of its own events, detached from the request. |
+| `SUNDER_KEY_RETIRE_GRACE` | `60s` | `0`-`24h` | How long a key version must sit `RETIRING` before `sunder keys retire` will purge it. Must exceed the worst-case `KeyRing` cache staleness across the fleet: the purge is one-shot, so a replica still writing under the old version afterwards leaves search-token rows nothing will ever delete or match again. `0` disables the wait (single node); `keys retire -force` overrides it per call. |
+| `SUNDER_WORKER_CLAIM_TTL` | `10m` | `1m`–`24h` | How long a claimed (`SENDING`) erasure event or portal mail row may go unsettled before a reaper returns it to `PENDING`. Both outboxes commit the claim **before** the side effect, so this is the only thing that recovers a claim abandoned by a killed worker. Set it above the worst-case sweep time (`SUNDER_WEBHOOK_TIMEOUT` × batch size) or a slow endpoint causes a duplicate delivery - deliveries are at-least-once, so a duplicate is safe but noisy. |
 
 ## Audit sealing (P4.1)
 
@@ -70,9 +76,11 @@ it in either direction.
 |---|---|---|---|
 | `SUNDER_AUDIT_SEALING` | `async` | `async` \| `sync` | `async`: audited operations INSERT unsealed rows with no lock; a sealer chains them within `interval + delay`. Removes the instance-wide serialization (298 -> 4,114 tps on the audit write path at c=32 in the 26.8M-contact scale test). Opens a sealing window: a row is tamper-evident against edits from birth (trigger), but its chain hash exists only after sealing. `sync`: pre-P4.1 behaviour - chain lock inside the business transaction, hash at insert, zero window, serialized throughput. |
 | `SUNDER_AUDIT_SEAL_INTERVAL` | `200ms` | `50ms`-`30s` | Sealer cadence. Shorter narrows the sealing window and spends more sealer transactions. |
+| `SUNDER_AUDIT_STALE_UNSEALED` | `15m` | `1s`-`24h` | How old the OLDEST unchained row may get before `sunder verify-audit` calls it a failure. Under async sealing a backlog is normal; a stale one is the stalled-sealer incident, and the hard failure used to be gated on sync mode alone, so the daily verification CronJob exited 0 with an unbounded backlog. |
+| `SUNDER_SEALER_HEALTH_ADDR` | - | `host:port` | Address for the `sunder sealer` process's own `/healthz`, which answers 200 only while its last SUCCESSFUL seal pass is recent. The sealer logs-and-continues on error by design, so without a probe a process that lost `UPDATE` on `audit` stays Running and Ready forever. The Helm chart sets it and wires a liveness probe. |
 | `SUNDER_AUDIT_SEAL_DELAY` | `2s` | `100ms`-`5m` | How long a row must settle before sealing. Not a correctness knob (a late-committing row enters the chain late rather than being lost - `chain_seq` handles commit-order races); it only keeps chain order close to wall-clock order. |
 | `SUNDER_AUDIT_SEAL_BATCH` | `5000` | >= `100` | Rows per sealing transaction: one lock acquisition and one fsync per batch. |
-| `SUNDER_AUDIT_SEAL_EXTERNAL` | `false` | boolean | `true`: this process seals nothing; run `sunder sealer` separately. The point is privilege separation (same pattern as the P2.1 signer split): give the sealer a DB role that may UPDATE only `prev_hash`/`hash`/`chain_seq` on `audit`, and the API a role with INSERT but no UPDATE - a compromised API then cannot forge hashes over its own rows. Rejected together with `sync`. |
+| `SUNDER_AUDIT_SEAL_EXTERNAL` | `false` | boolean | `true`: this process seals nothing; run `sunder sealer` separately. The point is privilege separation (same pattern as the P2.1 signer split): give the sealer a DB role with `UPDATE (prev_hash, hash, chain_seq, hash_v)` **and** `INSERT` on `audit` plus `UPDATE (sealed_at)` on `audit_read_buckets` (it also closes read-bucket hours and writes their digest row), and the API a role with INSERT but no UPDATE - a compromised API then cannot seal, nor forge hashes over its own rows. The exact GRANTs are in `docs-site/docs/admin/audit-operations.md`; an incomplete grant makes every seal cycle fail with `permission denied for column hash_v` and stops the chain growing while `verify-audit` still reports it intact. Rejected together with `sync`. |
 
 **Why async is the default.** The advisory lock that sync mode takes on
 every audited operation was measured as the whole throughput ceiling of
@@ -133,8 +141,15 @@ mail-bomb a chosen victim. On the portal surface the limiter always fails
 **closed** if Redis is unreachable.
 
 Invalid values (unparseable durations, out-of-range numbers, unknown
-algorithm names) fail startup with a specific error - a typo can never
-silently fall back to a default.
+algorithm names, unrecognised booleans) fail startup with a specific error -
+a typo can never silently fall back to a default.
+
+**Booleans** accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`, in any
+case. Anything else is a startup error rather than a silent `false` - which
+matters most for `SUNDER_REDIS_FAIL_CLOSED` and `SUNDER_SEARCH_UNLOCK`, where
+a value like `1` used to select the opposite security posture from the one
+the configuration file appeared to declare. A variable set to the **empty
+string** means unset, and takes the default.
 
 ## Audit read events (P4.2)
 
@@ -194,7 +209,8 @@ credential can read (GetAttribute refuses, Export/Access filter, and lookup
 BY an identifier kind outside the list is refused too - a client narrowed
 to `{iban}` cannot probe emails, phones or names through 200-vs-404; the
 lookup gate keys on the BARE kind, so a list naming only a multi-value slot
-like `email_1` does not permit email lookup - name `email` itself);
+like `email_2` does not permit email lookup - name `email` itself; note
+`storeIndexed` emits `email`, `email_2`, `email_3`, never `email_1`);
 `-role readonly|service|admin` applies an action preset instead of
 `-actions`. Two actions are deliberately in NO broad preset and need an
 explicit `-actions` grant: `scopes.issue` (linkage-capable; its own
@@ -229,14 +245,15 @@ an upgrade must not silently start accepting them.
 
 | Variable | Default | Description |
 |---|---|---|
-| `SUNDER_FILES_STORAGE` | `` (disabled) | `local` or `s3` |
-| `SUNDER_FILES_DIR` | `./filestore` | local driver directory |
-| `SUNDER_FILES_MAX_MB` | `25` | per-file cap, 1-4096 |
+| `SUNDER_FILES_STORAGE` | `` (disabled) | `local` or `s3`. **`local` is SINGLE-INSTANCE ONLY**: ciphertext lives in a per-process directory while its metadata and wrapped DEK live in the shared database, so a second replica answers a download with 200, the recorded `Content-Length` and an empty body, and `retention run` collects only its own replica's objects. `s3` is the multi-replica driver. Logged as a startup warning. |
+| `SUNDER_FILES_DIR` | `./filestore` | local driver directory. A **separate backup unit** from the database and the keystore - restoring those two leaves every `files` row intact with its DEK and no object behind it (`docs/RUNBOOK-BACKUP-DR.md`). |
+| `SUNDER_FILES_MAX_MB` | `25` | per-file cap, `1`-`4096` - but `1`-`256` with the `s3` driver, whose single-PUT body must be buffered to hash it for SigV4. Above the driver's cap startup fails. Note the transport budget: file routes get their own read/write deadline sized from this value, so a large cap is reachable, but the client still has to be able to move the bytes. |
 | `SUNDER_FILES_MAX_CONCURRENT_UPLOADS` | `4` | simultaneous uploads, 1-1024; a single-PUT body is buffered whole, so peak upload memory is this times `SUNDER_FILES_MAX_MB` - excess uploads wait |
 | `SUNDER_FILES_S3_ENDPOINT` | | S3-compatible endpoint (AWS/MinIO/R2), https |
 | `SUNDER_FILES_S3_BUCKET` | | bucket name |
 | `SUNDER_FILES_S3_REGION` | `us-east-1` | SigV4 region |
-| `SUNDER_FILES_S3_ACCESS_KEY` / `_SECRET_KEY` | | credentials |
+| `SUNDER_FILES_S3_ACCESS_KEY` | | S3 access key id |
+| `SUNDER_FILES_S3_SECRET_KEY` | | S3 secret access key |
 | `SUNDER_FILES_S3_PATH_STYLE` | `false` | `true` for MinIO |
 
 Crypto chain: PII KEK wraps a per-person RECORD KEY, which wraps a
@@ -256,7 +273,7 @@ superseded values.
 | Variable | Default | Description |
 |---|---|---|
 | `SUNDER_VERSIONS_KEEP` | `0` | keep the N most recent prior blob versions per cid (0 = off, max 1000) |
-| `SUNDER_VERSIONS_TTL` | `0s` | also prune versions older than this via `sunder retention run` |
+| `SUNDER_VERSIONS_TTL` | `0s` | also prune versions older than this via `sunder retention run`. Range `0s`-`3650d`; `0s` means the count cap alone. |
 
 Every overwrite of a cid's attribute blob snapshots the PREVIOUS value
 into `cid_blob_versions` in the SAME transaction as the write. History is

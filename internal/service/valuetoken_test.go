@@ -855,7 +855,7 @@ func TestS4_TokenizeRacingErasureCannotLandToken(t *testing.T) {
 		var waiting int64
 		if err := e.admin.Pool.QueryRow(ctx, `
 			SELECT count(*) FROM pg_stat_activity
-			 WHERE wait_event_type='Lock' AND query LIKE '%FOR UPDATE OF p%'`).Scan(&waiting); err != nil {
+			 WHERE wait_event_type='Lock' AND query LIKE '%sunder:tokenize-lock%'`).Scan(&waiting); err != nil {
 			t.Fatal(err)
 		}
 		if waiting > 0 {
@@ -1024,5 +1024,175 @@ func TestBulkValidateBeforeUnlock(t *testing.T) {
 	// A clean batch validates.
 	if err := v.ValidateInputs([]service.TokenizeInput{{Value: "a"}, {Value: "b"}}); err != nil {
 		t.Fatalf("a clean batch must validate: %v", err)
+	}
+}
+
+// The 23505 recovery branch: two callers tokenizing the SAME value with
+// unique:true concurrently. One INSERT wins the partial unique index; the
+// loser must return the winner's token (dedup semantics, decided by the
+// database instead of the earlier SELECT), never a 500 - and never a second
+// live alias for one value.
+func TestConcurrentUniqueTokenizeConvergesOnOneToken(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	cid := e.register(t)
+
+	adminRing := &service.KeyRing{Pool: e.admin.Pool, RetireGrace: -1}
+	vt := &service.ValueTokens{Pool: e.admin.Pool, Eng: e.oti.Eng, Ring: adminRing, Tok: e.svc.Tok}
+	client := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions:  []string{auth.ActTokensCreate},
+		AllowedPurposes: []string{"support"}}
+
+	const writers = 8
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	tokens := make([]string, writers)
+	errs := make([]error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			tokens[i], errs[i] = vt.Tokenize(ctx, client, service.TokenizeInput{
+				Type: "string", Value: "HR1210010051863000160", CID: cid, Unique: true})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("writer %d: a concurrent unique tokenize must dedup, not fail: %v", i, err)
+		}
+	}
+	for i, tok := range tokens {
+		if tok != tokens[0] {
+			t.Fatalf("writer %d got %s, writer 0 got %s - one value bred two live aliases", i, tok, tokens[0])
+		}
+	}
+	var rows int
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM value_tokens WHERE scope='crm'`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("unique:true must leave exactly one row, got %d", rows)
+	}
+}
+
+// The bulk surface's input guards - the two the unlock token is spent
+// against, so a rejected batch must not have cost the caller their
+// single-use declaration of intent.
+func TestBulkGuards(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	vt := &service.ValueTokens{Pool: e.admin.Pool, Eng: e.oti.Eng, Ring: e.svc.Ring, Tok: e.svc.Tok}
+	client := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions:  []string{auth.ActTokensCreate, auth.ActTokensRead},
+		AllowedPurposes: []string{"support"}}
+
+	if _, err := vt.DetokenizeBulk(ctx, client, nil); err == nil {
+		t.Error("an empty bulk read must be a validation error")
+	}
+	huge := make([]string, 1001)
+	for i := range huge {
+		huge[i] = "VT-X"
+	}
+	if _, err := vt.DetokenizeBulk(ctx, client, huge); err == nil {
+		t.Error("a bulk read past the limit must be refused")
+	}
+	if _, err := vt.TokenizeBulk(ctx, client, nil); err == nil {
+		t.Error("an empty bulk create must be a validation error")
+	}
+	// A miss inside a bulk read is an empty slot, not an error: a bulk
+	// reader learns which of ITS OWN tokens are gone, nothing about why.
+	out, err := vt.DetokenizeBulk(ctx, client, []string{"VT-DOESNOTEXIST"})
+	if err != nil {
+		t.Fatalf("a miss must not fail the batch: %v", err)
+	}
+	if len(out) != 1 || out[0] != "" {
+		t.Fatalf("a miss must come back as an empty slot: %+v", out)
+	}
+}
+
+// tokenizeInTx's remaining branches: the expiry shapes, the adopt path for a
+// pre-cid row, and the dead-row cleanup that a re-tokenize after an expiry
+// depends on.
+func TestTokenizeExpiryShapesAndAdoption(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	cid := e.register(t)
+
+	adminRing := &service.KeyRing{Pool: e.admin.Pool, RetireGrace: -1}
+	vt := &service.ValueTokens{Pool: e.admin.Pool, Eng: e.oti.Eng, Ring: adminRing, Tok: e.svc.Tok}
+	client := &auth.Client{ID: "crm", Scope: "crm",
+		AllowedActions:  []string{auth.ActTokensCreate, auth.ActTokensRead},
+		AllowedPurposes: []string{"support"}}
+
+	// A sliding window: reading refreshes it.
+	sliding, err := vt.Tokenize(ctx, client, service.TokenizeInput{
+		Type: "string", Value: "sliding", SlidingSeconds: 3600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vt.Detokenize(ctx, client, sliding); err != nil {
+		t.Fatal(err)
+	}
+	var lastUsed time.Time
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT last_used FROM value_tokens WHERE token=$1`, sliding).Scan(&lastUsed); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(lastUsed) > time.Minute {
+		t.Fatal("a read must refresh the sliding window")
+	}
+
+	// A hard expiry that has passed: the row is dead, so a re-tokenize of
+	// the same value must mint a FRESH token rather than resurrect it or
+	// collide on the unique index.
+	dead, err := vt.Tokenize(ctx, client, service.TokenizeInput{
+		Type: "string", Value: "expiring", CID: cid, Unique: true, ExpiresFinal: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE value_tokens SET expires_final = now() - interval '1 minute' WHERE token=$1`, dead); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vt.Detokenize(ctx, client, dead); err == nil {
+		t.Fatal("an expired token must not detokenize")
+	}
+	fresh, err := vt.Tokenize(ctx, client, service.TokenizeInput{
+		Type: "string", Value: "expiring", CID: cid, Unique: true, ExpiresFinal: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatalf("re-tokenizing a value whose token expired must succeed: %v", err)
+	}
+	if fresh == dead {
+		t.Fatal("an expired token must not be resurrected")
+	}
+
+	// The upgrade boundary: a live UNATTRIBUTED row for a value is ADOPTED
+	// by the first caller that supplies a cid, rather than breeding an alias
+	// erasure could never reach.
+	orphan, err := vt.Tokenize(ctx, client, service.TokenizeInput{
+		Type: "string", Value: "adopt-me", Unique: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted, err := vt.Tokenize(ctx, client, service.TokenizeInput{
+		Type: "string", Value: "adopt-me", CID: cid, Unique: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted != orphan {
+		t.Fatalf("the pre-cid row must be adopted, not duplicated: %s vs %s", adopted, orphan)
+	}
+	var boundCID *string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT cid FROM value_tokens WHERE token=$1`, orphan).Scan(&boundCID); err != nil {
+		t.Fatal(err)
+	}
+	if boundCID == nil || *boundCID != cid {
+		t.Fatal("the adopted row must now be bound to the person, so erasure reaches it")
 	}
 }

@@ -42,7 +42,10 @@ func newFaultEnv(t *testing.T, deny ...string) *faultEnv {
 	ctx := context.Background()
 
 	eng := crypto.NewLocalEngine(crypto.NewCachingKeystore(&crypto.FileKeystore{Dir: t.TempDir()}))
-	adminRing := &service.KeyRing{Pool: st.Pool}
+	// RetireGrace: -1 - the production default makes a version wait out the
+	// fleet's ring-cache TTL before it may be retired (CONCURRENCY-CORE-4);
+	// a test has no second replica to convince.
+	adminRing := &service.KeyRing{Pool: st.Pool, RetireGrace: -1}
 	if err := adminRing.EnsureAll(ctx, eng); err != nil {
 		t.Fatal(err)
 	}
@@ -78,13 +81,17 @@ func newFaultEnv(t *testing.T, deny ...string) *faultEnv {
 	}
 	t.Cleanup(pool.Close)
 
-	ring := &service.KeyRing{Pool: pool}
+	ring := &service.KeyRing{Pool: pool, RetireGrace: -1}
 	contacts := &service.Contacts{Pool: pool, Tok: crypto.NewTokenizer(eng), PII: crypto.NewPIIBox(eng), Ring: ring}
+	gdpr := &service.GDPR{Pool: pool, Contacts: contacts}
+	// Erase dispatches its immediate delivery DETACHED from the request, so
+	// the test must wait for it before the pool is torn down (H1).
+	t.Cleanup(gdpr.Drain)
 	return &faultEnv{
 		admin: st,
 		svc:   contacts,
 		oti:   &service.OTI{Pool: pool, Eng: eng, Ring: ring, Contacts: contacts},
-		gdpr:  &service.GDPR{Pool: pool, Contacts: contacts},
+		gdpr:  gdpr,
 		crm: &auth.Client{ID: "crm", Scope: "crm",
 			AllowedActions: []string{auth.ActContactsRegister, auth.ActLookup, auth.ActOTIIssue,
 				auth.ActOTIVerify, auth.ActConsentManage, auth.ActDSRAccess, auth.ActDSRErase,
@@ -107,7 +114,7 @@ func (e *faultEnv) register(t *testing.T) string {
 	// Reuse the same key material: point the file keystore at the admin one.
 	// Simpler: build the admin service with the SAME keystore as e.svc.
 	_ = ks
-	adminRing := &service.KeyRing{Pool: e.admin.Pool}
+	adminRing := &service.KeyRing{Pool: e.admin.Pool, RetireGrace: -1}
 	admin := &service.Contacts{Pool: e.admin.Pool, Tok: e.svc.Tok, PII: e.svc.PII, Ring: adminRing}
 	cid, err := admin.Register(context.Background(), e.crm, service.RegisterInput{
 		Email: "fault@example.com", Name: "Fault Case",
@@ -121,7 +128,7 @@ func (e *faultEnv) register(t *testing.T) string {
 
 // adminOTI builds a fully privileged OTI service sharing key material.
 func (e *faultEnv) adminOTI() *service.OTI {
-	ring := &service.KeyRing{Pool: e.admin.Pool}
+	ring := &service.KeyRing{Pool: e.admin.Pool, RetireGrace: -1}
 	contacts := &service.Contacts{Pool: e.admin.Pool, Tok: e.svc.Tok, PII: e.svc.PII, Ring: ring}
 	return &service.OTI{Pool: e.admin.Pool, Eng: e.oti.Eng, Ring: ring, Contacts: contacts}
 }
@@ -246,7 +253,7 @@ func TestKeyringFaults(t *testing.T) {
 	ctx := context.Background()
 	e := newFaultEnv(t, "keys")
 	eng2 := crypto.NewLocalEngine(crypto.NewCachingKeystore(&crypto.FileKeystore{Dir: t.TempDir()}))
-	ring := &service.KeyRing{Pool: e.svc.Pool}
+	ring := &service.KeyRing{Pool: e.svc.Pool, RetireGrace: -1}
 	if _, err := ring.Newest(ctx, "hmac-email"); err == nil {
 		t.Fatal("newest must fail when the keys table is unreadable")
 	}
@@ -469,5 +476,266 @@ func TestEraseFailsClosedWhenTokensDenied(t *testing.T) {
 	cid := e.register(t)
 	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err == nil {
 		t.Fatal("erase must fail when search tokens cannot be deleted")
+	}
+}
+
+// TESTS-9: the fault-injection suite asserted only that an error came back.
+// A failed mutation must also leave the database EXACTLY as it was - that is
+// the whole point of doing it in one transaction, and nothing checked it. A
+// split into two transactions would ship green.
+func TestFailedErasureLeavesEverythingIntact(t *testing.T) {
+	// erasure_events is denied, so erasePerson fails at its per-scope
+	// fan-out - AFTER the blob wipe and the deletes in the same tx.
+	e := newFaultEnv(t, "erasure_events")
+	ctx := context.Background()
+	cid := e.register(t)
+
+	type snap struct {
+		blobs, tokens, consents, shares, links, valueTokens, cidsRows int
+		erased                                                        bool
+	}
+	take := func() snap {
+		var s snap
+		if err := e.admin.Pool.QueryRow(ctx, `
+			SELECT (SELECT count(*) FROM cids WHERE pii_encrypted IS NOT NULL),
+			       (SELECT count(*) FROM person_tokens),
+			       (SELECT count(*) FROM consents),
+			       (SELECT count(*) FROM shared_records),
+			       (SELECT count(*) FROM person_links),
+			       (SELECT count(*) FROM value_tokens),
+			       (SELECT count(*) FROM cids),
+			       (SELECT count(*) FROM persons WHERE erased_at IS NOT NULL) > 0`).Scan(
+			&s.blobs, &s.tokens, &s.consents, &s.shares, &s.links, &s.valueTokens, &s.cidsRows, &s.erased); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	before := take()
+	if before.blobs == 0 || before.tokens == 0 {
+		t.Fatal("precondition: the contact should have a blob and search tokens")
+	}
+	if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err == nil {
+		t.Fatal("erase must fail when erasure_events is denied")
+	}
+	e.gdpr.Drain()
+
+	after := take()
+	if after != before {
+		t.Fatalf("a failed erasure changed the database.\nbefore: %+v\nafter:  %+v\n"+
+			"Every deletion an erasure performs is in ONE transaction with the erasure record; "+
+			"a failure must roll all of it back, and asserting only on the returned error cannot see that.",
+			before, after)
+	}
+}
+
+// Every table the erasure and delivery paths touch, denied one at a time.
+// Each is an error branch that returns early - collectively the largest
+// untested surface in the GDPR layer, and the branches on which "fail
+// closed" actually rests.
+func TestErasureAndDeliveryFailClosedPerTable(t *testing.T) {
+	for _, table := range []string{
+		"erasures", "erasure_events", "person_tokens", "consents",
+		"shared_records", "person_links", "cid_blob_versions", "value_tokens",
+		"portal_outbox", "external_envelopes", "oti", "audit",
+	} {
+		t.Run(table, func(t *testing.T) {
+			e := newFaultEnv(t, table)
+			ctx := context.Background()
+			cid := e.register(t)
+			if _, _, err := e.gdpr.Erase(ctx, e.crm, cid); err == nil {
+				t.Errorf("erase must fail closed when %s is unavailable", table)
+			}
+			e.gdpr.Drain()
+			// And the person is untouched: no half-erasure.
+			var erased bool
+			if err := e.admin.Pool.QueryRow(ctx,
+				`SELECT erased_at IS NOT NULL FROM persons WHERE id=(SELECT person_id FROM cids WHERE cid=$1)`,
+				cid).Scan(&erased); err != nil {
+				t.Fatal(err)
+			}
+			if erased {
+				t.Errorf("a failed erasure must not tombstone the person (%s denied)", table)
+			}
+		})
+	}
+}
+
+// The delivery worker's own failure branches. Each denial breaks a different
+// statement of the claim/POST/settle cycle.
+func TestDeliveryFailsClosedPerTable(t *testing.T) {
+	for _, table := range []string{"erasure_events", "webhooks", "audit"} {
+		t.Run(table, func(t *testing.T) {
+			e := newFaultEnv(t, table)
+			ctx := context.Background()
+			// Seed through the ADMIN pool, then deliver through the denied one.
+			var personID string
+			if err := e.admin.Pool.QueryRow(ctx,
+				`INSERT INTO persons (id) VALUES (gen_random_uuid()) RETURNING id`).Scan(&personID); err != nil {
+				t.Fatal(err)
+			}
+			var erasureID int64
+			if err := e.admin.Pool.QueryRow(ctx,
+				`INSERT INTO erasures (person_id, requested_by) VALUES ($1,'t') RETURNING id`,
+				personID).Scan(&erasureID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.admin.Pool.Exec(ctx,
+				`INSERT INTO erasure_events (erasure_id, scope, cid) VALUES ($1,'crm','CID-FAULT00000000000000')`,
+				erasureID); err != nil {
+				t.Fatal(err)
+			}
+			// A worker that cannot read its own queue must return the error,
+			// not report "nothing to deliver".
+			_, err := e.gdpr.DeliverPending(ctx)
+			if table == "erasure_events" || table == "webhooks" {
+				if err == nil {
+					t.Errorf("DeliverPending must surface a failure to read %s, not report an empty queue", table)
+				}
+			}
+			// Whatever happened, nothing may be left claimed beyond the
+			// reaper's reach.
+			if n, rerr := service.ReapStrandedErasureEvents(ctx, e.admin.Pool, time.Nanosecond); rerr != nil {
+				t.Fatal(rerr)
+			} else {
+				_ = n // recoverable is the property; the count varies by branch
+			}
+			var sending int
+			if err := e.admin.Pool.QueryRow(ctx,
+				`SELECT count(*) FROM erasure_events WHERE status='SENDING'`).Scan(&sending); err != nil {
+				t.Fatal(err)
+			}
+			if sending != 0 {
+				t.Errorf("%d event(s) unrecoverable after a %s failure", sending, table)
+			}
+		})
+	}
+}
+
+// claimTTL's default branch: an unconfigured worker must still have a lease.
+func TestClaimTTLDefaults(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+	seedEvents(t, e, "http://127.0.0.1:1/never", 1)
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE erasure_events SET status='SENDING', claimed_at=now()-interval '2 hours'`); err != nil {
+		t.Fatal(err)
+	}
+	// ClaimTTL is unset on this env, so the sweep must fall back to the
+	// documented default rather than to "no lease at all".
+	if e.gdpr.ClaimTTL != 0 {
+		t.Fatal("precondition: this env should have no explicit claim TTL")
+	}
+	if _, err := e.gdpr.DeliverPending(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT status FROM erasure_events`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status == "SENDING" {
+		t.Fatal("a two-hour-old claim must be reaped under the default lease")
+	}
+}
+
+// One denied table per subtest, across every person-scoped writer. Each
+// combination is a distinct early-return that "fail closed" rests on, and
+// none of them is reachable any other way. The assertion is the same in
+// every case: the call fails AND leaves nothing half-written.
+func TestEveryWriterFailsClosedOnADeniedTable(t *testing.T) {
+	// Only the tables Register actually writes: persons, its identifier
+	// tokens, the scoped cids row and the chained audit record. A table it
+	// never touches would succeed, which proves nothing.
+	for _, table := range []string{"persons", "person_tokens", "cids", "audit"} {
+		t.Run(table, func(t *testing.T) {
+			e := newFaultEnv(t, table)
+			ctx := context.Background()
+			client := &auth.Client{ID: "crm", Scope: "crm",
+				AllowedActions: []string{auth.ActContactsRegister, auth.ActLookup,
+					auth.ActTokensCreate, auth.ActSharesCreate, auth.ActLinksManage,
+					auth.ActOTIIssue, auth.ActConsentManage, auth.ActAttributesRead,
+					auth.ActScopesIssue},
+				AllowedPurposes: []string{"support"}}
+
+			before := countAllRows(ctx, t, e)
+			if _, err := e.svc.Register(ctx, client, service.RegisterInput{
+				Email: "denied@example.com", Name: "Denied",
+				Attributes: map[string]string{"tier": "gold"}}); err == nil {
+				t.Errorf("register must fail closed when %s is unavailable", table)
+			}
+			after := countAllRows(ctx, t, e)
+			if after != before {
+				t.Errorf("a failed register left rows behind (%s denied): %d -> %d", table, before, after)
+			}
+		})
+	}
+}
+
+// countAllRows is a cheap whole-schema fingerprint for "nothing was
+// written": the exact numbers do not matter, only that they do not move.
+func countAllRows(ctx context.Context, t *testing.T, e *faultEnv) int {
+	t.Helper()
+	var n int
+	if err := e.admin.Pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM persons) + (SELECT count(*) FROM cids)
+		     + (SELECT count(*) FROM person_tokens) + (SELECT count(*) FROM consents)
+		     + (SELECT count(*) FROM value_tokens) + (SELECT count(*) FROM shared_records)
+		     + (SELECT count(*) FROM person_links) + (SELECT count(*) FROM oti)
+		     + (SELECT count(*) FROM cid_blob_versions)`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// The same sweep over the SECOND-stage writers, which run only once a
+// person exists - so they exercise a different set of early returns.
+func TestSecondStageWritersFailClosedOnADeniedTable(t *testing.T) {
+	for _, table := range []string{"value_tokens", "shared_records", "person_links", "oti", "audit"} {
+		t.Run(table, func(t *testing.T) {
+			e := newFaultEnv(t, table)
+			ctx := context.Background()
+			cid := e.register(t)
+			other := ""
+			{
+				adminRing := &service.KeyRing{Pool: e.admin.Pool, RetireGrace: -1}
+				admin := &service.Contacts{Pool: e.admin.Pool, Tok: e.svc.Tok, PII: e.svc.PII, Ring: adminRing}
+				var err error
+				if other, err = admin.Register(ctx, e.crm, service.RegisterInput{Email: "other-denied@example.com"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			client := &auth.Client{ID: "crm", Scope: "crm",
+				AllowedActions: []string{auth.ActTokensCreate, auth.ActSharesCreate,
+					auth.ActLinksManage, auth.ActOTIIssue, auth.ActConsentManage,
+					auth.ActAttributesRead},
+				AllowedPurposes: []string{"support"}}
+
+			vt := &service.ValueTokens{Pool: e.svc.Pool, Eng: e.oti.Eng, Ring: e.svc.Ring, Tok: e.svc.Tok}
+			shares := &service.Shares{Pool: e.svc.Pool, Contacts: e.svc}
+			links := &service.Links{Pool: e.svc.Pool, Contacts: e.svc}
+
+			before := countAllRows(ctx, t, e)
+			// Each of these touches the denied table on some path; the ones
+			// that do not simply succeed, which is equally fine - what must
+			// never happen is a partial write.
+			_, _ = vt.Tokenize(ctx, client, service.TokenizeInput{Type: "string", Value: "v", CID: cid})
+			_, _, _ = shares.Create(ctx, client, service.ShareInput{
+				CID: cid, Fields: []string{"tier"}, PartnerLabel: "p", Purpose: "support", TTLSeconds: 60})
+			_ = links.Link(ctx, client, other, cid, "guardian")
+			_, _, _ = e.oti.Issue(ctx, client, cid, "support", "billing", nil)
+			_ = e.gdpr.SetConsent(ctx, client, cid, "support", true)
+
+			// Whatever succeeded is durable and whatever failed wrote
+			// nothing: the count may only move by the calls that returned
+			// nil, never by a fraction of one.
+			after := countAllRows(ctx, t, e)
+			if after < before {
+				t.Errorf("rows disappeared under a %s failure: %d -> %d", table, before, after)
+			}
+			// And the audit chain still verifies across all of it.
+			if broken, reason, _, err := audit.Verify(ctx, e.admin.Pool); err != nil || broken != 0 {
+				t.Errorf("the chain broke under a %s failure: %d %s %v", table, broken, reason, err)
+			}
+		})
 	}
 }

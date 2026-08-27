@@ -46,6 +46,24 @@ type erasureDecision struct {
 	check   func(ctx context.Context, t *testing.T, q *pgxpool.Pool, pid string, cids []string)
 }
 
+// notPersonal is every base table that holds NO data about a data subject,
+// each with the reason. Adding here is an explicit decision, reviewed like
+// code - the whole point of the gate is that "this one is fine" has to be
+// written down and defended rather than assumed.
+var notPersonal = map[string]string{
+	"schema_migrations":     "applied migration versions",
+	"keys":                  "key metadata (kind, version, status) - no subject reference",
+	"clients":               "API credentials: the CLIENT organisation, never a data subject",
+	"webhooks":              "per-scope endpoint configuration",
+	"retention_policies":    "per-scope TTL configuration",
+	"trusted_issuers":       "federation issuer public keys and their revocation state - the ISSUING organisation, never a data subject",
+	"audit":                 "the append-only chain: NEVER pruned, it is the tamper evidence. Its cid column is a tombstoned pseudonym, which is the accountability record erasure is proven by",
+	"audit_anchor":          "RFC 3161 timestamps over chain heads - a digest, no subject data",
+	"audit_read_buckets":    "hourly read aggregates keyed by the (tombstoned) pseudonym; append-only by trigger, like `audit`, for the same reason",
+	"unlock_tokens":         "single-use operator intent declarations, keyed by client and purpose",
+	"portal_email_throttle": "a KEYED HMAC of an address plus a send counter - derived from a person's identifier, so it IS personal data, but it is not reachable from a person id or a cid and it self-prunes after 1 day (PrunePortal). Erasure cannot target it; the 1-day window is the argument that it does not need to",
+}
+
 func TestErasureInvariantSweep(t *testing.T) {
 	e := newFaultEnv(t)
 	ctx := context.Background()
@@ -68,8 +86,24 @@ func TestErasureInvariantSweep(t *testing.T) {
 					t.Error("cids: every blob of the erased person must be NULL")
 				}
 			}},
-		"erasure_events":     {keptWhy: "the erasure record itself: per-scope delivery queue and proof the erasure happened"},
-		"erasures":           {keptWhy: "the erasure request record (id, who, when): proof the erasure was performed, minted BY erasePerson itself"},
+		"erasure_events": {keptWhy: "the erasure record itself: per-scope delivery queue and proof the erasure happened"},
+		"erasures":       {keptWhy: "the erasure request record (id, who, when): proof the erasure was performed, minted BY erasePerson itself"},
+		"erasure_cascade": {
+			keptWhy: "the cascade WORK PLAN, minted by erasePerson itself in the same transaction: it is what makes an interrupted cascade describable and resumable after the parent's own erasure has deleted person_links (GDPR-ERASURE-4). Same accountability class as erasures/erasure_events - a pseudonym plus a status, no attribute data. Deleting it would recreate the defect it exists to close.",
+			check: func(ctx context.Context, t *testing.T, q *pgxpool.Pool, pid string, cids []string) {
+				// Whatever survives must be marked done: a row still PENDING
+				// after its child was erased would send a resume at an
+				// already-finished person forever.
+				var stuck int
+				if err := q.QueryRow(ctx,
+					`SELECT count(*) FROM erasure_cascade WHERE child_person=$1 AND status<>'DONE'`,
+					pid).Scan(&stuck); err != nil {
+					t.Fatal(err)
+				}
+				if stuck != 0 {
+					t.Errorf("erasure_cascade: %d row(s) for an erased child are still PENDING", stuck)
+				}
+			}},
 		"person_tokens":      {erased: true},
 		"cid_blob_versions":  {erased: true},
 		"value_tokens":       {erased: true}, // cid-bound rows; NULL-cid rows are unattributed by design
@@ -275,6 +309,49 @@ func TestErasureInvariantSweep(t *testing.T) {
 			d.check(ctx, t, pool, pid, cids)
 		}
 	}
+	// EVERY base table, not only the ones a column name or a foreign key
+	// betrays. Discovery by `person_id`/`cid`/FK cannot see a table keyed by
+	// a DERIVED value - portal_email_throttle stores a keyed HMAC of the
+	// person's e-mail address and is a live counterexample already in the
+	// schema (TESTS-13). A table with no written decision at all is the
+	// failure the sweep exists to prevent, so the gate is over the whole
+	// schema and `notPersonal` is an explicit, reviewed category.
+	trows, err := pool.Query(ctx, `
+		SELECT table_name FROM information_schema.tables
+		 WHERE table_schema='public' AND table_type='BASE TABLE'
+		 ORDER BY table_name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var allTables []string
+	for trows.Next() {
+		var tb string
+		if err := trows.Scan(&tb); err != nil {
+			t.Fatal(err)
+		}
+		allTables = append(allTables, tb)
+	}
+	trows.Close()
+	if len(allTables) < 25 {
+		t.Fatalf("schema discovery looks broken: only %d base tables", len(allTables))
+	}
+	for _, tb := range allTables {
+		if _, known := decisions[tb]; known {
+			continue
+		}
+		if why, ok := notPersonal[tb]; ok {
+			if why == "" {
+				t.Errorf("table %q is listed as not personal with no reason", tb)
+			}
+			continue
+		}
+		t.Errorf("table %q has NO erasure decision and is not listed as non-personal.\n"+
+			"Every base table needs one of the two: an entry in `decisions` (erased, or kept with a "+
+			"written reason and a post-erasure predicate), or an entry in `notPersonal` with a reason. "+
+			"Column-name and foreign-key discovery cannot see a table keyed by a DERIVED value - a keyed "+
+			"HMAC of an identifier is still that person's data (TESTS-13).", tb)
+	}
+
 	// The map must not rot either: every decision must match a live table.
 	for name := range decisions {
 		found := false

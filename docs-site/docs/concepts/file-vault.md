@@ -32,8 +32,22 @@ bound to both the file id and its cid.
 The vault is off unless a storage driver is configured - files are a new
 data class, and an upgrade must not silently start accepting them.
 
+!!! danger "`local` is single-instance only"
+
+    The `local` driver writes ciphertext to a **per-process directory**
+    while its metadata and wrapped DEK live in the shared database. With
+    more than one replica, a download routed to a replica that does not hold
+    the object answers 200 with the recorded `Content-Length` and an empty
+    body, and `sunder retention run` garbage-collects only the objects of
+    the replica it runs on. Use `s3` for anything beyond a single instance.
+
+    It is also a **separate backup unit**: restoring the database and the
+    keystore does not restore the objects, and the `files` rows survive with
+    their DEKs, so the loss is invisible until someone downloads a file. See
+    `docs/RUNBOOK-BACKUP-DR.md`.
+
 ```bash
-# Local disk (keeps the zero-dependency posture for demos):
+# Local disk (keeps the zero-dependency posture for demos and single-node):
 SUNDER_FILES_STORAGE=local
 SUNDER_FILES_DIR=/var/lib/sunder/files
 SUNDER_FILES_MAX_MB=25
@@ -76,8 +90,19 @@ A download is purpose- and consent-checked exactly like an attribute read,
 and audited before the first byte leaves. The handler validates everything
 (permission, purpose, scope, consent, and a body-size cap on upload) before
 writing any response, so a failure can never substitute content - only
-truncate, and a truncated object is detected against the recorded size and
-reported as an error, never as a successful short read.
+truncate.
+
+!!! warning "A truncation is detected server-side, but the client must check too"
+
+    Metadata (including `Content-Length`) is answered from the database and
+    written **before** streaming starts, so once a chunk fails to decrypt or
+    the object turns out to be missing, the status line is already on the
+    wire. The server logs the failure and **aborts the connection** rather
+    than completing a short 200 - which is something every HTTP client
+    notices - but a client must still verify the received byte count against
+    `Content-Length`, and ideally the `sha256` from the upload/list metadata,
+    and treat a mismatch as a failed download. It is never a successful
+    short read, but the failure signal is a broken transfer, not a 5xx.
 
 ## Security notes
 

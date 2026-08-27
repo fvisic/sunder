@@ -183,6 +183,9 @@ func TestDSREraseOrgWideWithSignedWebhook(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("erase: %d %s", rec.Code, rec.Body.String())
 	}
+	// The post-erase delivery is detached; wait for it before asserting on
+	// what the webhook received and on the queue's terminal states.
+	e.srv.GDPR.Drain()
 	var eraseResp struct {
 		ErasureID int64 `json:"erasure_id"`
 		Scopes    int   `json:"scopes"`
@@ -226,15 +229,40 @@ func TestDSREraseOrgWideWithSignedWebhook(t *testing.T) {
 		t.Fatalf("unexpected payload: %s", body)
 	}
 
-	// billing has no webhook: its event is marked NO_WEBHOOK; crm DELIVERED.
-	var delivered, noHook int
+	// billing has no webhook yet: its event stays PENDING (blocked, not
+	// failed), while crm's is DELIVERED. A missing endpoint is a mutable
+	// configuration fact - burning the event as NO_WEBHOOK wrote off the
+	// Article 19 notification for any scope onboarded before its webhook
+	// existed (QUEUE-WORKER-6).
+	var delivered, pending int
 	if err := e.srv.Store.Pool.QueryRow(ctx,
-		`SELECT count(*) FILTER (WHERE status='DELIVERED'), count(*) FILTER (WHERE status='NO_WEBHOOK')
-		 FROM erasure_events WHERE cid IN ($1,$2)`, cid, billingCID).Scan(&delivered, &noHook); err != nil {
+		`SELECT count(*) FILTER (WHERE status='DELIVERED'), count(*) FILTER (WHERE status='PENDING')
+		 FROM erasure_events WHERE cid IN ($1,$2)`, cid, billingCID).Scan(&delivered, &pending); err != nil {
 		t.Fatal(err)
 	}
-	if delivered != 1 || noHook != 1 {
-		t.Fatalf("expected 1 DELIVERED + 1 NO_WEBHOOK, got %d/%d", delivered, noHook)
+	if delivered != 1 || pending != 1 {
+		t.Fatalf("expected 1 DELIVERED + 1 PENDING (blocked on a missing webhook), got %d/%d", delivered, pending)
+	}
+	// Register the missing endpoint: the blocked event delivers on the next
+	// sweep, with no attempt having been charged in the meantime.
+	billingHook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer billingHook.Close()
+	if _, err := e.srv.Store.Pool.Exec(ctx,
+		`INSERT INTO webhooks (scope, url, secret) VALUES ('billing', $1, 's')`, billingHook.URL); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := e.srv.GDPR.DeliverPending(ctx); err != nil || n != 1 {
+		t.Fatalf("a blocked event must deliver once its scope has a webhook: %d %v", n, err)
+	}
+	var attempts int
+	if err := e.srv.Store.Pool.QueryRow(ctx,
+		`SELECT attempts FROM erasure_events WHERE cid=$1`, billingCID).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 {
+		t.Fatalf("waiting for configuration must not burn attempts, got %d", attempts)
 	}
 
 	// Re-registering the same identifiers creates a brand-new person/CID.
@@ -420,6 +448,9 @@ func TestEraseDeliveryFailsClosedAfterAttempts(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatal(rec.Code)
 	}
+	// Erase dispatches its own delivery detached from the request; wait for
+	// it so the attempt counting below is deterministic.
+	e.srv.GDPR.Drain()
 	for i := 0; i < 12; i++ {
 		if _, err := e.srv.GDPR.DeliverPending(ctx); err != nil {
 			t.Fatal(err)

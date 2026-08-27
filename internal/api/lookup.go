@@ -15,12 +15,8 @@ import (
 const enumerationThreshold = 100
 
 func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
+	// The per-client budget is spent once, in rateLimitMiddleware.
 	client := auth.FromContext(r.Context())
-	if !s.Limiter.Allow(client.ID, client.RateLimit) {
-		s.Metrics.Inc(fmt.Sprintf(`sunder_ratelimited_total{client=%q}`, client.ID))
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
-		return
-	}
 	in, ok := decode[service.LookupInput](w, r)
 	if !ok {
 		return
@@ -65,20 +61,31 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 	cid, err := s.Contacts.Lookup(r.Context(), client, in)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
-			misses := s.Detector.Miss(client.ID)
-			s.Metrics.Inc(fmt.Sprintf(`sunder_lookup_misses_total{client=%q}`, client.ID))
-			// ">=" with a per-client latch: the sliding-window count is not
-			// monotonic (decay between calls), so an exact "==" crossing can
-			// be skipped entirely.
-			if misses >= enumerationThreshold && s.warnLatch(client.ID) {
-				s.Log.Warn("possible enumeration attack", "client", client.ID, "misses_10m", misses)
-			}
+			s.noteMiss(client.ID)
 		}
 		s.logErr(r, err)
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"cid": cid})
+}
+
+// noteMiss feeds the enumeration detector. Fed from lookup AND from the
+// attribute read: probing cids one by one against the primary PII read
+// endpoint is the same enumeration, and it used to be invisible to the
+// detector (AUTHZ-1).
+func (s *Server) noteMiss(clientID string) {
+	if s.Detector == nil {
+		return
+	}
+	misses := s.Detector.Miss(clientID)
+	s.Metrics.Inc(fmt.Sprintf(`sunder_lookup_misses_total{client=%q}`, clientID))
+	// ">=" with a per-client latch: the sliding-window count is not
+	// monotonic (decay between calls), so an exact "==" crossing can be
+	// skipped entirely.
+	if misses >= enumerationThreshold && s.warnLatch(clientID) {
+		s.Log.Warn("possible enumeration attack", "client", clientID, "misses_10m", misses)
+	}
 }
 
 // warnLatch reports whether the enumeration warning for this client should
@@ -95,16 +102,10 @@ func (s *Server) warnLatch(clientID string) bool {
 // handleAdminUnlock mints the F3 unlock token: the explicit, chained
 // declaration of bulk intent, spent within 60 seconds or not at all.
 func (s *Server) handleAdminUnlock(w http.ResponseWriter, r *http.Request) {
-	client := auth.FromContext(r.Context())
 	// Mint writes a chained audit row (global advisory lock under sync
-	// sealing); rate-limit it like the other audit-writing endpoints
-	// (review F3) so one credential cannot serialize the instance or flood
-	// the never-pruned audit table.
-	if !s.Limiter.Allow(client.ID, client.RateLimit) {
-		s.Metrics.Inc(fmt.Sprintf(`sunder_ratelimited_total{client=%q}`, client.ID))
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
-		return
-	}
+	// sealing). The per-client budget that keeps one credential from
+	// serializing the instance is spent once, in rateLimitMiddleware.
+	client := auth.FromContext(r.Context())
 	in, ok := decode[struct {
 		Purpose string `json:"purpose"`
 	}](w, r)

@@ -37,29 +37,16 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
 		return
 	}
-	broken, reason, pending, err := audit.Verify(r.Context(), s.Store.Pool)
+	// One verdict function for both surfaces (AUDIT-CHAIN-3). A break is
+	// reported, not hidden behind a 500: the caller asked whether the chain
+	// is intact and the answer is "no, here".
+	rep, err := audit.VerifyAll(r.Context(), s.Store.Pool)
 	if err != nil {
 		s.logErr(r, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal"})
 		return
 	}
-	out := map[string]any{"ok": broken == 0, "pending": pending, "sealing": audit.Mode()}
-	if broken != 0 {
-		// A break is reported, not hidden behind a 500: the caller asked
-		// whether the chain is intact and the answer is "no, here".
-		out["broken_chain_seq"], out["reason"] = broken, reason
-	} else if audit.Mode() == audit.ModeSync && pending > 0 {
-		// Under sync sealing, pending rows cannot be in-flight work: sync
-		// seals at insert. A backlog means rows stranded OUTSIDE the chain,
-		// which the CLI already refuses to call success - and one surface
-		// answering "intact" where the other answers "broken" would make
-		// the verdict worthless.
-		out["ok"] = false
-		out["reason"] = fmt.Sprintf("%d unsealed row(s) under sync sealing: outside the chain, "+
-			"and they will not seal on their own - drain them with `sunder sealer -once` "+
-			"under SUNDER_AUDIT_SEALING=async", pending)
-	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, rep)
 }
 
 func (s *Server) handleAuditChain(w http.ResponseWriter, r *http.Request) {

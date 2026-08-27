@@ -99,3 +99,34 @@ func TestRedisDoWriteFailsOnClosedConn(t *testing.T) {
 	}
 	c1.Close()
 }
+
+// AUTHZ-3: SUNDER_REDIS_FAIL_CLOSED defaults to fail-OPEN, and the
+// allowlist of buckets that ignore it covered only portal:/claims: - so a
+// Redis outage removed the only brute-force throttle on bearer credentials
+// (authfail:) and the only control on the credential-less share fetch.
+func TestSecurityCriticalBucketsAlwaysFailClosed(t *testing.T) {
+	// Point at a port nothing listens on: every command errors.
+	l := NewRedisLimiter("127.0.0.1:1", "", false)
+	for _, key := range []string{
+		"authfail:203.0.113.9",
+		"share-public:203.0.113.9",
+		"portal:203.0.113.9",
+		"claims:crm",
+		"audit-verify:crm",
+		"audit-chain:crm",
+	} {
+		if l.Allow(key, 100) {
+			t.Errorf("%s must fail CLOSED when Redis is unreachable, regardless of SUNDER_REDIS_FAIL_CLOSED", key)
+		}
+	}
+	// An ordinary authenticated bucket still degrades to fail-open, which is
+	// the documented availability trade-off.
+	if !l.Allow("crm", 100) {
+		t.Error("an ordinary client bucket must fail open by default")
+	}
+	// ...and fails closed when the operator asks for it.
+	strict := NewRedisLimiter("127.0.0.1:1", "", true)
+	if strict.Allow("crm", 100) {
+		t.Error("SUNDER_REDIS_FAIL_CLOSED=true must deny on backend failure")
+	}
+}

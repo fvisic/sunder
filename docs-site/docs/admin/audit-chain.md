@@ -26,7 +26,7 @@ sequenceDiagram
     loop every SUNDER_AUDIT_SEAL_INTERVAL (default 200ms)
         Sealer->>DB: SELECT unsealed rows older than SUNDER_AUDIT_SEAL_DELAY (default 2s)
         Sealer->>Sealer: hash = SHA-256(prev_hash + canonical(ts, client_id, action, cid, detail))
-        Sealer->>DB: UPDATE prev_hash, hash, chain_seq<br/>(trigger permits this ONE transition only)
+        Sealer->>DB: UPDATE prev_hash, hash, chain_seq, hash_v<br/>(trigger permits this ONE transition only)
     end
     Note over DB: row is now in the linear chain,<br/>chain_seq dense from 1
 ```
@@ -105,11 +105,20 @@ curl -s https://sunder.example.org/v1/contacts/CID123/attributes/email \
 ```
 
 `user_id` is stored as a real queryable column and as a bucket key, and
-returned in the Article 15 access trail - but it is deliberately NOT part
-of the hash (`canonical()` never includes it). It is CLIENT-ASSERTED and
-unverifiable by design: Sunder records what the client claims, it does not
-verify it. The append-only trigger, not the chain hash, is what pins its
-value once written.
+returned in the Article 15 access trail. **It IS part of the hashed tuple**
+for every row sealed since migration 0033 - `canonical()` includes it when
+the row's `hash_v >= 2`, and every new row seals under v2. Editing it
+therefore breaks verification at that position.
+
+Rows sealed BEFORE that migration keep the v1 tuple permanently (a sealed
+chain cannot retroactively cover a new field), and for those the append-only
+trigger alone pins the value. Flipping a row's `hash_v` cannot hide an edit:
+the stored hash matches only the tuple it was computed over, and recomputing
+it breaks the `prev_hash` linkage the external anchor pins.
+
+It remains CLIENT-ASSERTED and unverifiable by design: Sunder records what
+the client claims, it does not verify it. The chain proves the claim was not
+altered after the fact, not that it was true.
 
 ## Security notes
 

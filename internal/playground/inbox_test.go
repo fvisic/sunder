@@ -51,9 +51,15 @@ func TestWebhookInbox(t *testing.T) {
 
 	// The visitor's own CID: taken from their session so the inbox can be
 	// scoped to them.
+	// A CID-shaped value: the inbox scopes on pseudonyms, so no session
+	// CONSTANT (demo_name, unique, ...) can be a delivery target (GAP-5).
 	_, out := call("GET", "/api/scenarios", nil)
 	vars, _ := out["vars"].(map[string]any)
-	mine := fmt.Sprint(vars["unique"])
+	_ = vars
+	const mine = "CID-9F2A7VXTNP"
+	for _, sess := range pg.SessionsForTest().AllForTest() {
+		sess.Do(func(v map[string]string) { v["crm_cid"] = mine })
+	}
 
 	body := fmt.Sprintf(`{"event":"erase","scope":"crm","cid":%q,"erasure_id":7,"ts":"2026-08-26T10:00:00Z"}`, mine)
 	if code := postWebhook(t, srv.URL, body, sign("s3cret", body)); code != 200 {
@@ -85,7 +91,7 @@ func TestWebhookInbox(t *testing.T) {
 	}
 
 	// Another visitor's delivery must not show up in this inbox.
-	other := fmt.Sprintf(`{"event":"erase","scope":"crm","cid":"someone-else","erasure_id":8}`)
+	other := `{"event":"erase","scope":"crm","cid":"CID-ZZZZZZZZZZ","erasure_id":8}`
 	if code := postWebhook(t, srv.URL, other, sign("s3cret", other)); code != 200 {
 		t.Fatalf("delivery for another session: %d", code)
 	}
@@ -105,7 +111,7 @@ func TestInboxUnverifiedWithoutSecretAndCap(t *testing.T) {
 	}
 	i = newInbox("k")
 	for n := 0; n < inboxCap+10; n++ {
-		i.add(Delivery{CID: "c"})
+		i.add(Delivery{CID: "CID-AAAAAAAAAA"})
 	}
 	if len(i.items) != inboxCap {
 		t.Fatalf("inbox must stay bounded, got %d", len(i.items))
@@ -113,7 +119,45 @@ func TestInboxUnverifiedWithoutSecretAndCap(t *testing.T) {
 	if i.dropped == 0 {
 		t.Fatal("expected dropped deliveries to be counted")
 	}
-	if got := len(i.list(map[string]string{"x": "c"})); got != inboxCap {
+	if got := len(i.list(map[string]string{"crm_cid": "CID-AAAAAAAAAA"})); got != inboxCap {
 		t.Fatalf("list by cid: %d", got)
+	}
+}
+
+// GAP-5: `demo_name: "Ana Horvat"` is seeded into EVERY session, and the
+// inbox matched every VALUE in the session map - so an unauthenticated
+// delivery with that cid landed in every visitor's panel, and repeating it
+// evicted the genuine deliveries from the bounded ring.
+func TestInboxIsScopedToPseudonymsNotSessionConstants(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pg, err := NewServer(Config{BaseURL: "http://127.0.0.1:1", Scenarios: embedded(t),
+		WebhookSecret: "s3cret", RatePerMin: 1000, Log: quiet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(pg.Handler())
+	defer srv.Close()
+	call := newClient(t, srv.URL)
+	call("GET", "/api/scenarios", nil) // establish a session
+
+	// The constant every visitor shares must be refused at ingest.
+	body := `{"event":"erase","scope":"crm","cid":"Ana Horvat","erasure_id":1}`
+	if code := postWebhook(t, srv.URL, body, sign("s3cret", body)); code != 400 {
+		t.Fatalf("a delivery whose cid is not a pseudonym must be refused, got %d", code)
+	}
+	// ...and it must not be scoped to anyone even if it somehow got in.
+	for _, sess := range pg.SessionsForTest().AllForTest() {
+		vars := sess.Vars()
+		if vars["demo_name"] == "" {
+			t.Fatal("precondition: the shared constant should be in the session")
+		}
+		if got := len(pg.inbox.list(vars)); got != 0 {
+			t.Fatalf("the session's constants matched %d deliveries", got)
+		}
+	}
+	i := newInbox("")
+	i.add(Delivery{CID: "Ana Horvat"})
+	if got := len(i.list(map[string]string{"demo_name": "Ana Horvat"})); got != 0 {
+		t.Fatal("a non-pseudonym value must never scope the inbox")
 	}
 }

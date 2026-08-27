@@ -203,6 +203,19 @@ func (s *Sessions) TTL() time.Duration { return s.ttl }
 
 // Count reports how many sessions are live (used by the status endpoint and
 // the tests).
+// AllForTest returns every live session. Test-only seam: the inbox is
+// scoped to a visitor's PSEUDONYMS (GAP-5), and a test that cannot run a
+// scenario against a live vault has no other way to put one in the session.
+func (s *Sessions) AllForTest() []*Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Session, 0, len(s.byID))
+	for _, sess := range s.byID {
+		out = append(out, sess)
+	}
+	return out
+}
+
 func (s *Sessions) Count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

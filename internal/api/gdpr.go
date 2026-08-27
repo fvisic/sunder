@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/fvisic/sunder/internal/auth"
 )
@@ -62,7 +64,15 @@ func (s *Server) handleDSRErase(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	erasureID, scopes, linked, err := s.GDPR.EraseWithCascade(r.Context(), auth.FromContext(r.Context()), in.CID, in.Cascade)
+	// A cascade commits ONE TRANSACTION PER PERSON, so a cancelled request
+	// context part-way through leaves children un-erased. Detaching the
+	// cancellation (with a deadline of its own) means the officer's HTTP
+	// client giving up no longer decides how much of an Article 17 request
+	// is carried out; the durable plan makes what is left resumable either
+	// way (GDPR-ERASURE-4).
+	eraseCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), cascadeTimeout)
+	defer cancel()
+	erasureID, scopes, linked, err := s.GDPR.EraseWithCascade(eraseCtx, auth.FromContext(r.Context()), in.CID, in.Cascade)
 	if err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)
@@ -80,3 +90,8 @@ func (s *Server) handleDSRExport(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, out)
 }
+
+// cascadeTimeout bounds a detached cascade erasure. Generous: each child is
+// its own transaction plus its webhook fan-out, and the alternative to
+// finishing is a partial erasure.
+const cascadeTimeout = 10 * time.Minute

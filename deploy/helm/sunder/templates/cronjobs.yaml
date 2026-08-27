@@ -34,6 +34,7 @@ spec:
           containers:
             - name: anchor
               image: "{{ .Values.image.repository }}:{{ .Values.image.opsTag }}"
+              securityContext: {{- include "sunder.containerSecurityContext" . | nindent 16 }}
               args: ["anchor", "-out", "/anchors", "-ca", {{ .Values.anchor.caPath | quote }}]
               env:
                 {{- include "sunder.env" . | nindent 16 }}
@@ -80,6 +81,7 @@ spec:
           containers:
             - name: retention
               image: "{{ .Values.image.repository }}:{{ .Values.image.opsTag }}"
+              securityContext: {{- include "sunder.containerSecurityContext" . | nindent 16 }}
               args: ["retention", "run"]
               env: {{- include "sunder.env" . | nindent 16 }}
 {{- end }}
@@ -102,9 +104,16 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          # Under `restricted` Pod Security Admission a CronJob without these
+          # is ADMITTED and only its Jobs fail at creation time, so daily
+          # tamper-evidence verification stops silently (OPS-CLI-CONFIG-11).
+          securityContext:
+            {{- include "sunder.podSecurityContext" . | nindent 12 }}
+            fsGroup: 65532
           containers:
             - name: verify-audit
               image: "{{ .Values.image.repository }}:{{ .Values.image.opsTag }}"
+              securityContext: {{- include "sunder.containerSecurityContext" . | nindent 16 }}
               {{- if .Values.anchor.enabled }}
               args: ["verify-audit", "-anchors", "/anchors", "-ca", {{ .Values.anchor.caPath | quote }}]
               {{- else }}

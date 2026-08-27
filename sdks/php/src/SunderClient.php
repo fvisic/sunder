@@ -28,6 +28,7 @@ final class SunderClient
         'credential_expired' => CredentialExpiredException::class,
         'consent_denied' => ConsentDeniedException::class,
         'purpose_not_allowed' => PurposeNotAllowedException::class,
+        'unlock_required' => UnlockRequiredException::class,
         'audience_mismatch' => AudienceMismatchException::class,
         'not_found' => NotFoundException::class,
         'validation' => ValidationException::class,

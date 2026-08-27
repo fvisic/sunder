@@ -30,8 +30,23 @@ retried on any call.
 ## Steps
 
 1. **Pick the SDK for your stack and install it.** All six wrap the same
-   `/v1/*` surface: transport, bearer auth, timeouts, retries and error
-   mapping - zero cryptography client-side.
+   **subset** of `/v1/*` - transport, bearer auth, timeouts, retries and
+   error mapping, zero cryptography client-side - and the subset is the core
+   identity surface, not the whole API:
+
+   | Surface | SDK method | Wrapped |
+   |---|---|---|
+   | `POST /v1/contacts` | `RegisterContact` | yes |
+   | `POST /v1/contacts/{cid}/scopes` | `IssueScopedCID` | yes |
+   | `GET /v1/contacts/{cid}/attributes/{name}` | `GetAttribute` | yes |
+   | `POST /v1/lookup` (email / phone / name) | `LookupBy*` | yes |
+   | `POST /v1/lookup` (`phone_suffix`, `user_id`) | - | **no** |
+   | `POST /v1/oti`, `POST /v1/oti/verify` | `IssueOTI`, `VerifyOTI(Full)` | yes |
+   | `GET /healthz` | `Health` | yes |
+   | consent, DSR (access/erase/export), value tokens (incl. bulk), files, shares, links, `admin/unlock`, admin audit, external claims, attribute versions | - | **no** |
+
+   Everything in the last row is plain JSON over HTTP; `api/openapi.yaml`
+   is the contract for it, and the Postman collection below exercises it.
 
    ```bash
    go get github.com/fvisic/sunder/sdks/go@latest        # Go 1.25+
@@ -101,7 +116,11 @@ retried on any call.
 ## Error taxonomy
 
 Identical across all six SDKs and identical to the raw JSON `{"error":
-"<code>"}` shape:
+"<code>"}` shape. Note `unlock_required` in particular: it is a 403 that
+means "entitled, but declare bulk/fuzzy intent first" (`POST
+/v1/admin/unlock`, then `X-Sunder-Unlock`) - NOT "you lack the action". An
+SDK that maps it to a generic forbidden leaves the caller unable to tell the
+two apart.
 
 | Sentinel | HTTP | Code |
 |---|---|---|
@@ -110,6 +129,7 @@ Identical across all six SDKs and identical to the raw JSON `{"error":
 | `ErrForbidden` | 403 | `forbidden` |
 | `ErrConsentDenied` | 403 | `consent_denied` |
 | `ErrPurposeNotAllowed` | 403 | `purpose_not_allowed` |
+| `ErrUnlockRequired` | 403 | `unlock_required` |
 | `ErrAudienceMismatch` | 403 | `audience_mismatch` |
 | `ErrNotFound` | 404 | `not_found` |
 | `ErrValidation` | 400 | `validation` / `bad_json` |

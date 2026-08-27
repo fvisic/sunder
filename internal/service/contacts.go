@@ -232,21 +232,32 @@ func (c *Contacts) Register(ctx context.Context, client *auth.Client, in Registe
 	storeIndexed(attrs, "email", emailNorm)
 	storeIndexed(attrs, "phone", phoneNorm)
 
-	// Retry once: a concurrent identical registration can win the unique-
-	// index race; the second attempt then finds and reuses that person.
+	// A concurrent identical registration can win the unique-index race; the
+	// loser's transaction aborts on person_tokens_ident_uq and the next
+	// attempt finds and reuses that person. More than two writers can pile
+	// up on the same identifier (a fanned-out queue redelivery), so the
+	// budget is not one - but it IS finite, and exhausting it is an error
+	// rather than a silently duplicated person.
 	for attempt := 0; ; attempt++ {
 		cid, err = c.registerTx(ctx, client, emailSet, phoneSet, nameSet, phoneticSet, suffixSet, attrs)
 		if err == nil {
-			break
+			return cid, nil
 		}
 		var pgErr *pgconn.PgError
-		if attempt == 0 && errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			continue
+		if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+			return "", err
 		}
-		return "", err
+		if attempt+1 >= registerDedupRetries {
+			return "", fmt.Errorf("register: identifier contended by %d concurrent registrations: %w",
+				registerDedupRetries, err)
+		}
 	}
-	return cid, nil
 }
+
+// registerDedupRetries bounds the dedup race retry. Each retry re-runs the
+// probe, so a loser converges on the winner in one; the extra budget covers a
+// pile-up of concurrent writers on the same identifier.
+const registerDedupRetries = 5
 
 // mergeValues combines the singular (primary, first) and plural forms,
 // dropping empties.
@@ -307,9 +318,31 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet
 			return "", err
 		}
 	}
-	// Insert newest-version token rows for every identifier. ON CONFLICT DO
-	// NOTHING covers both "row already there" and "identifier owned by
-	// another person" - an existing owner is never silently stolen.
+	// Insert newest-version token rows for every identifier.
+	//
+	// The conflict clause depends on whether the dedup probe found an owner,
+	// because an unarbitrated ON CONFLICT DO NOTHING expresses two different
+	// intents at once and only one of them is ever right:
+	//
+	//   found == true - we are merging into an existing person. A secondary
+	//     identifier that belongs to somebody ELSE (the documented ambiguous
+	//     claim: A's e-mail plus B's phone resolves to A by e-mail priority)
+	//     must be left with its owner, not stolen and not fatal. The
+	//     unarbitrated clause is exactly right: skip that row, keep going.
+	//
+	//   found == false - we are minting a NEW person off a dedup probe that
+	//     said nobody owns these identifiers. If the insert now conflicts on
+	//     person_tokens_ident_uq, that probe has been invalidated by a
+	//     concurrent registration and the whole decision is wrong. Absorbing
+	//     it committed a second person holding no identifier token at all -
+	//     invisible to lookup, to the portal and to erasure, and permanently
+	//     unerasable (H2). Naming the PK as the arbiter absorbs only the
+	//     idempotent case and lets the ownership conflict surface as 23505,
+	//     which aborts the transaction and drives the retry above.
+	onConflict := `ON CONFLICT DO NOTHING`
+	if !found {
+		onConflict = `ON CONFLICT (person_id, kind, token) DO NOTHING`
+	}
 	for _, ins := range []struct {
 		kind string
 		set  identSet
@@ -318,7 +351,7 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet
 		for _, tok := range ins.set.writeToks {
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO person_tokens (person_id, kind, token, key_version)
-				 VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+				 VALUES ($1,$2,$3,$4) `+onConflict,
 				personID, ins.kind, tok, ins.set.writeVer); err != nil {
 				return "", err
 			}
@@ -375,10 +408,22 @@ func ensureCID(ctx context.Context, q execQuerier, personID, scope string) (stri
 		return "", err
 	}
 	// ON CONFLICT covers a concurrent insert of the same (person, scope).
+	//
+	// The EXISTS refuses to mint a pseudonym for a tombstoned person. This
+	// path is reached from OTI verification, which both writes PII and
+	// CREATES the row that holds it - a row outside the set erasePerson
+	// enumerated, locked and queued erasure webhooks for, and which a second
+	// erasure cannot reach because the idempotency guard refuses an
+	// already-erased person (TOKENS-LOOKUP-5). Every caller treats
+	// ErrNotFound here as "this handoff cannot complete".
 	err = q.QueryRow(ctx,
-		`INSERT INTO cids (cid, person_id, scope) VALUES ($1,$2,$3)
+		`INSERT INTO cids (cid, person_id, scope)
+		 SELECT $1,$2,$3 WHERE EXISTS (SELECT 1 FROM persons WHERE id=$2 AND erased_at IS NULL)
 		 ON CONFLICT (person_id, scope) DO UPDATE SET scope=EXCLUDED.scope
 		 RETURNING cid`, fresh, personID, scope).Scan(&cid)
+	if err == pgx.ErrNoRows {
+		return "", ErrNotFound
+	}
 	return cid, err
 }
 
@@ -463,6 +508,33 @@ func (c *Contacts) personForClientCID(ctx context.Context, client *auth.Client, 
 		return "", ErrNotFound
 	}
 	return personID, nil
+}
+
+// personForClientCIDAllowingTombstone is personForClientCID for the ONE
+// caller that legitimately needs to address an already-erased person: a
+// retried cascade erasure, whose outstanding children are otherwise
+// unrecoverable (GDPR-ERASURE-4). Scope ownership and the
+// indistinguishable-from-absent rule for a foreign cid are unchanged.
+func (c *Contacts) personForClientCIDAllowingTombstone(ctx context.Context, client *auth.Client, cid string) (string, bool, error) {
+	if !validCIDShape(cid) {
+		return "", false, ErrNotFound
+	}
+	var personID, scope string
+	var erased bool
+	err := c.Pool.QueryRow(ctx,
+		`SELECT c.person_id, c.scope, p.erased_at IS NOT NULL
+		 FROM cids c JOIN persons p ON p.id = c.person_id
+		 WHERE c.cid=$1`, cid).Scan(&personID, &scope, &erased)
+	if err == pgx.ErrNoRows {
+		return "", false, ErrNotFound
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if scope != client.Scope {
+		return "", false, ErrNotFound
+	}
+	return personID, erased, nil
 }
 
 // GetAttribute returns exactly one decrypted field: purpose is
@@ -595,10 +667,17 @@ func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid, writtenBy 
 	if err != nil {
 		return err
 	}
+	var previous map[string]string
 	if len(oldBlob) > 0 {
 		old, err := c.PII.Decrypt(ctx, cid, oldBlob, oldKeyID, oldAlg)
 		if err != nil {
 			return err
+		}
+		// Keep the pre-merge generation for the version snapshot, which
+		// re-seals it under its own AAD rather than copying ciphertext.
+		previous = make(map[string]string, len(old))
+		for k, v := range old {
+			previous[k] = v
 		}
 		for k, v := range attrs {
 			old[k] = v
@@ -620,7 +699,7 @@ func (c *Contacts) mergeIntoBlob(ctx context.Context, tx pgx.Tx, cid, writtenBy 
 	}
 	// F6: snapshot the outgoing blob as a version BEFORE overwriting, in
 	// this same transaction, so history and the overwrite are atomic.
-	if err := c.appendVersion(ctx, tx, cid, writtenBy, oldBlob, oldKeyID, oldAlg); err != nil {
+	if err := c.appendVersion(ctx, tx, cid, writtenBy, previous); err != nil {
 		return err
 	}
 	_, err = tx.Exec(ctx,
@@ -637,4 +716,75 @@ const maxBlobBytes = 256 * 1024
 // not only through a caller that pre-checks.
 func (c *Contacts) MergeIntoBlobForTest(ctx context.Context, tx pgx.Tx, cid string, attrs map[string]string) error {
 	return c.mergeIntoBlob(ctx, tx, cid, "test", attrs)
+}
+
+// deadlockRetries bounds the retry on SQLSTATE 40P01. The lock ordering
+// above makes a cycle with erasePerson impossible, but PostgreSQL can still
+// detect one between paths this convention does not cover (an index or FK
+// interaction, a future writer), and surfacing that as a 500 on a legitimate
+// Article 17 erasure or a cross-scope handoff is the worst possible outcome
+// of a condition the database already resolved for us (DB-TXN-3).
+const deadlockRetries = 3
+
+// isDeadlock reports SQLSTATE 40P01.
+func isDeadlock(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "40P01"
+}
+
+// retryOnDeadlock runs fn, retrying a deadlock victim. fn must be
+// idempotent under abort, which every transactional writer here is: a
+// deadlocked transaction is rolled back in full before fn returns.
+func retryOnDeadlock(fn func() error) error {
+	var err error
+	for attempt := 0; attempt < deadlockRetries; attempt++ {
+		if err = fn(); !isDeadlock(err) {
+			return err
+		}
+	}
+	return err
+}
+
+// lockPersonRows takes exactly the lock prefix erasePerson takes - every one
+// of the person's cids rows in cid order, then the persons row - and returns
+// the person id, or ErrNotFound if the cid is unknown or the person is a
+// tombstone.
+//
+// It exists because the c -> p convention alone is not enough for a writer
+// that needs MORE THAN ONE of a person's cids (OTI verification needs the
+// issuer's and the verifier's): erasePerson locks them all in one statement,
+// so a writer locking a subset in a different order closes an ABBA cycle
+// with it (DB-TXN-3). Taking the same set in the same order makes a cycle
+// impossible by construction, and folds in the in-transaction tombstone
+// check that check-then-act on the pool cannot provide (GDPR-ERASURE-5/6):
+// under READ COMMITTED, a liveness answer read outside the transaction is
+// already stale by the time the write lands.
+//
+// Writers that touch exactly one cid may keep the cheaper `FOR UPDATE OF
+// c, p` shape (mergeIntoBlob, Files.Upload, tokenizeInTx) - one row cannot
+// be taken out of order.
+func lockPersonRows(ctx context.Context, tx pgx.Tx, cid string) (string, error) {
+	var personID string
+	switch err := tx.QueryRow(ctx,
+		`SELECT person_id FROM cids WHERE cid=$1`, cid).Scan(&personID); {
+	case err == pgx.ErrNoRows:
+		return "", ErrNotFound
+	case err != nil:
+		return "", err
+	}
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM cids WHERE person_id=$1 ORDER BY cid FOR UPDATE`, personID); err != nil {
+		return "", err
+	}
+	var erased bool
+	switch err := tx.QueryRow(ctx,
+		`SELECT erased_at IS NOT NULL FROM persons WHERE id=$1 FOR UPDATE`, personID).Scan(&erased); {
+	case err == pgx.ErrNoRows:
+		return "", ErrNotFound
+	case err != nil:
+		return "", err
+	case erased:
+		return "", ErrNotFound
+	}
+	return personID, nil
 }

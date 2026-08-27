@@ -36,11 +36,20 @@ docker compose -f deploy/docker-compose.yml exec sunder /sunder client create \
 
 ## Steps
 
+Both secrets come from the **environment**, never the command line: on a
+command line they are readable through `/proc/<pid>/cmdline`, `ps auxww`,
+shell history and CI logs - and one of them is the Databunker *root* token.
+
+```sh
+export DATABUNKER_TOKEN='<root token>'
+export SUNDER_CRED='<client_id>.<secret>'
+```
+
 **1. Dry run first.** Validates every record and reports what would be skipped, without writing anything to Sunder:
 
 ```sh
 go run ./migrate/databunker \
-  -source http://localhost:3000 -source-token <root token> \
+  -source http://localhost:3000 \
   -target http://localhost:8080 -dry-run
 ```
 
@@ -48,12 +57,16 @@ go run ./migrate/databunker \
 
 ```sh
 go run ./migrate/databunker \
-  -source http://localhost:3000 -source-token <root token> \
-  -target http://localhost:8080 -cred '<client_id>.<secret>' \
+  -source http://localhost:3000 \
+  -target http://localhost:8080 \
   -map-out mapping.csv
 ```
 
-Flags: `-batch` (Databunker page size, default 100), `-c` (concurrent Sunder registrations, default 8), `-dry-run` (read and validate only, no writes, no `-cred` required), `-keep-source-token=false` (drop the `databunker_token` attribute instead of the default of keeping it).
+The mapping file is created `0600` - it is a token-to-pseudonym table, and
+anyone who can read it can re-identify every migrated record against the
+source system.
+
+Flags: `-batch` (Databunker page size, default 100), `-c` (concurrent Sunder registrations, default 8), `-dry-run` (read and validate only, no writes, no `SUNDER_CRED` required), `-keep-source-token=false` (drop the `databunker_token` attribute instead of the default of keeping it). The `-source-token` and `-cred` flags still work but warn.
 
 Each record becomes one `POST /v1/contacts` call, e.g.:
 

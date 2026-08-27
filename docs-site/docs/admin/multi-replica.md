@@ -27,6 +27,21 @@ flowchart LR
 replica at the same PostgreSQL and scale by adding replicas behind the
 load balancer.
 
+!!! danger "Two settings make a replica NOT stateless"
+
+    - **`SUNDER_KEYSTORE=file`** keeps key material in a per-process
+      directory. The Helm chart refuses it outright for this reason; use
+      `vault` (or the signer split).
+    - **`SUNDER_FILES_STORAGE=local`** keeps file **ciphertext** in a
+      per-process directory (`SUNDER_FILES_DIR`) while its metadata and
+      wrapped DEK live in the shared database. A download routed to a
+      replica that does not hold the object answers **200 with the recorded
+      `Content-Length` and an empty body** - it is not an error the caller
+      can detect except by counting bytes. `sunder retention run` on one
+      replica also garbage-collects only that replica's objects.
+      `local` is single-instance only; **`s3` is the multi-replica driver.**
+      Both are logged as a startup warning.
+
 **2. Share rate-limit windows across replicas.** Unset, each replica
 counts in memory: with a naive round-robin load balancer, a per-client
 limit meant to be N requests/min becomes effectively N × replica-count.

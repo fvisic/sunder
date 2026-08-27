@@ -32,12 +32,25 @@ in docs/DESIGN.md.
 
 ## Deliberate non-goals
 
-No verifiable credentials/selective disclosure, no
-cross-vendor federation, no OIB resolution, no multi-tenancy. The GDPR
-data-subject rights layer shipped in v1.5: consent enforcement,
+No cross-vendor federation, no OIB resolution, no multi-tenancy.
+
+**Two surfaces that WERE once listed here have since shipped, and are in
+scope for any assessment of this system:**
+
+- **Selective disclosure** (P2.3): an OTI can carry `share_predicates`,
+  evaluated against the issuer's blob so only the one-bit results cross the
+  scope boundary. The audit-content boundary this creates is analysed in
+  "What the chain records" below - the chain records what was ASKED, never
+  what the data said.
+- **The self-service privacy portal**: a cookie-session citizen surface
+  with its own listener. `POST /portal/api/start` is **fully anonymous** -
+  the only unauthenticated, person-facing route in the product - and its
+  enumeration resistance is a measured, deliberately fragile property. See
+  "Portal enumeration" below.
+
+The GDPR data-subject rights layer shipped in v1.5: consent enforcement,
 org-wide right of access and erasure with signed webhooks, portability
-export, and per-scope retention. The self-service privacy portal remains
-v2 (it requires citizen authentication - wallet/OTP - outside this layer).
+export, and per-scope retention.
 
 
 ## Audit content boundary (P2.3 decision)

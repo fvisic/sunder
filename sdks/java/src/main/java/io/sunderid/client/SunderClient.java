@@ -346,6 +346,8 @@ public final class SunderClient {
                 return new ConsentDeniedException(effective, status, detail);
             case "purpose_not_allowed":
                 return new PurposeNotAllowedException(effective, status, detail);
+            case "unlock_required":
+                return new UnlockRequiredException(effective, status, detail);
             case "audience_mismatch":
                 return new AudienceMismatchException(effective, status, detail);
             case "not_found":

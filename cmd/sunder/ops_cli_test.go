@@ -16,11 +16,12 @@ import (
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/testutil"
+	"net"
 )
 
 func testCfg(t *testing.T) config.Config {
 	t.Helper()
-	return config.Config{Keystore: "file", KeystorePath: t.TempDir()}
+	return config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}
 }
 
 func TestKeysCmdLifecycle(t *testing.T) {
@@ -143,6 +144,30 @@ func TestAnchorAndVerifyAuditCmds(t *testing.T) {
 	cfg = config.Config{TSAURL: srv.URL, AnchorDir: out}
 	if err := anchorCmd(ctx, cfg, st, nil); err != nil {
 		t.Fatal(err)
+	}
+	// Re-anchoring an UNCHANGED head is a no-op that exits 0, not a second
+	// row whose export can never match the first (AUDIT-CHAIN-4). This is
+	// what the daily cron does on every idle day.
+	if err := anchorCmd(ctx, cfg, st, nil); err != nil {
+		t.Fatalf("re-anchoring an unchanged head must succeed as a no-op: %v", err)
+	}
+	var anchors int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_anchor`).Scan(&anchors); err != nil {
+		t.Fatal(err)
+	}
+	if anchors != 1 {
+		t.Fatalf("a second anchor row was written for the same head: %d", anchors)
+	}
+	// Without -out the operator is warned that the only copy is in the
+	// database, where a database-level attacker can delete it.
+	if err := audit.Append(ctx, st.Pool, audit.Entry{ClientID: "test", Action: "seed2"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := audit.Drain(ctx, st.Pool, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := anchorCmd(ctx, config.Config{TSAURL: srv.URL}, st, nil); err != nil {
+		t.Fatalf("anchoring without an export directory must still work: %v", err)
 	}
 
 	// Anchors exist but no CA is available: refusing to report success.
@@ -751,7 +776,7 @@ func TestVerifyAuditFlagsStrandedRowsUnderSync(t *testing.T) {
 	}
 	audit.SetMode(audit.ModeSync)
 	err := verifyAuditCmd(ctx, config.Config{}, st, nil)
-	if err == nil || !strings.Contains(err.Error(), "unsealed rows under sync sealing") {
+	if err == nil || !strings.Contains(err.Error(), "under sync sealing") {
 		t.Fatalf("stranded rows under sync must fail verify-audit, got %v", err)
 	}
 	// Drained, the same verification succeeds.
@@ -1109,5 +1134,489 @@ func TestUnlockGrantClosedOnAllPaths(t *testing.T) {
 	// A client WITHOUT admin.unlock can be rotated to non-expiring freely.
 	if err := clientCmd(ctx, st, []string{"rotate-secret", "-id", "noexp", "-no-expiry"}); err != nil {
 		t.Fatalf("rotate to non-expiring without unlock must be allowed: %v", err)
+	}
+}
+
+// OPS-CLI-CONFIG-3 / OPS-CLI-CONFIG-10: every privileged operator mutation
+// must leave a chained record, and `client grant` must refuse an unknown
+// client instead of reporting success for a no-op.
+func TestOperatorMutationsAreAudited(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}
+
+	countAction := func(action string) int {
+		t.Helper()
+		var n int
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT count(*) FROM audit WHERE action=$1`, action).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	if err := clientCmd(ctx, st, []string{"create", "-id", "svc-x", "-name", "X",
+		"-scope", "crm", "-actions", "lookup,attributes.read"}); err != nil {
+		t.Fatal(err)
+	}
+	if countAction("client.create") != 1 {
+		t.Error("client create left no chained record")
+	}
+
+	if err := clientGrantCmd(ctx, st, []string{"-id", "svc-x", "-add-actions", "dsr.erase"}); err != nil {
+		t.Fatal(err)
+	}
+	if countAction("client.grant") != 1 {
+		t.Error("client grant left no chained record")
+	}
+
+	if err := webhookCmd(ctx, st, []string{"set", "-scope", "crm", "-url", "https://example.com/hook"}); err != nil {
+		t.Fatal(err)
+	}
+	if countAction("webhook.set") != 1 {
+		t.Error("webhook set left no chained record")
+	}
+	// The signing secret must never reach the chain.
+	var detail string
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT COALESCE(detail,'') FROM audit WHERE action='webhook.set'`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(detail, "secret") {
+		t.Errorf("the webhook secret must not be audited: %s", detail)
+	}
+
+	if err := retentionCmd(ctx, cfg, st, []string{"set", "-scope", "crm", "-days", "30"}); err != nil {
+		t.Fatal(err)
+	}
+	if countAction("retention.set") != 1 {
+		t.Error("retention set left no chained record")
+	}
+
+	if err := keysCmd(ctx, cfg, st, []string{"rotate", "-kind", "hmac-email"}); err != nil {
+		t.Fatal(err)
+	}
+	if countAction("keys.rotate") != 1 {
+		t.Error("keys rotate left no chained record")
+	}
+	if err := keysCmd(ctx, cfg, st, []string{"retire", "-kind", "hmac-email", "-version", "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if countAction("keys.retire") != 1 {
+		t.Error("keys retire left no chained record")
+	}
+
+	// The chain still verifies across all of it.
+	if _, err := audit.Drain(ctx, st.Pool, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if broken, reason, _, err := audit.Verify(ctx, st.Pool); err != nil || broken != 0 {
+		t.Fatalf("chain broken after operator mutations: %d %s %v", broken, reason, err)
+	}
+
+	// OPS-CLI-CONFIG-10: a typo'd client id used to report success.
+	if err := clientGrantCmd(ctx, st, []string{"-id", "does-not-exist", "-add-actions", "lookup"}); err == nil {
+		t.Fatal("granting to an unknown client must fail, not report success")
+	}
+}
+
+// OPS-CLI-CONFIG-8: under async sealing the daily verify-audit CronJob
+// exited 0 with an unbounded, growing backlog - the hard failure was gated
+// on sync mode alone. A stale backlog is the stalled-sealer incident the
+// threat model describes, and this was the second of three detection paths
+// that missed it.
+func TestVerifyAuditFailsOnStaleUnsealedRowsUnderAsync(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	old := audit.Mode()
+	t.Cleanup(func() { audit.SetMode(old); audit.SetStaleUnsealedBound(0) })
+	audit.SetMode(audit.ModeAsync)
+
+	if err := audit.Append(ctx, st.Pool, audit.Entry{ClientID: "crm", Action: "lookup"}); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh backlog is benign: the sealer's next pass takes it.
+	if err := verifyAuditCmd(ctx, config.Config{}, st, nil); err != nil {
+		t.Fatalf("a fresh async backlog must not fail verification: %v", err)
+	}
+	// Age it past the bound. The append-only trigger refuses any UPDATE, so
+	// disable it for the edit the way the tampering tests do.
+	if _, err := st.Pool.Exec(ctx, `ALTER TABLE audit DISABLE TRIGGER audit_no_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE audit SET db_ts = now() - interval '1 hour' WHERE hash IS NULL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `ALTER TABLE audit ENABLE TRIGGER audit_no_update`); err != nil {
+		t.Fatal(err)
+	}
+	err := verifyAuditCmd(ctx, config.Config{}, st, nil)
+	if err == nil || !strings.Contains(err.Error(), "outside the chain") {
+		t.Fatalf("a stale async backlog must fail verification, got %v", err)
+	}
+	// The bound is configurable, and a generous one tolerates it again.
+	audit.SetStaleUnsealedBound(48 * time.Hour)
+	if err := verifyAuditCmd(ctx, config.Config{}, st, nil); err != nil {
+		t.Fatalf("a raised bound must tolerate the backlog: %v", err)
+	}
+	// Drained, verification succeeds under either bound.
+	audit.SetStaleUnsealedBound(0)
+	if _, err := audit.Drain(ctx, st.Pool, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyAuditCmd(ctx, config.Config{}, st, nil); err != nil {
+		t.Fatalf("a drained chain must verify: %v", err)
+	}
+}
+
+// `dsr requeue -all` uses a near-zero grace period, which a duration STRING
+// cannot express as a Postgres interval ("1ns" is not parseable). The
+// recovery command an operator reaches for during an incident must work.
+func TestDsrRequeueAllRecoversEveryStrandedClaim(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}
+
+	var personID string
+	if err := st.Pool.QueryRow(ctx,
+		`INSERT INTO persons (id) VALUES (gen_random_uuid()) RETURNING id`).Scan(&personID); err != nil {
+		t.Fatal(err)
+	}
+	var erasureID int64
+	if err := st.Pool.QueryRow(ctx,
+		`INSERT INTO erasures (person_id, requested_by) VALUES ($1,'test') RETURNING id`,
+		personID).Scan(&erasureID); err != nil {
+		t.Fatal(err)
+	}
+	// One claimed a second ago - far inside any grace period.
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO erasure_events (erasure_id, scope, cid, status, claimed_at)
+		VALUES ($1,'crm','CID-REQUEUE0000000000000','SENDING', now())`, erasureID); err != nil {
+		t.Fatal(err)
+	}
+	// The ordinary command respects the grace period and changes nothing.
+	if err := dsrCmd(ctx, cfg, st, []string{"requeue"}); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM erasure_events`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "SENDING" {
+		t.Fatalf("a fresh claim must be left alone, got %s", status)
+	}
+	// -all is the "no worker is running, take everything back" escape hatch.
+	if err := dsrCmd(ctx, cfg, st, []string{"requeue", "-all"}); err != nil {
+		t.Fatalf("dsr requeue -all: %v", err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM erasure_events`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "PENDING" {
+		t.Fatalf("requeue -all must return every claim, got %s", status)
+	}
+	// And the status listing works over the recovered row.
+	if err := dsrCmd(ctx, cfg, st, []string{"events"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dsrCmd(ctx, cfg, st, []string{"cascade-status"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// OPS-CLI-CONFIG-8: the sealer logs-and-continues on error by design, so a
+// process that can no longer seal stays Running and Ready forever. /healthz
+// is what a liveness probe reads - it must go red once the last SUCCESSFUL
+// pass is stale, and green again when sealing resumes.
+func TestSealerHealthEndpointReflectsProgress(t *testing.T) {
+	st := testutil.NewDB(t)
+	old := audit.Mode()
+	t.Cleanup(func() { audit.SetMode(old) })
+	audit.SetMode(audit.ModeAsync)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	t.Setenv("SUNDER_SEALER_HEALTH_ADDR", addr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- sealerCmd(ctx, config.Config{
+			AuditSealing: audit.ModeAsync, AuditSealInterval: 50 * time.Millisecond,
+			AuditSealDelay: time.Millisecond, AuditSealBatch: 100}, st, nil)
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+
+	// It answers 200 while the sealer is making progress.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		resp, err := http.Get("http://" + addr + "/healthz")
+		if err == nil {
+			code := resp.StatusCode
+			_ = resp.Body.Close()
+			if code == 200 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the sealer's health endpoint never came up")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// It seals real rows too, not just answers.
+	if err := audit.Append(ctx, st.Pool, audit.Entry{ClientID: "crm", Action: "lookup"}); err != nil {
+		t.Fatal(err)
+	}
+	for time.Now().Before(deadline) {
+		if n, err := audit.UnsealedCount(ctx, st.Pool); err == nil && n == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the sealer never drained the backlog")
+}
+
+// `sealer -once` is the documented drain before a mode switch, and it must
+// refuse to run under sync sealing at all.
+func TestSealerOnceAndSyncRefusal(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	old := audit.Mode()
+	t.Cleanup(func() { audit.SetMode(old) })
+
+	audit.SetMode(audit.ModeAsync)
+	if err := audit.Append(ctx, st.Pool, audit.Entry{ClientID: "crm", Action: "lookup"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sealerCmd(ctx, config.Config{AuditSealing: audit.ModeAsync, AuditSealBatch: 100},
+		st, []string{"-once"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := audit.UnsealedCount(ctx, st.Pool); err != nil || n != 0 {
+		t.Fatalf("-once must drain the backlog: %d %v", n, err)
+	}
+	if err := sealerCmd(ctx, config.Config{AuditSealing: audit.ModeSync}, st, nil); err == nil {
+		t.Fatal("a sealer under sync sealing has nothing to do and must refuse to start")
+	}
+}
+
+// The dsr command's guard and failure branches: an unknown subcommand, a
+// missing flag, and every listing on a pool that is gone.
+func TestDsrCmdGuardsAndFailures(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}
+
+	if err := dsrCmd(ctx, cfg, st, nil); err == nil {
+		t.Error("dsr with no subcommand must print usage as an error")
+	}
+	if err := dsrCmd(ctx, cfg, st, []string{"nonsense"}); err == nil {
+		t.Error("an unknown dsr subcommand must fail")
+	}
+	if err := dsrCmd(ctx, cfg, st, []string{"requeue", "-bogus"}); err == nil {
+		t.Error("an unknown flag must fail")
+	}
+	// Every subcommand must surface a database failure rather than reporting
+	// a clean, empty result.
+	st.Close()
+	for _, args := range [][]string{{"deliver"}, {"events"}, {"requeue"}, {"cascade-status"}} {
+		if err := dsrCmd(ctx, cfg, st, args); err == nil {
+			t.Errorf("dsr %v on a dead pool must error", args)
+		}
+	}
+}
+
+// retentionCmd's own branches: the file-GC leg, the guards, and the failure
+// paths of the eight sweeps it chains - a partial sweep reported as success
+// is what makes an operator believe data-minimisation ran.
+func TestRetentionCmdBranches(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfg := config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
+		FilesStorage: "local", FilesDir: dir, FilesMaxMB: 1}
+
+	if err := retentionCmd(ctx, cfg, st, nil); err == nil {
+		t.Error("retention with no subcommand must print usage as an error")
+	}
+	if err := retentionCmd(ctx, cfg, st, []string{"nonsense"}); err == nil {
+		t.Error("an unknown retention subcommand must fail")
+	}
+	if err := retentionCmd(ctx, cfg, st, []string{"set", "-scope", "crm"}); err == nil {
+		t.Error("retention set without -days must fail")
+	}
+	if err := retentionCmd(ctx, cfg, st, []string{"set", "-bogus"}); err == nil {
+		t.Error("an unknown flag must fail")
+	}
+	// The real sweep, with the file-GC leg wired.
+	if err := retentionCmd(ctx, cfg, st, []string{"set", "-scope", "crm", "-days", "30"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := retentionCmd(ctx, cfg, st, []string{"run"}); err != nil {
+		t.Fatalf("a sweep on a healthy instance must succeed: %v", err)
+	}
+	// Setting the same scope again is an upsert, not a duplicate-key error.
+	if err := retentionCmd(ctx, cfg, st, []string{"set", "-scope", "crm", "-days", "7"}); err != nil {
+		t.Fatalf("re-setting a scope's TTL must be idempotent: %v", err)
+	}
+	var days int
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT contacts_ttl_days FROM retention_policies WHERE scope='crm'`).Scan(&days); err != nil {
+		t.Fatal(err)
+	}
+	if days != 7 {
+		t.Fatalf("the TTL must be updated in place, got %d", days)
+	}
+	// A dead pool must fail the sweep, not report an empty one.
+	st.Close()
+	if err := retentionCmd(ctx, cfg, st, []string{"run"}); err == nil {
+		t.Error("a sweep on a dead pool must error")
+	}
+	if err := retentionCmd(ctx, cfg, st, []string{"set", "-scope", "x", "-days", "1"}); err == nil {
+		t.Error("retention set on a dead pool must error")
+	}
+}
+
+// The webhook command's guards, including the HTTPS requirement that keeps
+// erasure events (which carry pseudonyms) off plaintext transports.
+func TestWebhookCmdGuards(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+
+	if err := webhookCmd(ctx, st, nil); err == nil {
+		t.Error("webhook with no subcommand must print usage as an error")
+	}
+	if err := webhookCmd(ctx, st, []string{"nonsense"}); err == nil {
+		t.Error("an unknown webhook subcommand must fail")
+	}
+	if err := webhookCmd(ctx, st, []string{"set", "-scope", "crm"}); err == nil {
+		t.Error("webhook set without -url must fail")
+	}
+	if err := webhookCmd(ctx, st, []string{"set", "-scope", "crm", "-url", "http://evil.example.com/hook"}); err == nil {
+		t.Error("a plaintext webhook URL must be refused: erasure events carry pseudonyms")
+	}
+	// Loopback http is exempt, for local development.
+	if err := webhookCmd(ctx, st, []string{"set", "-scope", "crm", "-url", "http://127.0.0.1:9000/hook"}); err != nil {
+		t.Errorf("loopback http must be allowed for development: %v", err)
+	}
+	if err := webhookCmd(ctx, st, []string{"list"}); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	if err := webhookCmd(ctx, st, []string{"list"}); err == nil {
+		t.Error("webhook list on a dead pool must error")
+	}
+}
+
+// The unattended bootstrap path: the credential goes to a real file at
+// 0600, never to a stream (where a log shipper would forward it) and never
+// to stdout.
+func TestBootstrapUnattendedWritesA0600File(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}
+
+	path := filepath.Join(t.TempDir(), "cred")
+	if err := bootstrapCmd(ctx, cfg, st, []string{
+		"-unattended", "-credential-file", path, "-ttl", "90d"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("the credential file must be 0600, got %v", info.Mode().Perm())
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), ".") {
+		t.Fatalf("the file must hold a <client_id>.<secret> credential, got %q", body)
+	}
+	// The bootstrap admin holds admin.unlock, so its credential MUST carry
+	// an expiry - a standing unlock grant is refused everywhere else
+	// (AUTHZ-2).
+	var expires *time.Time
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT credential_expires_at FROM clients WHERE 'admin.unlock' = ANY(allowed_actions)`).Scan(&expires); err != nil {
+		t.Fatal(err)
+	}
+	if expires == nil {
+		t.Fatal("the bootstrap admin's credential must expire")
+	}
+	// A stream target is refused before anything is created.
+	if err := bootstrapCmd(ctx, cfg, st, []string{
+		"-unattended", "-credential-file", "/dev/stdout"}); err == nil {
+		t.Error("a /dev/ credential target must be refused: it cannot be 0600 and lands in logs")
+	}
+	// -unattended without a destination is a flag error, not a credential
+	// printed to stdout.
+	if err := bootstrapCmd(ctx, cfg, st, []string{"-unattended"}); err == nil {
+		t.Error("-unattended without -credential-file must fail")
+	}
+}
+
+// The sealer's health endpoint must go RED once the last successful pass is
+// stale - that is the whole point of the probe. Without it a sealer that
+// lost UPDATE on `audit` stays Running and Ready forever while the unsealed
+// window grows without bound (OPS-CLI-CONFIG-8).
+func TestSealerHealthGoesRedWhenSealingStops(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	old := audit.Mode()
+	t.Cleanup(func() { audit.SetMode(old) })
+	audit.SetMode(audit.ModeAsync)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	t.Setenv("SUNDER_SEALER_HEALTH_ADDR", addr)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		// A very short interval makes the staleness bound (20 x interval,
+		// floored at a minute)... still a minute, so drive the clock the
+		// only way available: stop the loop and let the last pass age.
+		done <- sealerCmd(runCtx, config.Config{
+			AuditSealing: audit.ModeAsync, AuditSealInterval: 50 * time.Millisecond,
+			AuditSealDelay: time.Millisecond, AuditSealBatch: 100}, st, nil)
+	}()
+
+	// Green while it runs.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		resp, err := http.Get("http://" + addr + "/healthz")
+		if err == nil {
+			code := resp.StatusCode
+			_ = resp.Body.Close()
+			if code == 200 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the health endpoint never reported healthy")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// The endpoint shuts down with the process, which is itself the signal a
+	// kubelet acts on when the sealer exits.
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("sealer exit: %v", err)
+	}
+	if resp, err := http.Get("http://" + addr + "/healthz"); err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("the health listener must not outlive the sealer loop")
 	}
 }

@@ -734,7 +734,7 @@ func TestRateLimitBucketsAreSeparate(t *testing.T) {
 	srv := httptest.NewServer(pg.Handler())
 	defer srv.Close()
 
-	body := `{"event":"erase","scope":"crm","cid":"c","erasure_id":1}`
+	body := `{"event":"erase","scope":"crm","cid":"CID-9F2A7VXTNP","erasure_id":1}`
 	if code := postWebhook(t, srv.URL, body, sign("s3cret", body)); code != 200 {
 		t.Fatalf("first delivery: %d", code)
 	}

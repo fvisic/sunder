@@ -16,6 +16,10 @@ export type SunderErrorCode =
   | "Unauthorized"
   | "Forbidden"
   | "PurposeNotAllowed"
+  // The credential IS entitled, but the call needs a single-use unlock
+  // token it did not present (POST /v1/admin/unlock, then X-Sunder-Unlock).
+  // Distinct from Forbidden: the two call for opposite responses.
+  | "UnlockRequired"
   | "AudienceMismatch"
   | "NotFound"
   | "Validation"
@@ -98,6 +102,7 @@ const CODE_MAP: Record<string, SunderErrorCode> = {
   forbidden: "Forbidden",
   consent_denied: "ConsentDenied",
   purpose_not_allowed: "PurposeNotAllowed",
+  unlock_required: "UnlockRequired",
   audience_mismatch: "AudienceMismatch",
   not_found: "NotFound",
   validation: "Validation",
@@ -120,6 +125,7 @@ function mapError(status: number, serverError: string | undefined): SunderErrorC
       return "Unauthorized";
     case 403:
       if (serverError === "purpose_not_allowed") return "PurposeNotAllowed";
+      if (serverError === "unlock_required") return "UnlockRequired";
       if (serverError === "audience_mismatch") return "AudienceMismatch";
       return "Forbidden";
     case 404:

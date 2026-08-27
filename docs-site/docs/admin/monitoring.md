@@ -55,7 +55,10 @@ source. Panels: *Request rate by handler*, *p99 latency by handler*
 (target: verify < 10ms, lookup/attr < 15ms, issue < 20ms), *5xx error
 rate*, *Lookup misses by client (enumeration signal)*, *Rate-limited
 requests by client*, *Auth failures (401) / min*, *Requests / s (total)*,
-*Consent / DSR / OTI denials (403,409,410) by code*.
+*Consent / DSR / OTI denials (403,409,410) by code*, *Audit chain: unsealed
+rows (THE ALARM)*, *Erasure notifications stuck (SENDING) / abandoned
+(FAILED)*, *Key material minted at runtime*, *Rate-limit backend failures
+(Redis)*.
 
 ## What each alarm means
 
@@ -68,6 +71,11 @@ requests by client*, *Auth failures (401) / min*, *Requests / s (total)*,
 | `SunderEnumerationSuspected` | critical | over 100 lookup misses for one client in 10m | Possible enumeration attack. Review the audit trail for that client and consider suspending its credential. |
 | `SunderRateLimitedSpike` | warning | over 500 rate-limited requests for one client in 10m | Either a runaway integration or an abuse attempt; check with the owning team before raising the limit. |
 | `SunderAuthFailureSpike` | warning | over 200 `401`s org-wide in 10m | Possible credential stuffing against the API, or a client with a rotated-out credential still deployed. |
+| `SunderAuditSealerStalled` | critical | `sunder_audit_unsealed_rows` over 1000 for 10m | The gauge THREAT-MODEL calls "the alarm". Rows outside the chain carry no hash, so `verify-audit` cannot cover them and an anchor does not attest them. Under `SUNDER_AUDIT_SEAL_EXTERNAL` check that `sunder sealer` is running and can reach the database - including that its role still holds `UPDATE (prev_hash, hash, chain_seq, hash_v)`. |
+| `SunderAuditSealerStopped` | critical | the backlog has not decreased for 15m | The companion to the threshold rule: a stalled sealer with a LOW backlog never trips a threshold. This one catches it. |
+| `SunderErasureEventsStranded` | critical | `sunder_erasure_events_sending` over 0 for 30m | Article 19 notifications claimed by a worker and never settled. The worker reaps its own stale claims every sweep, so a persistent value means delivery is making no progress. `sunder dsr events`; `sunder dsr requeue -all` once no worker is running. |
+| `SunderErasureEventsFailed` | critical | `sunder_erasure_events_failed` over 0 | A scope's webhook exhausted its attempts. That scope still holds the person's records and has NOT been told to delete them. |
+| `SunderKeystoreMintedKeys` | critical | `sunder_keystore_minted_total` over 0 | Key material was created at runtime. `sunder bootstrap` is the only legitimate source, and it is not `serve`: the keystore volume is lost, unmounted or misconfigured. **Stop the replica** and restore the correct keystore before writing anything further (`docs/RUNBOOK-BACKUP-DR.md`). |
 
 The dashboard's *Consent / DSR / OTI denials (403,409,410) by code* panel
 has no matching alert rule in `ops/prometheus-alerts.yaml` - it is
