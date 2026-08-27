@@ -1,0 +1,97 @@
+{
+  "id": "select-security",
+  "title": "A credential that may read one field, and cannot go fishing",
+  "summary": "Two credentials, same scope, same person. One is narrowed to a single attribute name - and that narrowing does not only refuse the other fields, it stops the credential looking anyone up by e-mail at all. Otherwise 200-versus-404 would still answer 'does this address exist here'.",
+  "doc": "concepts/scoped-pseudonyms.md",
+  "roles": [
+    {
+      "name": "crm",
+      "label": "CRM (full reader)",
+      "scope": "crm",
+      "actions": ["contacts.register", "lookup", "attributes.read"],
+      "purposes": ["support"]
+    },
+    {
+      "name": "narrow",
+      "label": "Analytics job (narrowed to loyalty_tier)",
+      "scope": "crm",
+      "actions": ["lookup", "attributes.read"],
+      "purposes": ["support"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "A person with several fields",
+      "note": "Registered by the full-access CRM credential.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {
+        "email": "{{demo_email}}",
+        "phone": "{{demo_phone}}",
+        "name": "{{demo_name}}",
+        "attributes": {"loyalty_tier": "gold", "iban": "HR12 2360 0001"}
+      },
+      "expect": 201,
+      "capture": {"crm_cid": "cid"}
+    },
+    {
+      "label": "The full credential reads the e-mail",
+      "note": "Baseline: purpose stated, allowlist empty, so every field its purposes permit is readable.",
+      "actor": "crm",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/attributes/email?purpose=support",
+      "expect": 200
+    },
+    {
+      "label": "The narrowed credential reads its one allowed field",
+      "note": "This credential was created with an attribute allowlist of exactly loyalty_tier. Everything it is meant to do, it can do.",
+      "actor": "narrow",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/attributes/loyalty_tier?purpose=support",
+      "expect": 200
+    },
+    {
+      "label": "The same credential cannot read the e-mail",
+      "note": "Same person, same scope, same purpose - refused, because the field is not on its list. The narrowing lives on the credential, not in the calling application.",
+      "actor": "narrow",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/attributes/email?purpose=support",
+      "expect": 403
+    },
+    {
+      "label": "Nor the IBAN",
+      "note": "An allowlist is a list of what IS permitted, so a field nobody thought about is refused by default rather than exposed by default.",
+      "actor": "narrow",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/attributes/iban?purpose=support",
+      "expect": 403
+    },
+    {
+      "label": "And it cannot look anyone up by e-mail",
+      "note": "The subtle half. If lookup ignored the allowlist, this credential could still ask 'is ana@example.com in here' and read the answer off the 200-versus-404. So the allowlist gates lookup BY identifier kind too: no e-mail on the list, no lookup by e-mail.",
+      "actor": "narrow",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"email": "{{demo_email}}"},
+      "expect": 403
+    },
+    {
+      "label": "The full credential still can",
+      "note": "The refusal is a property of that credential, not of the endpoint - which is what makes narrowing a useful thing to hand to a job that only needs one number.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"email": "{{demo_email}}"},
+      "expect": 200
+    },
+    {
+      "label": "A purpose it was never granted is refused",
+      "note": "Actions say WHAT, purposes say WHY, and the allowlist says WHICH FIELDS. All three are checked on every read - a credential is not a single switch.",
+      "actor": "narrow",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/attributes/loyalty_tier?purpose=marketing",
+      "expect": 403
+    }
+  ]
+}
