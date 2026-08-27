@@ -41,8 +41,8 @@ kubectl create secret generic sunder-vault \
 ```yaml
 # values-prod.yaml
 image:
-  tag: v0.3.0
-  opsTag: v0.3.0-ops
+  tag: v0.5.0
+  opsTag: v0.5.0-ops
 replicaCount: 3
 database:
   existingSecret: sunder-db
@@ -70,6 +70,22 @@ anchor:
 retention:
   enabled: true
   schedule: "43 3 * * *"
+tunables:
+  workerClaimTtl: 5m           # recovers an outbox claim abandoned by a killed pod
+  keyRetireGrace: 5m           # must exceed KeyRing cache staleness across the fleet
+  apiClientIpHeader: X-Forwarded-For   # only if your ingress actually writes it
+audit:
+  staleUnsealed: 5m            # how old an unchained row may get before verify-audit fails
+files:
+  storage: s3                  # "local" is refused: single-instance only (see below)
+  maxMB: 25
+  s3:
+    endpoint: https://s3.eu-central-1.amazonaws.com
+    bucket: sunder-files
+    region: eu-central-1
+    existingSecret: sunder-s3  # keys SUNDER_FILES_S3_ACCESS_KEY / _SECRET_KEY
+versions:
+  keep: 5                      # retained attribute revisions per contact
 ```
 
 3. Install:
@@ -107,6 +123,31 @@ SDK/CLI equivalent for day-2 changes: `helm upgrade sunder deploy/helm/sunder -f
   silently.
 - **`retention` CronJob** runs `retention run` on `retention.schedule` with
   no extra volumes - it only touches the database.
+- **`files.storage`** accepts `s3` and nothing else: the chart FAILS TO
+  RENDER on `local`, with the reason in the error. The local driver keeps
+  ciphertext in a per-process directory while its metadata and wrapped DEK
+  live in the shared database, so on a second replica a download returns 200,
+  the recorded `Content-Length` and an empty body, and `retention run`
+  garbage-collects only its own replica's objects. On Kubernetes that is not
+  a configuration preference, it is a data-loss shape - so it is refused
+  rather than warned about. S3 credentials come from `files.s3.existingSecret`
+  (keys `SUNDER_FILES_S3_ACCESS_KEY` and `SUNDER_FILES_S3_SECRET_KEY`), never
+  from `values.yaml`, which ends up in the release manifest.
+- **`search.fuzzyName` / `search.phoneSuffix`** are off by default; each
+  widens the search surface and adds token rows per contact. Turning either
+  on for an existing dataset is "flip the value, then run `sunder keys
+  rekey`" - the sweep backfills the derived tokens from the encrypted blobs,
+  so until it completes, older contacts are simply not findable that way.
+  `search.unlock` adds the strict posture: fuzzy and partial lookups then
+  also spend a single-use unlock token.
+- **`shares.public`** exposes `GET /v1/shares/{uuid}` with no credential -
+  the UUID becomes the bearer. The server logs a startup warning, and the
+  per-IP limit that protects it only means anything if
+  `tunables.apiClientIpHeader` names a header your ingress actually writes;
+  behind a proxy without it, every requester shares one bucket.
+- **`versions.keep` / `versions.ttl`** enable attribute history. It is
+  personal data like any other blob: the retention sweep prunes it and
+  erasure destroys it.
 
 ## Security notes
 
