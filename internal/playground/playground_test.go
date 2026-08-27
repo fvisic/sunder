@@ -30,17 +30,22 @@ type fakeSunder struct {
 	// Phase 8 surfaces: value tokens, shares and links, modelled only as far
 	// as the walkthroughs assert. The fake is the anti-rot check that a
 	// scenario references coherent endpoints; the live e2e is the truth.
-	tokens  map[string]string // token -> value
-	byValue map[string]string // "<cid>|<value>" -> token (unique dedup)
-	shares  map[string]string // uuid -> "<cid>|<purpose>"
-	revoked map[string]bool
+	shared      map[string]bool     // "<cid>|<attr>" -> authorized by the issuer
+	tokenShares map[string][]string // oti token -> attributes it authorizes
+	bySuffix    map[string]string   // last 8 phone digits -> cid
+	tokens      map[string]string   // token -> value
+	byValue     map[string]string   // "<cid>|<value>" -> token (unique dedup)
+	shares      map[string]string   // uuid -> "<cid>|<purpose>"
+	revoked     map[string]bool
 }
 
 func newFakeSunder() *fakeSunder {
 	return &fakeSunder{
 		registered: map[string]string{}, withdrawn: map[string]bool{},
 		erased: map[string]bool{}, usedToken: map[string]bool{},
-		tokens: map[string]string{}, byValue: map[string]string{},
+		shared: map[string]bool{}, tokenShares: map[string][]string{},
+		bySuffix: map[string]string{},
+		tokens:   map[string]string{}, byValue: map[string]string{},
 		shares: map[string]string{}, revoked: map[string]bool{},
 	}
 }
@@ -58,11 +63,38 @@ func (f *fakeSunder) handler() http.Handler {
 		f.seq++
 		cid := fmt.Sprintf("crm-cid-%d", f.seq)
 		f.registered[in.Email], f.registered[in.Phone] = cid, cid
+		if d := onlyDigits(in.Phone); len(d) >= 8 {
+			f.bySuffix[d[len(d)-8:]] = cid
+		}
 		writeJSON(w, 201, map[string]string{"cid": cid})
 	})
 	mux.HandleFunc("POST /v1/lookup", func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ Email, Phone, Name string }
+		var in struct {
+			Email       string `json:"email"`
+			Phone       string `json:"phone"`
+			Name        string `json:"name"`
+			PhoneSuffix string `json:"phone_suffix"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&in)
+		// A narrowed credential may not look anyone up by an identifier kind
+		// outside its allowlist - otherwise 200-vs-404 is still an oracle.
+		if narrowed(r) && (in.Email != "" || in.Phone != "" || in.PhoneSuffix != "" || in.Name != "") {
+			writeJSON(w, 403, map[string]string{"error": "forbidden"})
+			return
+		}
+		if in.PhoneSuffix != "" {
+			if len(in.PhoneSuffix) < 8 {
+				writeJSON(w, 400, map[string]string{"error": "validation", "detail": "phone_suffix needs at least 8 digits"})
+				return
+			}
+			cid, ok := f.bySuffix[in.PhoneSuffix]
+			if !ok || f.erased[cid] {
+				writeJSON(w, 404, map[string]string{"error": "not_found"})
+				return
+			}
+			writeJSON(w, 200, map[string]string{"cid": cid})
+			return
+		}
 		if in.Email == "" && in.Phone == "" {
 			writeJSON(w, 400, map[string]string{"error": "validation", "detail": "a name is not an identifier"})
 			return
@@ -79,7 +111,7 @@ func (f *fakeSunder) handler() http.Handler {
 		writeJSON(w, 200, map[string]string{"cid": cid})
 	})
 	mux.HandleFunc("GET /v1/contacts/{cid}/attributes/{name}", func(w http.ResponseWriter, r *http.Request) {
-		cid, purpose := r.PathValue("cid"), r.URL.Query().Get("purpose")
+		cid, purpose, name := r.PathValue("cid"), r.URL.Query().Get("purpose"), r.PathValue("name")
 		switch {
 		case purpose == "":
 			writeJSON(w, 403, map[string]string{"error": "purpose_not_allowed"})
@@ -87,12 +119,24 @@ func (f *fakeSunder) handler() http.Handler {
 			writeJSON(w, 404, map[string]string{"error": "not_found"})
 		case f.withdrawn[cid+"/"+purpose]:
 			writeJSON(w, 403, map[string]string{"error": "consent_denied"})
+		// A narrowed credential may read only the names on its allowlist,
+		// and only under a purpose it holds.
+		case narrowed(r) && (name != narrowAllowedAttr || purpose != narrowAllowedPurpose):
+			writeJSON(w, 403, map[string]string{"error": "forbidden"})
+		// In a RECEIVING scope only the attributes the issuer authorized
+		// exist at all - the rest were never copied across.
+		case strings.HasPrefix(cid, "erp-cid-") && !f.shared[cid+"|"+name]:
+			writeJSON(w, 404, map[string]string{"error": "not_found"})
 		default:
-			writeJSON(w, 200, map[string]string{"name": r.PathValue("name"), "value": "ana@example.com"})
+			writeJSON(w, 200, map[string]string{"name": name, "value": "ana@example.com"})
 		}
 	})
 	mux.HandleFunc("POST /v1/oti", func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ CID, Purpose string }
+		var in struct {
+			CID             string   `json:"cid"`
+			Purpose         string   `json:"purpose"`
+			ShareAttributes []string `json:"share_attributes"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		switch {
 		case in.CID == "":
@@ -100,7 +144,12 @@ func (f *fakeSunder) handler() http.Handler {
 		case f.withdrawn[in.CID+"/"+in.Purpose]:
 			writeJSON(w, 403, map[string]string{"error": "consent_denied"})
 		default:
-			writeJSON(w, 201, map[string]string{"token": "oti-token-" + in.CID})
+			tok := "oti-token-" + in.CID
+			// Remember WHICH attributes the issuer authorized: an attribute
+			// that was never shared must be ABSENT in the receiving scope,
+			// not merely hidden.
+			f.tokenShares[tok] = append([]string(nil), in.ShareAttributes...)
+			writeJSON(w, 201, map[string]string{"token": tok})
 		}
 	})
 	mux.HandleFunc("POST /v1/oti/verify", func(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +160,12 @@ func (f *fakeSunder) handler() http.Handler {
 			return
 		}
 		f.usedToken[in.Token] = true
-		writeJSON(w, 200, map[string]string{"cid": "erp-cid-1"})
+		f.seq++
+		cid := fmt.Sprintf("erp-cid-%d", f.seq)
+		for _, a := range f.tokenShares[in.Token] {
+			f.shared[cid+"|"+a] = true
+		}
+		writeJSON(w, 200, map[string]string{"cid": cid})
 	})
 	mux.HandleFunc("POST /v1/consent", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -321,6 +375,32 @@ func (f *fakeSunder) handler() http.Handler {
 	})
 
 	return mux
+}
+
+// narrowAllowedAttr / narrowAllowedPurpose mirror the seeded narrowed
+// credential: one attribute name, one purpose.
+const (
+	narrowAllowedAttr    = "loyalty_tier"
+	narrowAllowedPurpose = "support"
+)
+
+// narrowed reports whether the caller is the deliberately narrowed
+// credential. Roles authenticate as "<role>.secret-value" in these tests, so
+// the role name is readable from the header - which is exactly the property
+// the walkthrough demonstrates: the narrowing lives on the CREDENTIAL.
+func narrowed(r *http.Request) bool {
+	return strings.HasPrefix(r.Header.Get("Authorization"), "Bearer narrow.")
+}
+
+// onlyDigits keeps the decimal digits of s.
+func onlyDigits(s string) string {
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			out = append(out, r)
+		}
+	}
+	return string(out)
 }
 
 // luhnOK is the fake's card check: the walkthrough asserts that a non-Luhn

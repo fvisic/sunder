@@ -17,9 +17,7 @@ import (
 // nor listed fails the test, so a new demo cannot quietly arrive without a
 // walkthrough. Phase 8's exit criterion is this map reaching empty, with
 // deliberateOmissions as the only escape hatch.
-var pendingDemos = map[string]string{
-	"escalation.sh": "delayed-notification walkthrough (Phase 8)",
-}
+var pendingDemos = map[string]string{}
 
 // deliberateOmissions are features that will NOT get a browser walkthrough,
 // each with the reason and where the reader should look instead. An entry
@@ -39,6 +37,7 @@ var demoToScenario = map[string]string{
 	"f6-versioning.sh":     "attribute-history",
 	"f7-sub-accounts.sh":   "sub-accounts",
 	"f8-shared-records.sh": "shared-records",
+	"escalation.sh":        "delayed-notification",
 }
 
 func TestEveryDemoScriptHasAWalkthroughOrIsListedPending(t *testing.T) {
