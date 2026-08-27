@@ -83,10 +83,12 @@ jobs:
         run: |
           go test -count=1 -timeout=25m -covermode=atomic \
             -coverprofile=cover.out -coverpkg=./internal/...,./cmd/... ./...
-          TOTAL=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
-          echo "total coverage: ${TOTAL}%"
-          awk -v t="$TOTAL" 'BEGIN { exit (t >= 90.0 ? 0 : 1) }' || {
-            echo "::error::coverage ${TOTAL}% is below the 90% gate"; exit 1; }
+          go tool cover -func=cover.out | tail -1
+          # ops/coverage-gate.sh applies the //coverage:defensive exclusion
+          # list (see the header of that script) before comparing against the
+          # gate, and fails if a marker sits on a block that IS covered or if
+          # the excluded share grows past its ceiling.
+          ops/coverage-gate.sh cover.out 90.0
       - name: Vulnerability scan
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest

@@ -78,17 +78,28 @@ public sealed class SunderClient : IDisposable
     private readonly string _baseUrl;
     private readonly string _credential;
     private readonly HttpClient _http;
+    private readonly string? _userId;
 
     /// <summary>Creates a client for a Sunder instance.</summary>
     /// <param name="url">Base URL of the Sunder instance; defaults to env SUNDER_URL.</param>
     /// <param name="credential">"client_id.secret" bearer credential; defaults to env SUNDER_CREDENTIAL.</param>
     /// <param name="timeout">Per-request timeout; defaults to 10 seconds.</param>
     /// <param name="handler">Optional HTTP message handler (injectable for tests).</param>
+    /// <param name="userId">
+    /// Attributes every read to an operator inside the calling system, sent as
+    /// X-Sunder-User-Id and recorded in the audit chain. It upgrades an
+    /// Article 15 answer from "which system accessed this" to "which operator
+    /// that system says accessed it". CLIENT-ASSERTED and unverifiable by
+    /// design: Sunder records the claim and proves it was not altered
+    /// afterwards, not that it was true. Accepts [A-Za-z0-9._@:-], 1-64
+    /// characters; anything else is a 400 rather than a silent drop.
+    /// </param>
     public SunderClient(
         string? url = null,
         string? credential = null,
         TimeSpan? timeout = null,
-        HttpMessageHandler? handler = null)
+        HttpMessageHandler? handler = null,
+        string? userId = null)
     {
         url ??= Environment.GetEnvironmentVariable("SUNDER_URL");
         credential ??= Environment.GetEnvironmentVariable("SUNDER_CREDENTIAL");
@@ -100,6 +111,7 @@ public sealed class SunderClient : IDisposable
         _credential = credential;
         _http = handler is null ? new HttpClient() : new HttpClient(handler);
         _http.Timeout = timeout ?? TimeSpan.FromSeconds(10);
+        _userId = userId;
     }
 
     // -- contacts ------------------------------------------------------------
@@ -268,6 +280,452 @@ public sealed class SunderClient : IDisposable
             retryOnce: false).ConfigureAwait(false); // single-use token - see method doc
     }
 
+
+    // -- consent ---------------------------------------------------------------
+
+    /// <summary>
+    /// Records the person's decision for one purpose.
+    /// </summary>
+    /// <remarks>
+    /// Consent gates attribute reads for that purpose: revoking it makes
+    /// <see cref="GetAttributeAsync" /> throw
+    /// <see cref="SunderConsentDeniedException" /> even though the client's own
+    /// grant is unchanged. Every call is appended to the audit chain, and that
+    /// trail SURVIVES erasure - it is the accountability record of what was
+    /// consented to and when.
+    /// </remarks>
+    public async Task<JsonElement> SetConsentAsync(string cid, string purpose, bool granted)
+    {
+        var body = new Dictionary<string, object>
+        {
+            ["cid"] = cid,
+            ["purpose"] = purpose,
+            ["granted"] = granted,
+        };
+        return await RequestAsync(HttpMethod.Post, "/v1/consent",
+            JsonSerializer.Serialize(body), retryOnce: false).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Lists every purpose the caller's scope has recorded for a person. A
+    /// purpose that was never set is ABSENT, not false: "no decision" and
+    /// "refused" are different facts.
+    /// </summary>
+    public async Task<JsonElement> GetConsentAsync(string cid)
+    {
+        var path = "/v1/consent/" + Uri.EscapeDataString(cid);
+        return await RequestAsync(HttpMethod.Get, path, null, retryOnce: true)
+            .ConfigureAwait(false);
+    }
+
+    // -- data subject rights -----------------------------------------------------
+
+    /// <summary>
+    /// Article 15, ORG-WIDE: {"scopes": [...], "audit_trail": [...]}.
+    /// </summary>
+    /// <remarks>
+    /// Each scope carries the holdings that do NOT live in the attribute blob -
+    /// value tokens, files, the RECIPIENTS of shares, and links. This crosses
+    /// scope boundaries on the data subject's behalf, so it needs its own grant
+    /// and is itself audited; never route it through an ordinary integration
+    /// credential.
+    /// </remarks>
+    public async Task<JsonElement> DsrAccessAsync(string cid)
+    {
+        var path = "/v1/dsr/access?cid=" + Uri.EscapeDataString(cid);
+        return await RequestAsync(HttpMethod.Get, path, null, retryOnce: true)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Article 20 for the CALLER's scope only: the same holdings sections in
+    /// machine-readable form, for portability.
+    /// </summary>
+    public async Task<JsonElement> DsrExportAsync(string cid)
+    {
+        var path = "/v1/dsr/export?cid=" + Uri.EscapeDataString(cid);
+        return await RequestAsync(HttpMethod.Get, path, null, retryOnce: true)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Article 17: erases the person org-wide, queueing one Article 19
+    /// notification per scope that held them.
+    /// </summary>
+    /// <param name="cid">The person to erase.</param>
+    /// <param name="cascade">
+    /// Link types ("guardian", "member", "owner") whose linked children are
+    /// erased too. Null or empty, the children are LISTED in the result and
+    /// left untouched - an accidental cascade would delete a third party's
+    /// data, so it is opt-in per link type.
+    /// </param>
+    /// <remarks>
+    /// A cascade is one transaction PER PERSON, and the plan is recorded before
+    /// any child is touched: re-issuing the identical call after an
+    /// interruption RESUMES the outstanding children. Once everything is done
+    /// it throws <see cref="SunderNotFoundException" />, deliberately
+    /// indistinguishable from a cid that never existed. Never retried: it is
+    /// destructive, and resuming is the caller's decision.
+    /// </remarks>
+    public async Task<JsonElement> DsrEraseAsync(string cid, IEnumerable<string>? cascade = null)
+    {
+        var body = new Dictionary<string, object> { ["cid"] = cid };
+        var types = cascade is null ? null : new List<string>(cascade);
+        // An empty list must not be sent: absence is what "cascade nothing"
+        // looks like on the wire.
+        if (types is { Count: > 0 })
+            body["cascade"] = types;
+        return await RequestAsync(HttpMethod.Post, "/v1/dsr/erase",
+            JsonSerializer.Serialize(body), retryOnce: false).ConfigureAwait(false);
+    }
+
+    // -- value tokenization --------------------------------------------------------
+
+    /// <summary>
+    /// Vaults one value and returns its opaque token.
+    /// </summary>
+    /// <param name="value">The plaintext to vault (max 8192 bytes).</param>
+    /// <param name="options">
+    /// Optional "type" ("string" default, or "card" which also validates the
+    /// Luhn checksum), "cid", "unique", "expires_final" and "sliding_seconds".
+    /// The cid binds the token to a person in the caller's scope, so erasure and
+    /// the retention sweep destroy it; omit it ONLY for a scope-wide value
+    /// belonging to no single subject, because an unattributed token survives
+    /// that person's erasure.
+    /// </param>
+    public async Task<string> TokenizeAsync(
+        string value, IReadOnlyDictionary<string, object>? options = null)
+    {
+        var body = new Dictionary<string, object> { ["value"] = value };
+        if (options is not null)
+        {
+            foreach (var kv in options)
+                body[kv.Key] = kv.Value;
+        }
+        var root = await RequestAsync(HttpMethod.Post, "/v1/tokens",
+            JsonSerializer.Serialize(body), retryOnce: false).ConfigureAwait(false);
+        return GetStringField(root, "token");
+    }
+
+    /// <summary>
+    /// Resolves a token back to its value. Audited per read and, for a cid-bound
+    /// token, attributed to that person's CID - so "who read my tokenized IBAN"
+    /// is answerable from the access trail.
+    /// </summary>
+    public async Task<string> DetokenizeAsync(string token)
+    {
+        var path = "/v1/tokens/" + Uri.EscapeDataString(token);
+        var root = await RequestAsync(HttpMethod.Get, path, null, retryOnce: true)
+            .ConfigureAwait(false);
+        return GetStringField(root, "value");
+    }
+
+    /// <summary>
+    /// Destroys a token and its value. Not retried: it is destructive.
+    /// </summary>
+    public async Task DeleteTokenAsync(string token)
+    {
+        var path = "/v1/tokens/" + Uri.EscapeDataString(token);
+        await RequestAsync(HttpMethod.Delete, path, null, retryOnce: false)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Vaults many values in one call; tokens come back in input order.
+    /// </summary>
+    /// <remarks>
+    /// Bulk surfaces ALWAYS require a single-use unlock token, regardless of
+    /// SUNDER_SEARCH_UNLOCK: one call touching many people is exactly the shape
+    /// a rate limit does not constrain. Get one from <see cref="UnlockAsync" />.
+    /// The whole batch is validated before the token is spent, so a rejected
+    /// item does not burn the unlock.
+    /// </remarks>
+    public async Task<JsonElement> TokenizeBulkAsync(
+        string unlockToken, IEnumerable<IReadOnlyDictionary<string, object>> items)
+    {
+        var body = new Dictionary<string, object>
+        {
+            ["items"] = new List<IReadOnlyDictionary<string, object>>(items),
+        };
+        return await RequestAsync(HttpMethod.Post, "/v1/tokens/bulk",
+            JsonSerializer.Serialize(body), retryOnce: false,
+            new Dictionary<string, string> { ["X-Sunder-Unlock"] = unlockToken }, null)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Resolves many tokens in one call. Requires an unlock token, for the same
+    /// reason <see cref="TokenizeBulkAsync" /> does.
+    /// </summary>
+    public async Task<JsonElement> DetokenizeBulkAsync(
+        string unlockToken, IEnumerable<string> tokens)
+    {
+        var body = new Dictionary<string, object> { ["tokens"] = new List<string>(tokens) };
+        return await RequestAsync(HttpMethod.Post, "/v1/tokens/bulk/read",
+            JsonSerializer.Serialize(body), retryOnce: false,
+            new Dictionary<string, string> { ["X-Sunder-Unlock"] = unlockToken }, null)
+            .ConfigureAwait(false);
+    }
+
+    // -- file vault -------------------------------------------------------------------
+
+    /// <summary>
+    /// Stores a file for a person; returns its metadata.
+    /// </summary>
+    /// <remarks>
+    /// Each file gets its own data key, wrapped by the person's record key - so
+    /// erasing the person shreds the file even if the object store still holds
+    /// the ciphertext. <paramref name="expiresAt" /> (RFC 3339) sets a hard
+    /// deadline after which the file is unreadable and swept. Never retried: a
+    /// retried upload after an ambiguous failure stores the file twice.
+    /// </remarks>
+    public async Task<JsonElement> UploadFileAsync(
+        string cid, string filename, byte[] content,
+        string contentType = "application/octet-stream", string? expiresAt = null)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        var form = new MultipartFormDataContent();
+        var part = new ByteArrayContent(content);
+        part.Headers.TryAddWithoutValidation("Content-Type", contentType);
+        form.Add(part, "file", filename);
+        var headers = expiresAt is null
+            ? null
+            : new Dictionary<string, string> { ["X-Sunder-File-Expiry"] = expiresAt };
+        var path = "/v1/contacts/" + Uri.EscapeDataString(cid) + "/files";
+        return await RequestAsync(HttpMethod.Post, path, null, retryOnce: false,
+            headers, form).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Lists a person's files (metadata only). Purpose-gated and consent-gated
+    /// like any other read; expired files are hidden.
+    /// </summary>
+    public async Task<JsonElement> ListFilesAsync(string cid, string purpose)
+    {
+        var path = "/v1/contacts/" + Uri.EscapeDataString(cid)
+            + "/files?purpose=" + Uri.EscapeDataString(purpose);
+        return await RequestAsync(HttpMethod.Get, path, null, retryOnce: true)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Downloads one file's plaintext.
+    /// </summary>
+    /// <remarks>
+    /// A download that fails mid-stream ABORTS the connection rather than
+    /// completing a 200 with a short body, so a truncated read surfaces as a
+    /// network error - verify the length, or the "sha256" from
+    /// <see cref="ListFilesAsync" />, before treating the bytes as complete.
+    /// </remarks>
+    public async Task<byte[]> DownloadFileAsync(string id, string purpose)
+    {
+        var path = "/v1/files/" + Uri.EscapeDataString(id)
+            + "?purpose=" + Uri.EscapeDataString(purpose);
+        try
+        {
+            using var request = BuildRequest(HttpMethod.Get, path, null);
+            using var response = await _http.SendAsync(request).ConfigureAwait(false);
+            var status = (int)response.StatusCode;
+            if (status < 200 || status >= 300)
+            {
+                // A 404 must surface as the taxonomy error, never as the bytes
+                // of an error page the caller would write to disk as the file.
+                var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                throw CreateError(status, text);
+            }
+            return await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new SunderServiceUnavailableException(
+                "service_unavailable", null, "network failure: " + ex.Message);
+        }
+        catch (OperationCanceledException ex)
+        {
+            throw new SunderServiceUnavailableException(
+                "service_unavailable", null, "request timed out: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Removes a file. Its name and digest are redacted immediately; the
+    /// ciphertext is collected by the retention sweep. Not retried.
+    /// </summary>
+    public async Task DeleteFileAsync(string id)
+    {
+        var path = "/v1/files/" + Uri.EscapeDataString(id);
+        await RequestAsync(HttpMethod.Delete, path, null, retryOnce: false)
+            .ConfigureAwait(false);
+    }
+
+    // -- cross-org shares ----------------------------------------------------------------
+
+    /// <summary>
+    /// Discloses a SNAPSHOT of named fields to a partner.
+    /// </summary>
+    /// <remarks>
+    /// The returned uuid is unguessable and, when the server runs with
+    /// SUNDER_SHARES_PUBLIC, is the ONLY credential needed to fetch it - treat
+    /// it as a bearer secret. <paramref name="options" /> accepts
+    /// "partner_label" (which identifies the recipient in the audit trail and in
+    /// the Article 15 answer), "purpose" and "ttl_seconds".
+    /// </remarks>
+    public async Task<JsonElement> CreateShareAsync(
+        string cid, IEnumerable<string> fields,
+        IReadOnlyDictionary<string, object>? options = null)
+    {
+        var body = new Dictionary<string, object>
+        {
+            ["cid"] = cid,
+            ["fields"] = new List<string>(fields),
+        };
+        if (options is not null)
+        {
+            foreach (var kv in options)
+                body[kv.Key] = kv.Value;
+        }
+        return await RequestAsync(HttpMethod.Post, "/v1/shares",
+            JsonSerializer.Serialize(body), retryOnce: false).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads a share's fields. An expired, revoked or erased share throws
+    /// <see cref="SunderNotFoundException" />.
+    /// </summary>
+    public async Task<JsonElement> FetchShareAsync(string uuid)
+    {
+        var path = "/v1/shares/" + Uri.EscapeDataString(uuid);
+        return await RequestAsync(HttpMethod.Get, path, null, retryOnce: true)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Withdraws a share. Precise to (cid, purpose) on the consent path, so
+    /// revoking one never silently withdraws another. Not retried.
+    /// </summary>
+    public async Task RevokeShareAsync(string uuid)
+    {
+        var path = "/v1/shares/" + Uri.EscapeDataString(uuid);
+        await RequestAsync(HttpMethod.Delete, path, null, retryOnce: false)
+            .ConfigureAwait(false);
+    }
+
+    // -- person links ---------------------------------------------------------------------
+
+    /// <summary>
+    /// Relates two people in the caller's scope. Erasing the parent LISTS the
+    /// children; it never erases them unless
+    /// <see cref="DsrEraseAsync" /> names the link type.
+    /// </summary>
+    public async Task LinkAsync(string parentCid, string childCid, string linkType)
+    {
+        var body = new Dictionary<string, string>
+        {
+            ["parent_cid"] = parentCid,
+            ["child_cid"] = childCid,
+            ["link_type"] = linkType,
+        };
+        await RequestAsync(HttpMethod.Post, "/v1/links",
+            JsonSerializer.Serialize(body), retryOnce: false).ConfigureAwait(false);
+    }
+
+    /// <summary>Removes the relation. Not retried.</summary>
+    public async Task UnlinkAsync(string parentCid, string childCid)
+    {
+        var body = new Dictionary<string, string>
+        {
+            ["parent_cid"] = parentCid,
+            ["child_cid"] = childCid,
+        };
+        await RequestAsync(HttpMethod.Delete, "/v1/links",
+            JsonSerializer.Serialize(body), retryOnce: false).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reports this person's links, each with the role ("parent" or "child")
+    /// this cid plays in it.
+    /// </summary>
+    public async Task<JsonElement> ListLinksAsync(string cid)
+    {
+        var path = "/v1/contacts/" + Uri.EscapeDataString(cid) + "/links";
+        return await RequestAsync(HttpMethod.Get, path, null, retryOnce: true)
+            .ConfigureAwait(false);
+    }
+
+    // -- attribute version history -----------------------------------------------------------
+
+    /// <summary>
+    /// Reports the retained revisions of a person's attributes, newest first.
+    /// How many are kept is the server's SUNDER_VERSIONS_KEEP / _TTL decision;
+    /// history is personal data and is destroyed by erasure like everything else.
+    /// </summary>
+    public async Task<JsonElement> ListVersionsAsync(string cid)
+    {
+        var path = "/v1/contacts/" + Uri.EscapeDataString(cid) + "/versions";
+        return await RequestAsync(HttpMethod.Get, path, null, retryOnce: true)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads one attribute as it was at a past revision. Purpose-gated,
+    /// consent-gated and audited exactly like a current read: an old value is
+    /// not a lesser secret.
+    /// </summary>
+    public async Task<string> GetVersionAttributeAsync(
+        string cid, long versionNo, string name, string purpose)
+    {
+        var path = "/v1/contacts/" + Uri.EscapeDataString(cid)
+            + "/versions/" + versionNo.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + "/attributes/" + Uri.EscapeDataString(name)
+            + "?purpose=" + Uri.EscapeDataString(purpose);
+        var root = await RequestAsync(HttpMethod.Get, path, null, retryOnce: true)
+            .ConfigureAwait(false);
+        return GetStringField(root, "value");
+    }
+
+    // -- external claims ------------------------------------------------------------------------
+
+    /// <summary>
+    /// Ingests a signed envelope from a trusted issuer; returns the names
+    /// actually stored.
+    /// </summary>
+    /// <remarks>
+    /// Stored attribute names carry the issuer's provenance after an '@'
+    /// separator - which is why '@' is refused in a caller-supplied attribute
+    /// name: an attribute an external issuer vouched for must never be
+    /// impersonable by an ordinary write.
+    /// </remarks>
+    public async Task<JsonElement> StoreExternalClaimAsync(string cid, string envelope)
+    {
+        var body = new Dictionary<string, string>
+        {
+            ["cid"] = cid,
+            ["envelope"] = envelope,
+        };
+        return await RequestAsync(HttpMethod.Post, "/v1/claims/external",
+            JsonSerializer.Serialize(body), retryOnce: false).ConfigureAwait(false);
+    }
+
+    // -- admin ------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Mints a single-use token authorizing one privileged call.
+    /// </summary>
+    /// <remarks>
+    /// "search" covers fuzzy and partial lookups when SUNDER_SEARCH_UNLOCK is
+    /// on; "tokens" covers the bulk vault routes. It lives about a minute and is
+    /// spent by ONE call. Requires the admin.unlock action, and the server
+    /// refuses to grant that to a credential with no expiry: a standing key to
+    /// every gated surface is not something an audit can reconstruct after the
+    /// fact.
+    /// </remarks>
+    public async Task<JsonElement> UnlockAsync(string purpose)
+    {
+        var body = new Dictionary<string, string> { ["purpose"] = purpose };
+        return await RequestAsync(HttpMethod.Post, "/v1/admin/unlock",
+            JsonSerializer.Serialize(body), retryOnce: false).ConfigureAwait(false);
+    }
+
     // -- ops -------------------------------------------------------------------
 
     /// <summary>
@@ -316,8 +774,17 @@ public sealed class SunderClient : IDisposable
     /// </summary>
     private async Task<JsonElement> RequestAsync(
         HttpMethod method, string path, string? jsonBody, bool retryOnce)
+        => await RequestAsync(method, path, jsonBody, retryOnce, null, null)
+            .ConfigureAwait(false);
+
+    private async Task<JsonElement> RequestAsync(
+        HttpMethod method, string path, string? jsonBody, bool retryOnce,
+        IReadOnlyDictionary<string, string>? extraHeaders, HttpContent? rawContent)
     {
-        var attempts = retryOnce ? 2 : 1;
+        // A pre-built HttpContent is disposed with the request that carried
+        // it, so a second attempt would send a disposed body. None of the
+        // callers that pass one ask for a retry; this makes that structural.
+        var attempts = retryOnce && rawContent is null ? 2 : 1;
         SunderException? last = null;
         for (var attempt = 0; attempt < attempts; attempt++)
         {
@@ -325,7 +792,7 @@ public sealed class SunderClient : IDisposable
             string text;
             try
             {
-                using var request = BuildRequest(method, path, jsonBody);
+                using var request = BuildRequest(method, path, jsonBody, extraHeaders, rawContent);
                 using var response = await _http.SendAsync(request).ConfigureAwait(false);
                 status = (int)response.StatusCode;
                 text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -366,12 +833,26 @@ public sealed class SunderClient : IDisposable
         throw last!;
     }
 
-    private HttpRequestMessage BuildRequest(HttpMethod method, string path, string? jsonBody)
+    private HttpRequestMessage BuildRequest(
+        HttpMethod method, string path, string? jsonBody,
+        IReadOnlyDictionary<string, string>? extraHeaders = null,
+        HttpContent? rawContent = null)
     {
         var request = new HttpRequestMessage(method, _baseUrl + path);
         request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _credential);
         request.Headers.TryAddWithoutValidation("Accept", "application/json");
-        if (jsonBody is not null)
+        if (_userId is not null)
+            request.Headers.TryAddWithoutValidation("X-Sunder-User-Id", _userId);
+        if (extraHeaders is not null)
+        {
+            foreach (var header in extraHeaders)
+                request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        }
+        if (rawContent is not null)
+            // Pre-built content (a multipart upload) sets its own
+            // Content-Type with the boundary.
+            request.Content = rawContent;
+        else if (jsonBody is not null)
             request.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
         return request;
     }

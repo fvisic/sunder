@@ -25,6 +25,21 @@ $record = [
     'path' => $_SERVER['REQUEST_URI'],
     'headers' => array_change_key_case(getallheaders(), CASE_LOWER),
     'body' => $rawBody === '' ? null : json_decode($rawBody, true),
+    // The raw body as well: a multipart upload is not JSON, and the tests
+    // assert on the boundary, the filename and the content. PHP consumes a
+    // multipart body into $_FILES before php://input can be read, so that
+    // case is reported separately rather than as an empty raw body.
+    'raw' => $rawBody,
+    'files' => array_map(
+        static fn (array $f): array => [
+            'name' => $f['name'],
+            'type' => $f['type'],
+            'content' => is_string($f['tmp_name']) && is_readable($f['tmp_name'])
+                ? (string) file_get_contents($f['tmp_name'])
+                : '',
+        ],
+        $_FILES
+    ),
 ];
 file_put_contents($dir . '/requests.log', json_encode($record) . "\n", FILE_APPEND | LOCK_EX);
 

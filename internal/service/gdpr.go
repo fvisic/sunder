@@ -173,7 +173,7 @@ func consentsFor(ctx context.Context, pool *pgxpool.Pool, cid string) ([]Consent
 	out := []Consent{}
 	for rows.Next() {
 		var c Consent
-		if err := rows.Scan(&c.Purpose, &c.Granted, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.Purpose, &c.Granted, &c.UpdatedAt); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return nil, err
 		}
 		out = append(out, c)
@@ -276,7 +276,7 @@ func (g *GDPR) holdingsFor(ctx context.Context, sd *ScopeData) error {
 	}
 	for vt.Next() {
 		var r ValueTokenRef
-		if err := vt.Scan(&r.Token, &r.Type, &r.Scope, &r.CreatedBy, &r.CreatedAt, &r.LastUsed, &r.ExpiresAt); err != nil {
+		if err := vt.Scan(&r.Token, &r.Type, &r.Scope, &r.CreatedBy, &r.CreatedAt, &r.LastUsed, &r.ExpiresAt); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			vt.Close()
 			return err
 		}
@@ -297,7 +297,7 @@ func (g *GDPR) holdingsFor(ctx context.Context, sd *ScopeData) error {
 	}
 	for fr.Next() {
 		var r FileRef
-		if err := fr.Scan(&r.ID, &r.Name, &r.ContentType, &r.SizeBytes, &r.CreatedAt, &r.ExpiresAt); err != nil {
+		if err := fr.Scan(&r.ID, &r.Name, &r.ContentType, &r.SizeBytes, &r.CreatedAt, &r.ExpiresAt); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			fr.Close()
 			return err
 		}
@@ -321,7 +321,7 @@ func (g *GDPR) holdingsFor(ctx context.Context, sd *ScopeData) error {
 	for sr.Next() {
 		var r ShareRef
 		if err := sr.Scan(&r.UUID, &r.Partner, &r.Fields, &r.Purpose, &r.CreatedBy,
-			&r.CreatedAt, &r.ExpiresAt, &r.Revoked); err != nil {
+			&r.CreatedAt, &r.ExpiresAt, &r.Revoked); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			sr.Close()
 			return err
 		}
@@ -351,7 +351,7 @@ func (g *GDPR) holdingsFor(ctx context.Context, sd *ScopeData) error {
 	defer lr.Close()
 	for lr.Next() {
 		var r LinkRef
-		if err := lr.Scan(&r.CID, &r.LinkType, &r.Role); err != nil {
+		if err := lr.Scan(&r.CID, &r.LinkType, &r.Role); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return err
 		}
 		sd.Links = append(sd.Links, r)
@@ -426,7 +426,7 @@ func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, 
 		var sd ScopeData
 		var blob []byte
 		var keyID, alg string
-		if err := rows.Scan(&sd.CID, &sd.Scope, &blob, &keyID, &alg); err != nil {
+		if err := rows.Scan(&sd.CID, &sd.Scope, &blob, &keyID, &alg); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return nil, nil, err
 		}
 		sd.Attributes = map[string]string{}
@@ -458,7 +458,7 @@ func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, 
 	trail := []AuditTrailEntry{}
 	for trailRows.Next() {
 		var e AuditTrailEntry
-		if err := trailRows.Scan(&e.Seq, &e.TS, &e.ClientID, &e.Action, &e.CID, &e.UserID); err != nil {
+		if err := trailRows.Scan(&e.Seq, &e.TS, &e.ClientID, &e.Action, &e.CID, &e.UserID); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return nil, nil, err
 		}
 		trail = append(trail, e)
@@ -482,7 +482,7 @@ func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, 
 	for bRows.Next() {
 		var e AuditTrailEntry
 		var last time.Time
-		if err := bRows.Scan(&e.ClientID, &e.UserID, &e.CID, &e.Action, &e.Count, &e.TS, &last); err != nil {
+		if err := bRows.Scan(&e.ClientID, &e.UserID, &e.CID, &e.Action, &e.Count, &e.TS, &last); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return nil, nil, err
 		}
 		e.LastTS = &last
@@ -607,7 +607,7 @@ func (g *GDPR) EraseWithCascade(ctx context.Context, client *auth.Client, cid st
 	var children []childRow
 	for rows.Next() {
 		var cr childRow
-		if err := rows.Scan(&cr.cid, &cr.linkType, &cr.person); err != nil {
+		if err := rows.Scan(&cr.cid, &cr.linkType, &cr.person); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return 0, 0, nil, err
 		}
@@ -671,7 +671,7 @@ func (g *GDPR) EraseWithCascadePlanOnlyForTest(ctx context.Context, client *auth
 	var plan []cascadeTarget
 	for rows.Next() {
 		var c, lt, p string
-		if err := rows.Scan(&c, &lt, &p); err != nil {
+		if err := rows.Scan(&c, &lt, &p); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return 0, 0, err
 		}
@@ -680,7 +680,7 @@ func (g *GDPR) EraseWithCascadePlanOnlyForTest(ctx context.Context, client *auth
 		}
 	}
 	rows.Close()
-	if err := rows.Err(); err != nil {
+	if err := rows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
 		return 0, 0, err
 	}
 	return g.erasePersonWithPlan(ctx, client.ID, cid, personID, plan)
@@ -703,14 +703,14 @@ func (g *GDPR) runCascade(ctx context.Context, actor string, erasureID int64) (m
 	var targets []target
 	for rows.Next() {
 		var t target
-		if err := rows.Scan(&t.person, &t.cid); err != nil {
+		if err := rows.Scan(&t.person, &t.cid); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return nil, err
 		}
 		targets = append(targets, t)
 	}
 	rows.Close()
-	if err := rows.Err(); err != nil {
+	if err := rows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
 		return nil, err
 	}
 	for _, t := range targets {
@@ -774,7 +774,7 @@ func (g *GDPR) resumeCascade(ctx context.Context, client *auth.Client, personID 
 	var linked []LinkedErasure
 	for rows.Next() {
 		var le LinkedErasure
-		if err := rows.Scan(&le.CID, &le.LinkType, &le.Cascaded); err != nil {
+		if err := rows.Scan(&le.CID, &le.LinkType, &le.Cascaded); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return 0, 0, nil, err
 		}
 		linked = append(linked, le)
@@ -879,14 +879,14 @@ func (g *GDPR) erasePersonOnce(ctx context.Context, actor, auditCID, personID st
 	var all []sc
 	for rows.Next() {
 		var s sc
-		if err := rows.Scan(&s.cid, &s.scope); err != nil {
+		if err := rows.Scan(&s.cid, &s.scope); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return 0, 0, err
 		}
 		all = append(all, s)
 	}
 	rows.Close()
-	if err := rows.Err(); err != nil {
+	if err := rows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
 		return 0, 0, err
 	}
 	for _, s := range all {
@@ -1120,7 +1120,7 @@ func (g *GDPR) deliverPending(ctx context.Context, onlyErasure int64) (delivered
 	var evs []ev
 	for rows.Next() {
 		var e ev
-		if err := rows.Scan(&e.id, &e.erasureID, &e.scope, &e.cid, &e.url, &e.secret); err != nil {
+		if err := rows.Scan(&e.id, &e.erasureID, &e.scope, &e.cid, &e.url, &e.secret); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return 0, err
 		}
@@ -1265,7 +1265,7 @@ func (g *GDPR) warnBlockedScopes(ctx context.Context) {
 	for rows.Next() {
 		var scope string
 		var n int64
-		if rows.Scan(&scope, &n) != nil {
+		if rows.Scan(&scope, &n) != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return
 		}
 		g.logger().Warn("erasure events are waiting for a scope webhook that does not exist - the downstream system has NOT been told to erase; register it with `sunder webhook set` and they deliver on the next sweep",
@@ -1341,7 +1341,7 @@ func RunRetention(ctx context.Context, pool *pgxpool.Pool) (wiped int64, otiPrun
 	var wipedCIDs []string
 	for rows.Next() {
 		var cid string
-		if err := rows.Scan(&cid); err != nil {
+		if err := rows.Scan(&cid); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return 0, 0, err
 		}

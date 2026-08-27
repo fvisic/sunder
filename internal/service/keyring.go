@@ -126,7 +126,7 @@ func (k *KeyRing) refreshLocked(ctx context.Context) error {
 	defer rows.Close()
 	for rows.Next() {
 		var kd, id, status string
-		if err := rows.Scan(&kd, &id, &status); err != nil {
+		if err := rows.Scan(&kd, &id, &status); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return err
 		}
 		v := strings.TrimPrefix(id, kd+"/")

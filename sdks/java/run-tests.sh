@@ -17,3 +17,4 @@ javac --release 17 -Xlint:all -Werror -cp "$OUT" -d "$TEST_OUT" $(find src/test/
 
 echo "== running test suite"
 java -cp "$OUT:$TEST_OUT" io.sunderid.client.SunderClientTest
+java -cp "$OUT:$TEST_OUT" io.sunderid.client.SunderApiTest

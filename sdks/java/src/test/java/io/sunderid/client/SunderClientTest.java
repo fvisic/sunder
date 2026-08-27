@@ -208,6 +208,10 @@ public final class SunderClientTest {
             failures.forEach(f -> System.out.println("  FAILED: " + f));
             System.exit(1);
         }
+        // The mock's cached thread pool holds non-daemon threads, so stopping
+        // the server is not enough to end the JVM - without this the runner
+        // hangs after the summary instead of exiting 0.
+        System.exit(0);
     }
 
     // -- success paths -------------------------------------------------------------

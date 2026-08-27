@@ -24,6 +24,8 @@ type recorded struct {
 	Path   string
 	Body   map[string]any
 	Auth   string
+	Header http.Header
+	Raw    []byte
 }
 
 // reply is one canned response.
@@ -48,7 +50,8 @@ func newMock(t *testing.T, replies ...reply) (*Client, *mock) {
 	m := &mock{t: t, replies: replies}
 	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
-		rec := recorded{Method: r.Method, Path: r.URL.RequestURI(), Auth: r.Header.Get("Authorization")}
+		rec := recorded{Method: r.Method, Path: r.URL.RequestURI(), Auth: r.Header.Get("Authorization"),
+			Header: r.Header.Clone(), Raw: raw}
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &rec.Body)
 		}

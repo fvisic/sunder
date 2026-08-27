@@ -32,13 +32,14 @@ import (
 )
 
 // Version tracks the SDK release, not the server's.
-const Version = "0.3.0"
+const Version = "0.5.0"
 
 // Client talks to one Sunder instance with one client credential.
 // Safe for concurrent use.
 type Client struct {
 	baseURL    string
 	credential string
+	userID     string
 	http       *http.Client
 }
 
@@ -56,6 +57,19 @@ func WithHTTPClient(h *http.Client) Option {
 // when WithHTTPClient supplies a client with its own timeout.
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) { c.http = &http.Client{Timeout: d} }
+}
+
+// WithUserID attributes every read this client makes to an operator inside
+// the calling system, sent as X-Sunder-User-Id and recorded in the audit
+// chain. It upgrades an Article 15 answer from "which system accessed this"
+// to "which operator that system says accessed it".
+//
+// It is CLIENT-ASSERTED and unverifiable by design: Sunder records the
+// claim and proves it was not altered afterwards, not that it was true.
+// Accepts [A-Za-z0-9._@:-], 1-64 characters; anything else is a 400 rather
+// than a silent drop.
+func WithUserID(id string) Option {
+	return func(c *Client) { c.userID = id }
 }
 
 // New builds a client. An empty baseURL or credential falls back to
@@ -373,6 +387,73 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, ret
 	return lastErr
 }
 
+// setHeaders applies the auth, accept and attribution headers every request
+// carries, plus any call-specific extras.
+func (c *Client) setHeaders(req *http.Request, extra map[string]string) {
+	req.Header.Set("Authorization", "Bearer "+c.credential)
+	req.Header.Set("Accept", "application/json")
+	if c.userID != "" {
+		req.Header.Set("X-Sunder-User-Id", c.userID)
+	}
+	for k, v := range extra {
+		req.Header.Set(k, v)
+	}
+}
+
+// doWithHeaders is do() for a call that carries extra headers - the bulk
+// vault routes and their single-use unlock token. Never retried: the token
+// is spent by the first attempt, so a retry would fail as already-used and
+// leave the caller unable to tell whether the first call landed.
+func (c *Client) doWithHeaders(ctx context.Context, method, path string, body, out any, headers map[string]string) error {
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return &Error{Code: ErrValidation.code, Detail: "request body is not JSON-encodable: " + err.Error()}
+	}
+	h := map[string]string{"Content-Type": "application/json"}
+	for k, v := range headers {
+		h[k] = v
+	}
+	return c.raw(ctx, method, path, encoded, h, out, nil)
+}
+
+// raw performs one request with a caller-supplied body and header set. It
+// is the path for anything that is not a plain JSON POST - multipart
+// uploads and the unlock-gated routes - and is never retried.
+func (c *Client) raw(ctx context.Context, method, path string, body []byte, headers map[string]string, out any, _ any) error {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	if err != nil {
+		return &Error{Code: ErrValidation.code, Detail: err.Error()}
+	}
+	c.setHeaders(req, headers)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return &Error{Code: ErrServiceUnavailable.code,
+			Detail: fmt.Sprintf("network failure calling %s %s: %v", method, path, err)}
+	}
+	defer func() { _ = resp.Body.Close() }()
+	rawBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if readErr != nil {
+		return &Error{Code: ErrServiceUnavailable.code,
+			Detail: "truncated response body: " + readErr.Error()}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		code, detail := parseErrorBody(rawBody)
+		return mapError(resp.StatusCode, code, detail)
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.Unmarshal(rawBody, out); err != nil {
+		return &Error{Code: ErrBadResponse.code, Status: resp.StatusCode,
+			Detail: "success body was not the expected JSON: " + err.Error()}
+	}
+	return nil
+}
+
 func (c *Client) attempt(ctx context.Context, method, path string, body, out any) error {
 	var reader io.Reader
 	if body != nil {
@@ -386,8 +467,7 @@ func (c *Client) attempt(ctx context.Context, method, path string, body, out any
 	if err != nil {
 		return &Error{Code: ErrValidation.code, Detail: err.Error()}
 	}
-	req.Header.Set("Authorization", "Bearer "+c.credential)
-	req.Header.Set("Accept", "application/json")
+	c.setHeaders(req, nil)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
