@@ -196,6 +196,26 @@ fixes generalise an existing guard rather than invent one.
 `SUNDER_API_CLIENT_IP_HEADER`, `SUNDER_SEALER_HEALTH_ADDR`. Booleans now
 accept `true/false`, `1/0`, `yes/no`, `on/off` and REFUSE anything else.
 
+### Two more races the CI matrix caught during this release
+- **The file keystore could overwrite live key material.** `Ensure` reads,
+  then queues on an O_EXCL lock. A caller that found no key, waited, and won
+  the lock AFTER the first generator had already renamed its key into place
+  minted straight over it - and `Ensure` returned nil either way, so the only
+  symptom was two readers disagreeing about the key bytes while every blob
+  encrypted under the previous key became unreadable. The decision is now
+  re-checked under the lock. `TestEnsureDoesNotOverwriteAKeyMintedWhile
+  WaitingForTheLock` occupies that exact window through a test seam instead of
+  waiting for scheduling luck; the existing 16-way race test had been passing
+  by chance and failed once on a CI runner.
+- **The playground inbox refused most real pseudonyms.** Its `looksLikeCID`
+  filter checked a CROCKFORD alphabet (digits `0-9`, no `U`) while the vault
+  emits RFC 4648 base32 (`A-Z`, `2-7`). Roughly 56% of 26-character
+  pseudonyms contain a `U`, so the erasure walkthrough's signed callback was
+  discarded as "not a pseudonym" on about every second run - a coin-flip CI
+  failure that looked like a webhook delivery problem. Two tests pin it: the
+  alphabet itself, and a loop asserting the inbox accepts 500 freshly minted
+  CIDs.
+
 ### Cold-boot migration race (found by the playground CI leg)
 `Migrate` created its `schema_migrations` bookkeeping table OUTSIDE the
 advisory lock meant to serialize concurrent replicas. `CREATE TABLE IF NOT

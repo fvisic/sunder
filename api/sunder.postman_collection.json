@@ -5,24 +5,111 @@
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    {"key": "baseUrl", "value": "http://localhost:8080"},
-    {"key": "credCrm", "value": ""},
-    {"key": "credErp", "value": ""},
-    {"key": "credNotifier", "value": ""},
-    {"key": "cid", "value": ""},
-    {"key": "otiToken", "value": ""},
-    {"key": "erpCid", "value": ""},
-    {"key": "notifierCid", "value": ""},
-    {"key": "demoEmail", "value": "ana.demo@example.com"}
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "credCrm",
+      "value": ""
+    },
+    {
+      "key": "credErp",
+      "value": ""
+    },
+    {
+      "key": "credNotifier",
+      "value": ""
+    },
+    {
+      "key": "cid",
+      "value": ""
+    },
+    {
+      "key": "otiToken",
+      "value": ""
+    },
+    {
+      "key": "erpCid",
+      "value": ""
+    },
+    {
+      "key": "notifierCid",
+      "value": ""
+    },
+    {
+      "key": "demoEmail",
+      "value": "ana.demo@example.com"
+    },
+    {
+      "key": "credDpo",
+      "value": ""
+    },
+    {
+      "key": "credAdmin",
+      "value": ""
+    },
+    {
+      "key": "parentCid",
+      "value": ""
+    },
+    {
+      "key": "childCid",
+      "value": ""
+    },
+    {
+      "key": "valueToken",
+      "value": ""
+    },
+    {
+      "key": "unlockToken",
+      "value": ""
+    },
+    {
+      "key": "fileId",
+      "value": ""
+    },
+    {
+      "key": "shareUuid",
+      "value": ""
+    },
+    {
+      "key": "issuerEnvelope",
+      "value": ""
+    }
   ],
   "item": [
     {
       "name": "Ops",
       "item": [
-        {"name": "Health", "request": {"method": "GET", "url": "{{baseUrl}}/healthz"}},
-        {"name": "Readiness", "request": {"method": "GET", "url": "{{baseUrl}}/readyz"}},
-        {"name": "OpenAPI spec", "request": {"method": "GET", "url": "{{baseUrl}}/openapi.yaml"}},
-        {"name": "Metrics", "request": {"method": "GET", "url": "{{baseUrl}}/metrics"}}
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/healthz"
+          }
+        },
+        {
+          "name": "Readiness",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/readyz"
+          }
+        },
+        {
+          "name": "OpenAPI spec",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/openapi.yaml"
+          }
+        },
+        {
+          "name": "Metrics",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/metrics"
+          }
+        }
       ]
     },
     {
@@ -30,18 +117,34 @@
       "item": [
         {
           "name": "Register contact",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('201 created', () => pm.response.to.have.status(201));",
-            "pm.collectionVariables.set('cid', pm.response.json().cid);"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 created', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('cid', pm.response.json().cid);"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/contacts",
-            "body": {"mode": "raw", "raw": "{\n  \"email\": \"{{demoEmail}}\",\n  \"phones\": [\"+385 91 123 4567\", \"+385 1 4666-000\"],\n  \"name\": \"Ana Anic\",\n  \"attributes\": {\"loyalty_tier\": \"gold\", \"address_home\": \"Ilica 1, Zagreb\"}\n}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{demoEmail}}\",\n  \"phones\": [\"+385 91 123 4567\", \"+385 1 4666-000\"],\n  \"name\": \"Ana Anic\",\n  \"attributes\": {\"loyalty_tier\": \"gold\", \"address_home\": \"Ilica 1, Zagreb\"}\n}"
+            }
           }
         },
         {
@@ -49,23 +152,50 @@
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/contacts/{{cid}}/scopes",
-            "body": {"mode": "raw", "raw": "{\"scope\": \"billing\"}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"scope\": \"billing\"}"
+            }
           }
         },
         {
           "name": "Get one attribute (purpose-checked)",
           "request": {
             "method": "GET",
-            "header": [{"key": "Authorization", "value": "Bearer {{credCrm}}"}],
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/v1/contacts/{{cid}}/attributes/email?purpose=support",
-              "host": ["{{baseUrl}}"],
-              "path": ["v1", "contacts", "{{cid}}", "attributes", "email"],
-              "query": [{"key": "purpose", "value": "support"}]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "contacts",
+                "{{cid}}",
+                "attributes",
+                "email"
+              ],
+              "query": [
+                {
+                  "key": "purpose",
+                  "value": "support"
+                }
+              ]
             }
           }
         }
@@ -79,11 +209,20 @@
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/lookup",
-            "body": {"mode": "raw", "raw": "{\"email\": \"{{demoEmail}}\"}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\": \"{{demoEmail}}\"}"
+            }
           }
         },
         {
@@ -91,26 +230,51 @@
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/lookup",
-            "body": {"mode": "raw", "raw": "{\"phone\": \"+38514666000\"}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"phone\": \"+38514666000\"}"
+            }
           }
         },
         {
           "name": "Name alone is rejected (400)",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('name alone -> 400 validation', () => pm.response.to.have.status(400));"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('name alone -> 400 validation', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/lookup",
-            "body": {"mode": "raw", "raw": "{\"name\": \"Ana Anic\"}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\": \"Ana Anic\"}"
+            }
           }
         }
       ]
@@ -123,26 +287,60 @@
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/consent",
-            "body": {"mode": "raw", "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"support\", \"granted\": false}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"support\", \"granted\": false}"
+            }
           }
         },
         {
           "name": "Attribute read now blocked (403 consent_denied)",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('consent_denied', () => pm.response.to.have.status(403));"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('consent_denied', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
-            "header": [{"key": "Authorization", "value": "Bearer {{credCrm}}"}],
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/v1/contacts/{{cid}}/attributes/email?purpose=support",
-              "host": ["{{baseUrl}}"],
-              "path": ["v1", "contacts", "{{cid}}", "attributes", "email"],
-              "query": [{"key": "purpose", "value": "support"}]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "contacts",
+                "{{cid}}",
+                "attributes",
+                "email"
+              ],
+              "query": [
+                {
+                  "key": "purpose",
+                  "value": "support"
+                }
+              ]
             }
           }
         },
@@ -151,19 +349,542 @@
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/consent",
-            "body": {"mode": "raw", "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"support\", \"granted\": true}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"support\", \"granted\": true}"
+            }
           }
         },
         {
           "name": "List consent decisions",
           "request": {
             "method": "GET",
-            "header": [{"key": "Authorization", "value": "Bearer {{credCrm}}"}],
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
             "url": "{{baseUrl}}/v1/consent/{{cid}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Data subject rights (Articles 15, 17, 20)",
+      "item": [
+        {
+          "name": "Article 15 - everything, org-wide",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credDpo}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/dsr/access?cid={{cid}}",
+            "description": "Crosses scope boundaries on the data subject's behalf, so it needs its own grant and is itself audited. Each scope carries the holdings that do NOT live in the attribute blob: value_tokens, files, the RECIPIENTS of shares, and links."
+          }
+        },
+        {
+          "name": "Article 20 - portable, caller scope only",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/dsr/export?cid={{cid}}",
+            "description": "The same holdings sections, but only for the calling scope."
+          }
+        },
+        {
+          "name": "Article 17 - erase, children LISTED not touched",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credDpo}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/dsr/erase",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cid\": \"{{cid}}\"}"
+            },
+            "description": "With no `cascade`, linked children come back in `linked[]` with cascaded=false and are left intact. Sending an empty list means the same thing - the key is simply absent."
+          }
+        },
+        {
+          "name": "Article 17 - erase and CASCADE one link type",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credDpo}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/dsr/erase",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cid\": \"{{parentCid}}\", \"cascade\": [\"guardian\"]}"
+            },
+            "description": "One transaction PER PERSON, children first, and the plan is recorded before any child is touched - so re-issuing the identical request RESUMES an interrupted cascade. Once everything is done the same call answers 404, deliberately indistinguishable from a cid that never existed."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Value vault (F4)",
+      "item": [
+        {
+          "name": "Tokenize, bound to a person",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/tokens",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"value\": \"HR1210010051863000160\", \"type\": \"string\", \"cid\": \"{{cid}}\", \"unique\": true}"
+            },
+            "description": "The cid binding is what makes erasure and the retention sweep destroy the token. Omit it ONLY for a scope-wide value belonging to no single subject - an unattributed token survives that person's erasure."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json();",
+                  "pm.test('token returned', () => pm.expect(b.token).to.be.a('string'));",
+                  "pm.collectionVariables.set('valueToken', b.token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Detokenize",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/tokens/{{valueToken}}",
+            "description": "Audited per read and attributed to the bound person's CID, so 'who read my tokenized IBAN' is answerable from the Article 15 trail."
+          }
+        },
+        {
+          "name": "Delete the token",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/tokens/{{valueToken}}"
+          }
+        },
+        {
+          "name": "Unlock for the bulk routes",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credAdmin}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/admin/unlock",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"purpose\": \"tokens\"}"
+            },
+            "description": "Bulk surfaces ALWAYS require a single-use unlock token, whatever SUNDER_SEARCH_UNLOCK is set to: one call that touches many people is exactly the shape a rate limit does not constrain. The server refuses admin.unlock to a credential with no expiry."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('unlockToken', b.unlock_token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bulk tokenize (spends the unlock)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Sunder-Unlock",
+                "value": "{{unlockToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/tokens/bulk",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"items\": [{\"value\": \"one\"}, {\"value\": \"two\"}]}"
+            },
+            "description": "The whole batch is validated BEFORE the token is spent, so a rejected item does not burn the unlock."
+          }
+        },
+        {
+          "name": "Bulk detokenize (needs a fresh unlock)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Sunder-Unlock",
+                "value": "{{unlockToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/tokens/bulk/read",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"tokens\": [\"{{valueToken}}\"]}"
+            },
+            "description": "An unlock token is single-use: run 'Unlock for the bulk routes' again before this one."
+          }
+        }
+      ]
+    },
+    {
+      "name": "File vault (F5)",
+      "item": [
+        {
+          "name": "Upload a file",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "X-Sunder-File-Expiry",
+                "value": "2030-01-02T03:04:05Z"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/contacts/{{cid}}/files",
+            "description": "multipart/form-data with a single `file` part - set the body to form-data in Postman. Each file gets its own DEK, wrapped by the person's record key, so erasing the person shreds the file even if the object store still holds the ciphertext. The expiry header is optional."
+          }
+        },
+        {
+          "name": "List a person's files",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/contacts/{{cid}}/files?purpose=support",
+            "description": "Metadata only, purpose- and consent-gated; expired files are hidden."
+          }
+        },
+        {
+          "name": "Download (bytes, not JSON)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/files/{{fileId}}?purpose=support",
+            "description": "A download that fails mid-stream ABORTS the connection rather than completing a 200 with a short body - verify the length or the sha256 from the list before trusting the bytes."
+          }
+        },
+        {
+          "name": "Delete a file",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/files/{{fileId}}",
+            "description": "Name and digest are redacted immediately; the ciphertext is collected by the retention sweep."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Cross-org shares (F6)",
+      "item": [
+        {
+          "name": "Create a share (a SNAPSHOT)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/shares",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cid\": \"{{cid}}\", \"fields\": [\"email\"], \"partner_label\": \"partner-bank\", \"purpose\": \"kyc\", \"ttl_seconds\": 3600}"
+            },
+            "description": "partner_label is what the Article 15 answer reports as the recipient - label the actual partner, not the integration. Values are captured now, so a later attribute change does not propagate."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('shareUuid', b.uuid);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Fetch the share",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/shares/{{shareUuid}}",
+            "description": "Whether this needs a credential is the server's SUNDER_SHARES_PUBLIC decision. When it is public the UUID IS the bearer credential - hand it over a channel that protects it."
+          }
+        },
+        {
+          "name": "Revoke it",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/shares/{{shareUuid}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Person links (F7)",
+      "item": [
+        {
+          "name": "Link a guardian to a child",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/links",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"parent_cid\": \"{{parentCid}}\", \"child_cid\": \"{{childCid}}\", \"link_type\": \"guardian\"}"
+            }
+          }
+        },
+        {
+          "name": "List this person's links",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/contacts/{{parentCid}}/links",
+            "description": "Each entry carries the role ('parent' or 'child') this cid plays in the link."
+          }
+        },
+        {
+          "name": "Unlink",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/links",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"parent_cid\": \"{{parentCid}}\", \"child_cid\": \"{{childCid}}\"}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Attribute history (F8)",
+      "item": [
+        {
+          "name": "List retained revisions",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/contacts/{{cid}}/versions",
+            "description": "How many are kept is SUNDER_VERSIONS_KEEP / SUNDER_VERSIONS_TTL. History is personal data: the retention sweep prunes it and erasure destroys it."
+          }
+        },
+        {
+          "name": "Read an attribute as it WAS",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/contacts/{{cid}}/versions/1/attributes/email?purpose=support",
+            "description": "Purpose-gated, consent-gated and audited exactly like a current read: an old value is not a lesser secret."
+          }
+        }
+      ]
+    },
+    {
+      "name": "External claims & admin",
+      "item": [
+        {
+          "name": "Store a signed issuer envelope",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/claims/external",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cid\": \"{{cid}}\", \"envelope\": \"{{issuerEnvelope}}\"}"
+            },
+            "description": "Stored attribute names carry the issuer's provenance after an '@' separator - which is why '@' is refused in a caller-supplied attribute name: an attribute an external issuer vouched for must never be impersonable by an ordinary write."
+          }
+        },
+        {
+          "name": "Verify the audit chain",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credAdmin}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/admin/audit/verify",
+            "description": "A break returns a VERDICT, not an error - a verifier that 500s on a broken chain is indistinguishable from a verifier that is down."
+          }
+        },
+        {
+          "name": "Read the tail of the chain",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credAdmin}}"
+              }
+            ],
+            "url": "{{baseUrl}}/v1/admin/audit/chain?limit=20"
           }
         }
       ]
@@ -174,68 +895,132 @@
       "item": [
         {
           "name": "1. Register the customer (CRM)",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('201', () => pm.response.to.have.status(201));",
-            "pm.collectionVariables.set('cid', pm.response.json().cid);"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('cid', pm.response.json().cid);"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/contacts",
-            "body": {"mode": "raw", "raw": "{\"email\": \"{{demoEmail}}\", \"phone\": \"+385 91 123 4567\", \"name\": \"Ana Anic\"}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\": \"{{demoEmail}}\", \"phone\": \"+385 91 123 4567\", \"name\": \"Ana Anic\"}"
+            }
           }
         },
         {
           "name": "2. Issue OTI for the ERP (5 min, single use)",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('201', () => pm.response.to.have.status(201));",
-            "pm.collectionVariables.set('otiToken', pm.response.json().token);"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('otiToken', pm.response.json().token);"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/oti",
-            "body": {"mode": "raw", "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"create_order\", \"audience\": \"erp\"}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"create_order\", \"audience\": \"erp\"}"
+            }
           }
         },
         {
           "name": "3. ERP verifies -> gets ITS OWN pseudonym",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('200', () => pm.response.to.have.status(200));",
-            "const erpCid = pm.response.json().cid;",
-            "pm.collectionVariables.set('erpCid', erpCid);",
-            "pm.test('unlinkable: ERP CID differs from CRM CID', () =>",
-            "  pm.expect(erpCid).to.not.eql(pm.collectionVariables.get('cid')));"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const erpCid = pm.response.json().cid;",
+                  "pm.collectionVariables.set('erpCid', erpCid);",
+                  "pm.test('unlinkable: ERP CID differs from CRM CID', () =>",
+                  "  pm.expect(erpCid).to.not.eql(pm.collectionVariables.get('cid')));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credErp}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credErp}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/oti/verify",
-            "body": {"mode": "raw", "raw": "{\"token\": \"{{otiToken}}\", \"purpose\": \"create_order\", \"audience\": \"erp\"}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"token\": \"{{otiToken}}\", \"purpose\": \"create_order\", \"audience\": \"erp\"}"
+            }
           }
         },
         {
           "name": "4. Replay the same token -> 409 token_used",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('replay bounces with 409', () => pm.response.to.have.status(409));"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('replay bounces with 409', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credErp}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credErp}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/oti/verify",
-            "body": {"mode": "raw", "raw": "{\"token\": \"{{otiToken}}\", \"purpose\": \"create_order\", \"audience\": \"erp\"}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"token\": \"{{otiToken}}\", \"purpose\": \"create_order\", \"audience\": \"erp\"}"
+            }
           }
         }
       ]
@@ -246,81 +1031,179 @@
       "item": [
         {
           "name": "1. Ticket opened - register customer (CRM)",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('201', () => pm.response.to.have.status(201));",
-            "pm.collectionVariables.set('cid', pm.response.json().cid);"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('cid', pm.response.json().cid);"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/contacts",
-            "body": {"mode": "raw", "raw": "{\"email\": \"{{demoEmail}}\", \"name\": \"Ana Anic\", \"attributes\": {\"ticket\": \"T-1001\"}}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\": \"{{demoEmail}}\", \"name\": \"Ana Anic\", \"attributes\": {\"ticket\": \"T-1001\"}}"
+            }
           }
         },
         {
           "name": "2. Handoff sharing ONLY the e-mail",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('201', () => pm.response.to.have.status(201));",
-            "pm.collectionVariables.set('otiToken', pm.response.json().token);"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('otiToken', pm.response.json().token);"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credCrm}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credCrm}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/oti",
-            "body": {"mode": "raw", "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"escalation_notify\", \"audience\": \"notifier\", \"share_attributes\": [\"email\"]}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cid\": \"{{cid}}\", \"purpose\": \"escalation_notify\", \"audience\": \"notifier\", \"share_attributes\": [\"email\"]}"
+            }
           }
         },
         {
           "name": "3. Notifier verifies NOW (token lives 5 min)",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('200', () => pm.response.to.have.status(200));",
-            "pm.collectionVariables.set('notifierCid', pm.response.json().cid);"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('notifierCid', pm.response.json().cid);"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credNotifier}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credNotifier}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/oti/verify",
-            "body": {"mode": "raw", "raw": "{\"token\": \"{{otiToken}}\", \"purpose\": \"escalation_notify\", \"audience\": \"notifier\"}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"token\": \"{{otiToken}}\", \"purpose\": \"escalation_notify\", \"audience\": \"notifier\"}"
+            }
           }
         },
         {
           "name": "4. Hours later: just-in-time e-mail fetch",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('shared e-mail is readable', () => pm.response.to.have.status(200));"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('shared e-mail is readable', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
-            "header": [{"key": "Authorization", "value": "Bearer {{credNotifier}}"}],
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credNotifier}}"
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/v1/contacts/{{notifierCid}}/attributes/email?purpose=escalation_notify",
-              "host": ["{{baseUrl}}"],
-              "path": ["v1", "contacts", "{{notifierCid}}", "attributes", "email"],
-              "query": [{"key": "purpose", "value": "escalation_notify"}]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "contacts",
+                "{{notifierCid}}",
+                "attributes",
+                "email"
+              ],
+              "query": [
+                {
+                  "key": "purpose",
+                  "value": "escalation_notify"
+                }
+              ]
             }
           }
         },
         {
           "name": "5. Unshared attribute is absent (404)",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('name was not shared', () => pm.response.to.have.status(404));"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('name was not shared', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
-            "header": [{"key": "Authorization", "value": "Bearer {{credNotifier}}"}],
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credNotifier}}"
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/v1/contacts/{{notifierCid}}/attributes/name?purpose=escalation_notify",
-              "host": ["{{baseUrl}}"],
-              "path": ["v1", "contacts", "{{notifierCid}}", "attributes", "name"],
-              "query": [{"key": "purpose", "value": "escalation_notify"}]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "contacts",
+                "{{notifierCid}}",
+                "attributes",
+                "name"
+              ],
+              "query": [
+                {
+                  "key": "purpose",
+                  "value": "escalation_notify"
+                }
+              ]
             }
           }
         },
@@ -329,26 +1212,60 @@
           "request": {
             "method": "POST",
             "header": [
-              {"key": "Authorization", "value": "Bearer {{credNotifier}}"},
-              {"key": "Content-Type", "value": "application/json"}
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credNotifier}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{baseUrl}}/v1/consent",
-            "body": {"mode": "raw", "raw": "{\"cid\": \"{{notifierCid}}\", \"purpose\": \"escalation_notify\", \"granted\": false}"}
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cid\": \"{{notifierCid}}\", \"purpose\": \"escalation_notify\", \"granted\": false}"
+            }
           }
         },
         {
           "name": "7. Next escalation blocked (403 consent_denied)",
-          "event": [{"listen": "test", "script": {"exec": [
-            "pm.test('consent_denied', () => pm.response.to.have.status(403));"
-          ]}}],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('consent_denied', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
-            "header": [{"key": "Authorization", "value": "Bearer {{credNotifier}}"}],
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{credNotifier}}"
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/v1/contacts/{{notifierCid}}/attributes/email?purpose=escalation_notify",
-              "host": ["{{baseUrl}}"],
-              "path": ["v1", "contacts", "{{notifierCid}}", "attributes", "email"],
-              "query": [{"key": "purpose", "value": "escalation_notify"}]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "contacts",
+                "{{notifierCid}}",
+                "attributes",
+                "email"
+              ],
+              "query": [
+                {
+                  "key": "purpose",
+                  "value": "escalation_notify"
+                }
+              ]
             }
           }
         }

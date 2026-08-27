@@ -103,6 +103,22 @@ capabilities: {drop: [ALL]}
 - name: SUNDER_DELIVER_INTERVAL
   value: {{ .Values.tunables.deliverInterval | quote }}
 {{- end }}
+{{- if .Values.tunables.workerClaimTtl }}
+- name: SUNDER_WORKER_CLAIM_TTL
+  value: {{ .Values.tunables.workerClaimTtl | quote }}
+{{- end }}
+{{- if .Values.tunables.keyRetireGrace }}
+- name: SUNDER_KEY_RETIRE_GRACE
+  value: {{ .Values.tunables.keyRetireGrace | quote }}
+{{- end }}
+{{- with .Values.tunables.apiClientIpHeader }}
+- name: SUNDER_API_CLIENT_IP_HEADER
+  value: {{ . | quote }}
+{{- end }}
+{{- if .Values.keystore.allowMint }}
+- name: SUNDER_KEYSTORE_ALLOW_MINT
+  value: "true"
+{{- end }}
 {{- include "sunder.auditEnv" . }}
 {{- if .Values.audit.sealer.enabled }}
 - name: SUNDER_AUDIT_SEAL_EXTERNAL
@@ -170,6 +186,10 @@ is an API-pod statement about who seals, appended separately. */}}
 {{- end }}
 {{- with .Values.audit.sealBatch }}
 - name: SUNDER_AUDIT_SEAL_BATCH
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.audit.staleUnsealed }}
+- name: SUNDER_AUDIT_STALE_UNSEALED
   value: {{ . | quote }}
 {{- end }}
 {{- end }}

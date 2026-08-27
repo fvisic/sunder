@@ -382,3 +382,47 @@ func TestVaultKeystoreUnreachable(t *testing.T) {
 		t.Fatal("an unreachable Vault must fail Key")
 	}
 }
+
+// TestEnsureDoesNotOverwriteAKeyMintedWhileWaitingForTheLock pins the exact
+// window the concurrent test can only hit by scheduling luck.
+//
+// The sequence: racer B reads no key, blocks on the O_EXCL lock; racer A wins
+// it, mints, renames the key into place and releases; B then wins the same
+// lock. B's decision to mint was made BEFORE A's key existed - so without a
+// re-check under the lock it overwrites live key material, and everything
+// already encrypted under A's key becomes permanently unreadable. Ensure
+// returns nil either way, which is what made this invisible: the only visible
+// symptom is two readers disagreeing about the key bytes.
+//
+// afterLockWon plays A's part deterministically, from inside B's own call.
+func TestEnsureDoesNotOverwriteAKeyMintedWhileWaitingForTheLock(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	ks := &FileKeystore{Dir: dir}
+
+	// The key another process minted while this caller queued for the lock.
+	winner := bytes.Repeat([]byte{0xA5}, 32)
+	var placed bool
+	afterLockWon = func(keyPath string) {
+		if placed {
+			return
+		}
+		placed = true
+		if err := os.WriteFile(keyPath, winner, 0o600); err != nil {
+			t.Fatalf("stage the winner's key: %v", err)
+		}
+	}
+	t.Cleanup(func() { afterLockWon = nil })
+
+	if err := ks.Ensure(ctx, "race/v1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ks.Key(ctx, "race/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, winner) {
+		t.Fatal("Ensure minted over key material that already existed - every " +
+			"blob encrypted under the previous key is now unreadable")
+	}
+}

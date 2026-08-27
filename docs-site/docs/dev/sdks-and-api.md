@@ -61,7 +61,9 @@ retried on any call.
    argument) and every call carries `X-Sunder-User-Id`.
 
    Everything not wrapped is plain JSON over HTTP; `api/openapi.yaml` is the
-   contract for it, and the Postman collection below exercises it.
+   contract for it, and the Postman collection below exercises it - including
+   the routes the SDKs do wrap, so a shape can be checked by hand before it is
+   wired into code.
 
    ```bash
    go get github.com/fvisic/sunder/sdks/go@latest        # Go 1.25+
@@ -142,10 +144,16 @@ retried on any call.
 
    - OpenAPI 3.1: `api/openapi.yaml` in the repository (also served at `/openapi.yaml` by every instance) - the
      source of truth for every request/response schema and error response.
-   - Postman: `api/sunder.postman_collection.json` in the repository -
-     set `baseUrl`, `credCrm`, `credErp`, `credNotifier` as collection
-     variables; the "Demo" folders are ordered flows runnable top-to-bottom
-     with test scripts that pass `cid`/`token` between steps automatically.
+   - Postman: `api/sunder.postman_collection.json` in the repository - 50
+     requests across 13 folders, covering every `/v1` route an integration
+     calls: the data-subject rights endpoints (including a cascading erasure),
+     the value vault with its unlock-gated bulk routes, the file vault,
+     cross-org shares, person links, attribute history, external claims and
+     the admin audit reads. Set `baseUrl`, `credCrm`, `credErp`,
+     `credNotifier` and - for the DSR and admin folders - `credDpo` and
+     `credAdmin` as collection variables; the "Demo" folders are ordered flows
+     runnable top-to-bottom with test scripts that pass `cid`/`token` between
+     steps automatically.
 
 ## Error taxonomy
 
