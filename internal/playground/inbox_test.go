@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/fvisic/sunder/internal/crypto"
 )
 
 func sign(secret, body string) string {
@@ -56,7 +58,9 @@ func TestWebhookInbox(t *testing.T) {
 	_, out := call("GET", "/api/scenarios", nil)
 	vars, _ := out["vars"].(map[string]any)
 	_ = vars
-	const mine = "CID-9F2A7VXTNP"
+	// RFC 4648 base32, the alphabet crypto.NewCID emits: A-Z and 2-7. The
+	// old fixture used a 9, which no real pseudonym can contain.
+	const mine = "CID-GF2A7VXTNP"
 	for _, sess := range pg.SessionsForTest().AllForTest() {
 		sess.Do(func(v map[string]string) { v["crm_cid"] = mine })
 	}
@@ -159,5 +163,53 @@ func TestInboxIsScopedToPseudonymsNotSessionConstants(t *testing.T) {
 	i.add(Delivery{CID: "Ana Horvat"})
 	if got := len(i.list(map[string]string{"demo_name": "Ana Horvat"})); got != 0 {
 		t.Fatal("a non-pseudonym value must never scope the inbox")
+	}
+}
+
+// TestLooksLikeCIDMatchesTheVaultsAlphabet pins the inbox filter to the shape
+// crypto.NewCID actually emits: "CID-" plus RFC 4648 base32 (A-Z, 2-7).
+//
+// This regressed for real. The filter checked a CROCKFORD alphabet - digits
+// 0-9 present, letter U absent - so any pseudonym containing a U was refused
+// as "not a pseudonym" and its signed erasure callback never reached the
+// inbox. At 26 characters that is roughly 56% of all pseudonyms, which made
+// the playground's erasure walkthrough fail on about every second run and
+// pass on the others.
+func TestLooksLikeCIDMatchesTheVaultsAlphabet(t *testing.T) {
+	for _, tc := range []struct {
+		cid  string
+		want bool
+		why  string
+	}{
+		{"CID-ZCM2CFJFK7AHGIGKIP5GDS27UM", true, "a real pseudonym containing U - the exact shape that used to be refused"},
+		{"CID-AAAAAAAAAAAAAAAAAAAAAAAAAA", true, "all-letter pseudonym"},
+		{"CID-234567234567234567234567AB", true, "the digit range base32 actually uses"},
+		{"CID-ABCDEF0GHIJKLMNOPQRSTUVWXY", false, "0 is not in RFC 4648 base32"},
+		{"CID-ABCDEF1GHIJKLMNOPQRSTUVWXY", false, "1 is not in RFC 4648 base32"},
+		{"CID-ABCDEF8GHIJKLMNOPQRSTUVWXY", false, "8 is not in RFC 4648 base32"},
+		{"CID-abcdefghijklmnopqrstuvwxyz", false, "lowercase is not the emitted shape"},
+		{"CID-", false, "too short to be a pseudonym"},
+		{"NOTACID-ABCDEF", false, "wrong prefix"},
+		{"CID-ABC DEF", false, "a space is not base32"},
+	} {
+		if got := looksLikeCID(tc.cid); got != tc.want {
+			t.Errorf("looksLikeCID(%q) = %v, want %v - %s", tc.cid, got, tc.want, tc.why)
+		}
+	}
+}
+
+// TestEveryGeneratedCIDPassesTheInboxFilter closes the loop between the two
+// packages: whatever the vault mints, the inbox must accept. A per-character
+// alphabet mismatch shows up here as a flake, so the sample is large enough
+// that a 1-in-32 miss is a certainty rather than a coin flip.
+func TestEveryGeneratedCIDPassesTheInboxFilter(t *testing.T) {
+	for i := 0; i < 500; i++ {
+		cid, err := crypto.NewCID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !looksLikeCID(cid) {
+			t.Fatalf("the vault minted %q and the inbox refuses it as not a pseudonym", cid)
+		}
 	}
 }

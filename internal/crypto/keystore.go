@@ -145,8 +145,24 @@ func (f *FileKeystore) Ensure(ctx context.Context, name string) error {
 		_ = lock.Close()
 		_ = os.Remove(lockPath)
 	}()
-	return f.writeKey(p)
+	if afterLockWon != nil {
+		// A seam, not a feature: it lets a test occupy the exact window
+		// between winning the lock and deciding whether to mint. The race it
+		// pins is otherwise only reachable by scheduling luck.
+		afterLockWon(p)
+	}
+	// Re-check UNDER the lock. Winning the O_EXCL election does not mean the
+	// key is absent: a racer that read no key at the top, then waited for the
+	// lock, arrives here AFTER the first generator renamed its key into place
+	// and released the lock - and minting again would overwrite live key
+	// material, silently making everything encrypted under it unreadable.
+	// ensureLocked is exactly that check-then-write.
+	return f.ensureLocked(ctx, name)
 }
+
+// afterLockWon is a test seam, nil in production: it runs immediately after a
+// caller wins the O_EXCL generator election, before the decision to mint.
+var afterLockWon func(keyPath string)
 
 // ensureLocked re-runs generation after reclaiming a stale lock (mutex held).
 func (f *FileKeystore) ensureLocked(_ context.Context, name string) error {

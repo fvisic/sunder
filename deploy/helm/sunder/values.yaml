@@ -15,6 +15,14 @@ keystore:
   # vault is the right choice on Kubernetes: the file driver would need a
   # ReadWriteMany volume shared across replicas.
   type: vault
+  # Let `serve` CREATE key material for a version live data was already
+  # written under. Off, and it should stay off: minting there recovers
+  # nothing - it manufactures a vault that cannot read its own contents and
+  # then reports healthy (/healthz 200, every lookup a 404). On Kubernetes
+  # the usual cause is a Vault path or token pointing at the wrong place, and
+  # failing closed is what makes that visible. `sunder bootstrap` always
+  # mints; it is the explicit "create this vault" act.
+  allowMint: false
   vault:
     addr: https://vault.internal:8200
     mount: secret
@@ -86,6 +94,24 @@ tunables:
   webhookTimeout: ""     # SUNDER_WEBHOOK_TIMEOUT, e.g. "30s" (default 5s)
   webhookMaxAttempts: "" # SUNDER_WEBHOOK_MAX_ATTEMPTS (default 10)
   deliverInterval: ""    # SUNDER_DELIVER_INTERVAL, e.g. "30s" (default 1m)
+  # How long a claimed erasure-notification or portal-mail row may go
+  # unsettled before a reaper returns it to PENDING. Both outboxes commit the
+  # claim BEFORE the side effect, so this is the only thing that recovers a
+  # claim abandoned by a killed worker - and on Kubernetes pods are killed
+  # routinely. Set it above the worst-case sweep (webhookTimeout x batch).
+  workerClaimTtl: ""     # SUNDER_WORKER_CLAIM_TTL, e.g. "5m" (default 10m)
+  # How long a key version sits RETIRING before `keys retire` purges it. Must
+  # exceed the worst-case KeyRing cache staleness ACROSS THE FLEET: the purge
+  # is one-shot, so a replica still writing under the old version afterwards
+  # leaves search-token rows nothing will ever match or delete. Raise it for a
+  # large replica count; never set it to 0 on more than one replica.
+  keyRetireGrace: ""     # SUNDER_KEY_RETIRE_GRACE, e.g. "5m" (default 60s)
+  # Header trusted for the per-IP limit on the credential-less share fetch,
+  # e.g. "X-Forwarded-For". Behind an ingress, RemoteAddr is the proxy for
+  # every requester, so the limit collapses to one shared bucket - but
+  # trusting the header where nothing appends it hands every requester a
+  # FRESH bucket. Set it only when a proxy you control writes it.
+  apiClientIpHeader: ""  # SUNDER_API_CLIENT_IP_HEADER
 
 anchor:
   enabled: true
@@ -118,6 +144,11 @@ audit:
   sealInterval: ""   # SUNDER_AUDIT_SEAL_INTERVAL, e.g. "200ms"
   sealDelay: ""      # SUNDER_AUDIT_SEAL_DELAY, e.g. "2s"
   sealBatch: ""      # SUNDER_AUDIT_SEAL_BATCH, e.g. "5000"
+  # How old the OLDEST unchained row may get before `verify-audit` calls it a
+  # failure. Under async sealing a backlog is normal; a STALE one is the
+  # stalled-sealer incident, and the daily verify CronJob below is what
+  # notices. Applies to the API pods and that CronJob alike.
+  staleUnsealed: ""  # SUNDER_AUDIT_STALE_UNSEALED, e.g. "5m" (default 15m)
   # The recommended hardening: sealing runs in a dedicated single-replica
   # deployment (SUNDER_AUDIT_SEAL_EXTERNAL on the API pods), so the API
   # role needs no UPDATE on the audit table.
