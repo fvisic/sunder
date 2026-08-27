@@ -196,6 +196,19 @@ fixes generalise an existing guard rather than invent one.
 `SUNDER_API_CLIENT_IP_HEADER`, `SUNDER_SEALER_HEALTH_ADDR`. Booleans now
 accept `true/false`, `1/0`, `yes/no`, `on/off` and REFUSE anything else.
 
+### Cold-boot migration race (found by the playground CI leg)
+`Migrate` created its `schema_migrations` bookkeeping table OUTSIDE the
+advisory lock meant to serialize concurrent replicas. `CREATE TABLE IF NOT
+EXISTS` is not atomic - the existence check and the creation are separate
+steps - so two replicas booting against a database with no schema at all
+both passed the check and the loser died with `duplicate key value violates
+unique constraint "pg_type_typname_nsp_index"` (a table creates its row type
+too). On the playground stack, whose `deliver` worker and API server start
+together on a fresh volume, that is a crash loop on the very first boot. The
+table is now created inside the lock, and
+`TestConcurrentMigrateOnAnEmptyDatabase` races two pools against one empty
+database - it fails on the old code and passes on the new.
+
 ### SDKs - all six now cover the whole client surface
 Every SDK moves to **0.5.0** and grows the routes that were previously
 "plain JSON over HTTP": consent (`SetConsent`/`GetConsent`), the data-subject
