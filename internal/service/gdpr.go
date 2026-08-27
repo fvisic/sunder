@@ -14,7 +14,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -38,7 +40,30 @@ type GDPR struct {
 	// MaxAttempts is the failed-delivery cap before FAILED; zero means
 	// DefaultWebhookMaxAttempts.
 	MaxAttempts int
+	// ClaimTTL is how long a claimed (SENDING) event may go unsettled
+	// before the reaper returns it to the queue; zero means
+	// DefaultWorkerClaimTTL. Wired from SUNDER_WORKER_CLAIM_TTL.
+	ClaimTTL time.Duration
+	// Log receives the settle failures that used to be swallowed. Nil means
+	// slog.Default().
+	Log *slog.Logger
+
+	// wg holds the detached deliveries dispatched by erasePerson so a
+	// graceful shutdown can wait for them (Drain).
+	wg sync.WaitGroup
 }
+
+func (g *GDPR) logger() *slog.Logger {
+	if g.Log != nil {
+		return g.Log
+	}
+	return slog.Default()
+}
+
+// Drain waits for deliveries dispatched off the request goroutine. Called
+// from the server's shutdown path so a stop does not abandon an in-flight
+// webhook and leave its claim to the reaper.
+func (g *GDPR) Drain() { g.wg.Wait() }
 
 func (g *GDPR) client() *http.Client {
 	if g.HTTP != nil {
@@ -92,6 +117,15 @@ func (g *GDPR) SetConsent(ctx context.Context, client *auth.Client, cid, purpose
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Liveness is re-checked INSIDE the transaction, under the same row
+	// locks erasePerson takes. The resolution above ran on the pool, and
+	// under READ COMMITTED that answer is stale by the time this row lands:
+	// an erasure committing in between deleted rows that did not exist yet,
+	// so the write survived the sweep the erasure code promises empties this
+	// table (GDPR-ERASURE-5).
+	if _, err := lockPersonRows(ctx, tx, cid); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO consents (cid, purpose, granted) VALUES ($1,$2,$3)
 		 ON CONFLICT (cid, purpose) DO UPDATE SET granted=EXCLUDED.granted, updated_at=now()`,
@@ -139,7 +173,7 @@ func consentsFor(ctx context.Context, pool *pgxpool.Pool, cid string) ([]Consent
 	out := []Consent{}
 	for rows.Next() {
 		var c Consent
-		if err := rows.Scan(&c.Purpose, &c.Granted, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.Purpose, &c.Granted, &c.UpdatedAt); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return nil, err
 		}
 		out = append(out, c)
@@ -171,6 +205,158 @@ type ScopeData struct {
 	CID        string            `json:"cid"`
 	Attributes map[string]string `json:"attributes"`
 	Consents   []Consent         `json:"consents"`
+	// The holdings a subject cannot see in Attributes, because they do not
+	// live in the blob. Article 15(1) is "what do you hold about me", and
+	// 15(1)(c) is "who did you disclose it to" - a value token holding the
+	// person's IBAN, a file, a standing share with a named partner and a
+	// link to another person are all answers to those questions, and none
+	// of them appeared in any subject-facing response (TOKENS-LOOKUP-7,
+	// GAP-2). Metadata only: the values reach the subject through the
+	// controller's own channel, and a share's partner label is the
+	// recipient, not their data.
+	ValueTokens []ValueTokenRef `json:"value_tokens"`
+	Files       []FileRef       `json:"files"`
+	Shares      []ShareRef      `json:"shares"`
+	Links       []LinkRef       `json:"links"`
+}
+
+// ValueTokenRef is one tokenized value held for this person. Never the
+// value itself.
+type ValueTokenRef struct {
+	Token     string     `json:"token"`
+	Type      string     `json:"type"`
+	Scope     string     `json:"scope"`
+	CreatedBy string     `json:"created_by"`
+	CreatedAt time.Time  `json:"created_at"`
+	LastUsed  *time.Time `json:"last_used,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// FileRef is one stored file. Never its content.
+type FileRef struct {
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	ContentType string     `json:"content_type"`
+	SizeBytes   int64      `json:"size_bytes"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+}
+
+// ShareRef is one disclosure to a named recipient - the Article 15(1)(c)
+// answer.
+type ShareRef struct {
+	UUID      string    `json:"uuid"`
+	Partner   string    `json:"partner_label"`
+	Fields    []string  `json:"fields"`
+	Purpose   string    `json:"purpose"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Revoked   bool      `json:"revoked"`
+}
+
+// LinkRef is one relationship to another person in the same scope.
+type LinkRef struct {
+	CID      string `json:"cid"`
+	LinkType string `json:"link_type"`
+	Role     string `json:"role"`
+}
+
+// holdingsFor fills the non-blob holdings for one cid. Read-only and
+// metadata-only; every query is scoped to the cid the caller already
+// resolved.
+func (g *GDPR) holdingsFor(ctx context.Context, sd *ScopeData) error {
+	sd.ValueTokens, sd.Files, sd.Shares, sd.Links = []ValueTokenRef{}, []FileRef{}, []ShareRef{}, []LinkRef{}
+
+	vt, err := g.Pool.Query(ctx, `
+		SELECT token, token_type, scope, COALESCE(created_by,''), created_at, last_used, expires_final
+		  FROM value_tokens WHERE cid=$1 ORDER BY created_at`, sd.CID)
+	if err != nil {
+		return err
+	}
+	for vt.Next() {
+		var r ValueTokenRef
+		if err := vt.Scan(&r.Token, &r.Type, &r.Scope, &r.CreatedBy, &r.CreatedAt, &r.LastUsed, &r.ExpiresAt); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
+			vt.Close()
+			return err
+		}
+		sd.ValueTokens = append(sd.ValueTokens, r)
+	}
+	vt.Close()
+	if err := vt.Err(); err != nil {
+		return err
+	}
+
+	// Files not yet garbage-collected. A gc-marked row has had its name and
+	// checksum redacted already, so it is no longer a holding.
+	fr, err := g.Pool.Query(ctx, `
+		SELECT id::text, name, content_type, size_bytes, created_at, expires_at
+		  FROM files WHERE cid=$1 AND gc_at IS NULL ORDER BY created_at`, sd.CID)
+	if err != nil {
+		return err
+	}
+	for fr.Next() {
+		var r FileRef
+		if err := fr.Scan(&r.ID, &r.Name, &r.ContentType, &r.SizeBytes, &r.CreatedAt, &r.ExpiresAt); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
+			fr.Close()
+			return err
+		}
+		sd.Files = append(sd.Files, r)
+	}
+	fr.Close()
+	if err := fr.Err(); err != nil {
+		return err
+	}
+
+	// Disclosures, INCLUDING revoked and expired ones: Article 15(1)(c) is
+	// about recipients the data HAS been disclosed to, not only current
+	// ones.
+	sr, err := g.Pool.Query(ctx, `
+		SELECT uuid::text, partner_label, fields, purpose, created_by, created_at, expires_at,
+		       revoked_at IS NOT NULL
+		  FROM shared_records WHERE cid=$1 ORDER BY created_at`, sd.CID)
+	if err != nil {
+		return err
+	}
+	for sr.Next() {
+		var r ShareRef
+		if err := sr.Scan(&r.UUID, &r.Partner, &r.Fields, &r.Purpose, &r.CreatedBy,
+			&r.CreatedAt, &r.ExpiresAt, &r.Revoked); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
+			sr.Close()
+			return err
+		}
+		sd.Shares = append(sd.Shares, r)
+	}
+	sr.Close()
+	if err := sr.Err(); err != nil {
+		return err
+	}
+
+	lr, err := g.Pool.Query(ctx, `
+		SELECT other.cid, pl.link_type, 'child' AS role
+		  FROM person_links pl
+		  JOIN cids self ON self.person_id = pl.parent_person AND self.scope = pl.scope
+		  JOIN cids other ON other.person_id = pl.child_person AND other.scope = pl.scope
+		 WHERE self.cid = $1
+		UNION ALL
+		SELECT other.cid, pl.link_type, 'parent' AS role
+		  FROM person_links pl
+		  JOIN cids self ON self.person_id = pl.child_person AND self.scope = pl.scope
+		  JOIN cids other ON other.person_id = pl.parent_person AND other.scope = pl.scope
+		 WHERE self.cid = $1
+		 ORDER BY 1`, sd.CID)
+	if err != nil {
+		return err
+	}
+	defer lr.Close()
+	for lr.Next() {
+		var r LinkRef
+		if err := lr.Scan(&r.CID, &r.LinkType, &r.Role); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
+			return err
+		}
+		sd.Links = append(sd.Links, r)
+	}
+	return lr.Err()
 }
 
 // AuditTrailEntry is one access-log line included in a right-of-access
@@ -240,7 +426,7 @@ func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, 
 		var sd ScopeData
 		var blob []byte
 		var keyID, alg string
-		if err := rows.Scan(&sd.CID, &sd.Scope, &blob, &keyID, &alg); err != nil {
+		if err := rows.Scan(&sd.CID, &sd.Scope, &blob, &keyID, &alg); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return nil, nil, err
 		}
 		sd.Attributes = map[string]string{}
@@ -250,6 +436,9 @@ func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, 
 			}
 		}
 		if sd.Consents, err = consentsFor(ctx, g.Pool, sd.CID); err != nil {
+			return nil, nil, err
+		}
+		if err := g.holdingsFor(ctx, &sd); err != nil {
 			return nil, nil, err
 		}
 		scopes = append(scopes, sd)
@@ -269,7 +458,7 @@ func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, 
 	trail := []AuditTrailEntry{}
 	for trailRows.Next() {
 		var e AuditTrailEntry
-		if err := trailRows.Scan(&e.Seq, &e.TS, &e.ClientID, &e.Action, &e.CID, &e.UserID); err != nil {
+		if err := trailRows.Scan(&e.Seq, &e.TS, &e.ClientID, &e.Action, &e.CID, &e.UserID); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return nil, nil, err
 		}
 		trail = append(trail, e)
@@ -293,7 +482,7 @@ func (g *GDPR) accessPerson(ctx context.Context, personID string) ([]ScopeData, 
 	for bRows.Next() {
 		var e AuditTrailEntry
 		var last time.Time
-		if err := bRows.Scan(&e.ClientID, &e.UserID, &e.CID, &e.Action, &e.Count, &e.TS, &last); err != nil {
+		if err := bRows.Scan(&e.ClientID, &e.UserID, &e.CID, &e.Action, &e.Count, &e.TS, &last); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			return nil, nil, err
 		}
 		e.LastTS = &last
@@ -348,6 +537,12 @@ func (g *GDPR) Export(ctx context.Context, client *auth.Client, cid string) (*Sc
 	if sd.Consents, err = consentsFor(ctx, g.Pool, cid); err != nil {
 		return nil, err
 	}
+	// Portability (Art. 20) must carry the same holdings the access answer
+	// does, or the export silently omits the most sensitive category the
+	// product stores (TOKENS-LOOKUP-7).
+	if err := g.holdingsFor(ctx, sd); err != nil {
+		return nil, err
+	}
 	if err := audit.Append(ctx, g.Pool, audit.Entry{
 		ClientID: client.ID, Action: "dsr.export", CID: cid, Detail: map[string]any{},
 	}); err != nil {
@@ -386,9 +581,18 @@ func (g *GDPR) EraseWithCascade(ctx context.Context, client *auth.Client, cid st
 	if !client.Can(auth.ActDSRErase) {
 		return 0, 0, nil, ErrForbidden
 	}
-	personID, err := g.Contacts.personForClientCID(ctx, client, cid)
+	// personForClientCID refuses a tombstone, which used to make a RETRY of
+	// an interrupted cascade a flat 404 - the one thing an operator would
+	// naturally do to recover. Resolve the person tolerating the tombstone,
+	// so a re-issued request can resume the outstanding children
+	// (GDPR-ERASURE-4).
+	personID, erased, err := g.Contacts.personForClientCIDAllowingTombstone(ctx, client, cid)
 	if err != nil {
 		return 0, 0, nil, err
+	}
+	if erased {
+		// The parent is already done; resume whatever its cascade left.
+		return g.resumeCascade(ctx, client, personID)
 	}
 	// List the children (all link types) BEFORE erasing, resolving each to
 	// a cid in the caller's scope for the report.
@@ -403,7 +607,7 @@ func (g *GDPR) EraseWithCascade(ctx context.Context, client *auth.Client, cid st
 	var children []childRow
 	for rows.Next() {
 		var cr childRow
-		if err := rows.Scan(&cr.cid, &cr.linkType, &cr.person); err != nil {
+		if err := rows.Scan(&cr.cid, &cr.linkType, &cr.person); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return 0, 0, nil, err
 		}
@@ -417,24 +621,170 @@ func (g *GDPR) EraseWithCascade(ctx context.Context, client *auth.Client, cid st
 	for _, t := range cascadeTypes {
 		cascade[t] = true
 	}
-	// Erase the parent first.
-	erasureID, scopes, err = g.erasePerson(ctx, client.ID, cid, personID)
+	plan := make([]cascadeTarget, 0, len(children))
+	for _, cr := range children {
+		if cascade[cr.linkType] {
+			plan = append(plan, cascadeTarget{cid: cr.cid, person: cr.person, linkType: cr.linkType})
+		}
+	}
+
+	// The parent is erased LAST. Its transaction is what deletes
+	// person_links, i.e. the map to the children - doing that first meant a
+	// partial cascade could not even be described afterwards. The durable
+	// plan (written inside the parent's own erasure transaction) is the
+	// belt to that braces: it survives the link deletion AND the crash.
+	erasureID, scopes, err = g.erasePersonWithPlan(ctx, client.ID, cid, personID, plan)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	done, err := g.runCascade(ctx, client.ID, erasureID)
 	if err != nil {
 		return 0, 0, nil, err
 	}
 	for _, cr := range children {
-		le := LinkedErasure{CID: cr.cid, LinkType: cr.linkType}
-		if cascade[cr.linkType] {
-			// Erase the child too (its own transaction). An already-erased
-			// child is fine - report it as cascaded.
-			if _, _, cerr := g.erasePerson(ctx, client.ID, cr.cid, cr.person); cerr != nil && !errorsIsValidation(cerr) {
-				return 0, 0, nil, fmt.Errorf("cascade erase of %s: %w", cr.cid, cerr)
-			}
-			le.Cascaded = true
+		linked = append(linked, LinkedErasure{
+			CID: cr.cid, LinkType: cr.linkType, Cascaded: cascade[cr.linkType] && done[cr.person]})
+	}
+	return erasureID, scopes, linked, nil
+}
+
+// EraseWithCascadePlanOnlyForTest erases the parent and records the cascade
+// plan WITHOUT running it - the state an interrupted request leaves behind.
+// Test-only seam: the alternative is killing a goroutine mid-loop, which
+// cannot be done deterministically.
+func (g *GDPR) EraseWithCascadePlanOnlyForTest(ctx context.Context, client *auth.Client, cid string, cascadeTypes []string) (int64, int, error) {
+	personID, err := g.Contacts.personForClientCID(ctx, client, cid)
+	if err != nil {
+		return 0, 0, err
+	}
+	rows, err := g.Pool.Query(ctx, `
+		SELECT c.cid, pl.link_type, pl.child_person::text
+		  FROM person_links pl JOIN cids c ON c.person_id = pl.child_person AND c.scope = pl.scope
+		 WHERE pl.parent_person = $1 AND pl.scope = $2`, personID, client.Scope)
+	if err != nil {
+		return 0, 0, err
+	}
+	want := map[string]bool{}
+	for _, t := range cascadeTypes {
+		want[t] = true
+	}
+	var plan []cascadeTarget
+	for rows.Next() {
+		var c, lt, p string
+		if err := rows.Scan(&c, &lt, &p); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
+			rows.Close()
+			return 0, 0, err
+		}
+		if want[lt] {
+			plan = append(plan, cascadeTarget{cid: c, person: p, linkType: lt})
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
+		return 0, 0, err
+	}
+	return g.erasePersonWithPlan(ctx, client.ID, cid, personID, plan)
+}
+
+// cascadeTarget is one planned child erasure.
+type cascadeTarget struct{ cid, person, linkType string }
+
+// runCascade erases every PENDING child of an erasure and marks each done as
+// it commits, so an interruption leaves an accurate, resumable record.
+func (g *GDPR) runCascade(ctx context.Context, actor string, erasureID int64) (map[string]bool, error) {
+	done := map[string]bool{}
+	rows, err := g.Pool.Query(ctx,
+		`SELECT child_person::text, child_cid FROM erasure_cascade
+		  WHERE erasure_id=$1 AND status='PENDING' ORDER BY child_person`, erasureID)
+	if err != nil {
+		return nil, err
+	}
+	type target struct{ person, cid string }
+	var targets []target
+	for rows.Next() {
+		var t target
+		if err := rows.Scan(&t.person, &t.cid); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
+			rows.Close()
+			return nil, err
+		}
+		targets = append(targets, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
+		return nil, err
+	}
+	for _, t := range targets {
+		// An already-erased child is fine - report it as cascaded.
+		if _, _, cerr := g.erasePerson(ctx, actor, t.cid, t.person); cerr != nil && !errorsIsValidation(cerr) {
+			return done, fmt.Errorf("cascade erase of %s: %w", t.cid, cerr)
+		}
+		if _, err := g.Pool.Exec(ctx,
+			`UPDATE erasure_cascade SET status='DONE', done_at=now()
+			  WHERE erasure_id=$1 AND child_person=$2`, erasureID, t.person); err != nil {
+			return done, err
+		}
+		done[t.person] = true
+	}
+	return done, nil
+}
+
+// resumeCascade finishes an interrupted cascade for an already-tombstoned
+// parent. Idempotent: with nothing outstanding it is a no-op that reports
+// the original erasure, so a retry is never an error.
+func (g *GDPR) resumeCascade(ctx context.Context, client *auth.Client, personID string) (int64, int, []LinkedErasure, error) {
+	var erasureID int64
+	err := g.Pool.QueryRow(ctx,
+		`SELECT id FROM erasures WHERE person_id=$1 ORDER BY id DESC LIMIT 1`, personID).Scan(&erasureID)
+	if err == pgx.ErrNoRows {
+		return 0, 0, nil, ErrNotFound
+	}
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	// Nothing outstanding: the person really is fully erased, so keep the
+	// established answer - ErrNotFound, indistinguishable from a cid that
+	// never existed. A distinct "already erased" code would confirm that
+	// this pseudonym existed and was erased, and re-running a COMPLETED
+	// erasure would re-queue a whole round of webhook deliveries for an
+	// already-forgotten person.
+	//
+	// Resuming is therefore scoped to the case that actually needs it: a
+	// cascade with children still PENDING, which is exactly the state an
+	// interrupted request leaves and which no other call can recover
+	// (GDPR-ERASURE-4).
+	var pending int
+	if err := g.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM erasure_cascade WHERE erasure_id=$1 AND status='PENDING'`,
+		erasureID).Scan(&pending); err != nil {
+		return 0, 0, nil, err
+	}
+	if pending == 0 {
+		return 0, 0, nil, ErrNotFound
+	}
+	if _, err := g.runCascade(ctx, client.ID, erasureID); err != nil {
+		return 0, 0, nil, err
+	}
+	rows, err := g.Pool.Query(ctx,
+		`SELECT child_cid, link_type, status='DONE' FROM erasure_cascade WHERE erasure_id=$1 ORDER BY child_person`,
+		erasureID)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	defer rows.Close()
+	var linked []LinkedErasure
+	for rows.Next() {
+		var le LinkedErasure
+		if err := rows.Scan(&le.CID, &le.LinkType, &le.Cascaded); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
+			return 0, 0, nil, err
 		}
 		linked = append(linked, le)
 	}
-	return erasureID, scopes, linked, nil
+	var scopes int
+	if err := g.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM erasure_events WHERE erasure_id=$1`, erasureID).Scan(&scopes); err != nil {
+		return 0, 0, nil, err
+	}
+	return erasureID, scopes, linked, rows.Err()
 }
 
 // errorsIsValidation reports the "already erased" sentinel so a cascade
@@ -446,6 +796,27 @@ func errorsIsValidation(err error) bool { return errors.Is(err, ErrValidation) }
 // record and the erasure row; auditCID is the pseudonym the request came in
 // under (portal erasures use the person's first CID).
 func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string) (erasureID int64, scopes int, err error) {
+	return g.erasePersonWithPlan(ctx, actor, auditCID, personID, nil)
+}
+
+// erasePersonWithPlan erases one person and, in the SAME transaction, records
+// the children this erasure is responsible for cascading to. Writing the plan
+// atomically with the erasure is what makes an interrupted cascade
+// describable and resumable: the parent's own transaction deletes
+// person_links, which was the only other record that those children existed
+// (GDPR-ERASURE-4).
+func (g *GDPR) erasePersonWithPlan(ctx context.Context, actor, auditCID, personID string, plan []cascadeTarget) (erasureID int64, scopes int, err error) {
+	// An erasure that loses a deadlock is not retried by anything - the
+	// subject's request just returns 500 and the person stays un-erased.
+	err = retryOnDeadlock(func() error {
+		var rerr error
+		erasureID, scopes, rerr = g.erasePersonOnce(ctx, actor, auditCID, personID, plan)
+		return rerr
+	})
+	return erasureID, scopes, err
+}
+
+func (g *GDPR) erasePersonOnce(ctx context.Context, actor, auditCID, personID string, plan []cascadeTarget) (erasureID int64, scopes int, err error) {
 	tx, err := g.Pool.Begin(ctx)
 	if err != nil {
 		return 0, 0, err
@@ -458,8 +829,13 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 	// cids row while erasure holds the persons row is an ABBA deadlock -
 	// fail-safe (the writer is always the victim), but a legitimate request
 	// then stalls deadlock_timeout and dies with a 500.
+	// ORDER BY cid is load-bearing, not cosmetic: this statement locks
+	// SEVERAL rows, and a writer that also needs two of them (OTI verify
+	// needs the issuer's and the verifier's) can only be deadlock-free if
+	// both sides walk the set in the same order. lockPersonRows takes the
+	// identical statement.
 	if _, err := tx.Exec(ctx,
-		`SELECT 1 FROM cids WHERE person_id=$1 FOR UPDATE`, personID); err != nil {
+		`SELECT 1 FROM cids WHERE person_id=$1 ORDER BY cid FOR UPDATE`, personID); err != nil {
 		return 0, 0, err
 	}
 	// Idempotency guard: a tombstone cannot be erased again (a second call
@@ -484,6 +860,17 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 		personID, actor).Scan(&erasureID); err != nil {
 		return 0, 0, err
 	}
+	// The cascade plan, in the same transaction as the erasure it belongs to
+	// and BEFORE the person_links delete below wipes the map to these
+	// children (GDPR-ERASURE-4).
+	for _, t := range plan {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO erasure_cascade (erasure_id, child_person, child_cid, link_type)
+			 VALUES ($1,$2,$3,$4) ON CONFLICT (erasure_id, child_person) DO NOTHING`,
+			erasureID, t.person, t.cid, t.linkType); err != nil {
+			return 0, 0, err
+		}
+	}
 	rows, err := tx.Query(ctx, `SELECT cid, scope FROM cids WHERE person_id=$1`, personID)
 	if err != nil {
 		return 0, 0, err
@@ -492,14 +879,14 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 	var all []sc
 	for rows.Next() {
 		var s sc
-		if err := rows.Scan(&s.cid, &s.scope); err != nil {
+		if err := rows.Scan(&s.cid, &s.scope); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return 0, 0, err
 		}
 		all = append(all, s)
 	}
 	rows.Close()
-	if err := rows.Err(); err != nil {
+	if err := rows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
 		return 0, 0, err
 	}
 	for _, s := range all {
@@ -586,8 +973,20 @@ func (g *GDPR) erasePerson(ctx context.Context, actor, auditCID, personID string
 	if err := tx.Commit(ctx); err != nil {
 		return 0, 0, err
 	}
-	// Best-effort immediate delivery; the periodic worker retries the rest.
-	_, _ = g.DeliverPending(ctx)
+	// Best-effort immediate delivery, DETACHED and scoped to this erasure.
+	// Running it inline on the request goroutine meant an ordinary client
+	// timeout cancelled the settle statements of a queue-wide batch of 100,
+	// stranding other subjects' notifications (H1, path B). The periodic
+	// worker retries whatever this misses.
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), detachedDeliverTimeout)
+		defer cancel()
+		if _, err := g.deliverPending(dctx, erasureID); err != nil {
+			g.logger().Error("inline erasure delivery", "erasure_id", erasureID, "err", err.Error())
+		}
+	}()
 	return erasureID, len(all), nil
 }
 
@@ -610,7 +1009,56 @@ type erasePayload struct {
 const (
 	DefaultWebhookTimeout     = 5 * time.Second
 	DefaultWebhookMaxAttempts = 10
+	// DefaultWorkerClaimTTL matches portal_outbox's reaper grace period.
+	DefaultWorkerClaimTTL = 10 * time.Minute
+	// settleTimeout bounds the acknowledgement statements, which run on a
+	// context deliberately detached from the caller's.
+	settleTimeout = 10 * time.Second
+	// detachedDeliverTimeout bounds the immediate post-erasure delivery.
+	detachedDeliverTimeout = 30 * time.Second
 )
+
+func (g *GDPR) claimTTL() time.Duration {
+	if g.ClaimTTL <= 0 {
+		return DefaultWorkerClaimTTL
+	}
+	return g.ClaimTTL
+}
+
+// ReapStrandedErasureEvents returns claims older than ttl to the queue. A
+// worker that dies (or is cancelled) between committing its claim and
+// settling the row leaves it SENDING, and the claim SELECT only matches
+// PENDING - without this, SENDING is an absorbing state and the Article 19
+// notification is lost silently and permanently (H1).
+//
+// claimed_at IS NULL backfills rows stranded before migration 0035, which
+// added the column.
+func ReapStrandedErasureEvents(ctx context.Context, pool *pgxpool.Pool, ttl time.Duration) (int64, error) {
+	if ttl <= 0 {
+		ttl = DefaultWorkerClaimTTL
+	}
+	tag, err := pool.Exec(ctx,
+		`UPDATE erasure_events SET status='PENDING', claimed_at=NULL
+		 WHERE status='SENDING'
+		   AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $1))`,
+		ttl.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// ErasureQueueDepth counts claimed-but-unsettled (SENDING) and abandoned
+// (FAILED) events, for the sunder_erasure_events_* gauges. A sending count
+// that does not return to zero is the alarm for a stalled or crash-looping
+// delivery worker; any failed count at all means a downstream scope was
+// never told to erase.
+func ErasureQueueDepth(ctx context.Context, pool *pgxpool.Pool) (sending, failed int64, err error) {
+	err = pool.QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE status='SENDING'), count(*) FILTER (WHERE status='FAILED')
+		 FROM erasure_events`).Scan(&sending, &failed)
+	return sending, failed, err
+}
 
 func (g *GDPR) maxAttempts() int {
 	if g.MaxAttempts <= 0 {
@@ -625,6 +1073,29 @@ func (g *GDPR) maxAttempts() int {
 // written to the audit chain - delivery confirmations are accountability
 // records, not operational noise.
 func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
+	return g.deliverPending(ctx, 0)
+}
+
+// deliverPending drains the erasure queue. onlyErasure > 0 restricts the
+// batch to one erasure's own events, which is what the post-erasure inline
+// delivery uses: a queue-wide batch let one subject's request claim - and,
+// on cancellation, strand - notifications belonging to other subjects.
+func (g *GDPR) deliverPending(ctx context.Context, onlyErasure int64) (delivered int, err error) {
+	// The acknowledgement statements must NOT share fate with the delivery.
+	// Every settle path used to run on the same context that performed the
+	// POST, so a cancelled request or a SIGTERM killed the statement that
+	// releases the claim - and the claim has no other release (H1).
+	settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+	defer cancelSettle()
+
+	// Recover claims abandoned by an earlier worker before taking new ones,
+	// so recovery does not depend on an operator having wired up the cron.
+	if n, rerr := ReapStrandedErasureEvents(settleCtx, g.Pool, g.claimTTL()); rerr != nil {
+		g.logger().Error("erasure event reap", "err", rerr.Error())
+	} else if n > 0 {
+		g.logger().Warn("requeued stranded erasure events", "count", n, "claim_ttl", g.claimTTL().String())
+	}
+
 	// Claim the batch: without SKIP LOCKED every replica delivered every
 	// event.
 	claim, err := g.Pool.Begin(ctx)
@@ -634,9 +1105,10 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 	defer func() { _ = claim.Rollback(ctx) }()
 	rows, err := claim.Query(ctx,
 		`SELECT e.id, e.erasure_id, e.scope, e.cid, w.url, w.secret
-		 FROM erasure_events e LEFT JOIN webhooks w ON w.scope = e.scope
-		 WHERE e.status='PENDING' ORDER BY e.attempts, e.id LIMIT 100
-		 FOR UPDATE OF e SKIP LOCKED`)
+		 FROM erasure_events e JOIN webhooks w ON w.scope = e.scope
+		 WHERE e.status='PENDING' AND ($1 = 0 OR e.erasure_id = $1)
+		 ORDER BY e.attempts, e.id LIMIT 100
+		 FOR UPDATE OF e SKIP LOCKED`, onlyErasure)
 	if err != nil {
 		return 0, err
 	}
@@ -648,7 +1120,7 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 	var evs []ev
 	for rows.Next() {
 		var e ev
-		if err := rows.Scan(&e.id, &e.erasureID, &e.scope, &e.cid, &e.url, &e.secret); err != nil {
+		if err := rows.Scan(&e.id, &e.erasureID, &e.scope, &e.cid, &e.url, &e.secret); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return 0, err
 		}
@@ -664,37 +1136,66 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 			ids = append(ids, e.id)
 		}
 		if _, err := claim.Exec(ctx,
-			`UPDATE erasure_events SET status='SENDING' WHERE id = ANY($1)`, ids); err != nil {
+			`UPDATE erasure_events SET status='SENDING', claimed_at=now() WHERE id = ANY($1)`, ids); err != nil {
 			return 0, err
 		}
 	}
 	if err := claim.Commit(ctx); err != nil {
 		return 0, err
 	}
-	terminal := func(e ev, status, action string) {
-		tx, err := g.Pool.Begin(ctx)
+	// release returns unattempted claims immediately rather than leaving
+	// them to the reaper's grace period.
+	release := func(rest []ev) {
+		if len(rest) == 0 {
+			return
+		}
+		ids := make([]int64, 0, len(rest))
+		for _, e := range rest {
+			ids = append(ids, e.id)
+		}
+		if _, rerr := g.Pool.Exec(settleCtx,
+			`UPDATE erasure_events SET status='PENDING', claimed_at=NULL
+			 WHERE id = ANY($1) AND status='SENDING'`, ids); rerr != nil {
+			g.logger().Error("release erasure claims", "count", len(ids), "err", rerr.Error())
+		}
+	}
+	terminal := func(e ev, status, action string) error {
+		tx, err := g.Pool.Begin(settleCtx)
 		if err != nil {
-			return
+			return err
 		}
-		defer func() { _ = tx.Rollback(ctx) }()
-		if _, err := tx.Exec(ctx,
+		defer func() { _ = tx.Rollback(settleCtx) }()
+		if _, err := tx.Exec(settleCtx,
 			`UPDATE erasure_events SET status=$2, delivered_at=CASE WHEN $2='DELIVERED' THEN now() END,
-			        attempts=attempts+1 WHERE id=$1`, e.id, status); err != nil {
-			return
+			        attempts=attempts+1, claimed_at=NULL WHERE id=$1`, e.id, status); err != nil {
+			return err
 		}
-		if err := audit.AppendTx(ctx, tx, audit.Entry{
+		if err := audit.AppendTx(settleCtx, tx, audit.Entry{
 			ClientID: "system", Action: action, CID: e.cid,
 			Detail: map[string]any{"erasure_id": e.erasureID, "scope": e.scope, "event_id": e.id},
 		}); err != nil {
-			return
+			return err
 		}
-		_ = tx.Commit(ctx)
+		return tx.Commit(settleCtx)
 	}
 
-	for _, e := range evs {
-		if e.url == nil {
-			terminal(e, "NO_WEBHOOK", "dsr.erase.no_webhook")
-			continue
+	// Events whose scope has no webhook are BLOCKED, not failed. The claim
+	// is an inner join now, so they never enter a batch (they used to sort
+	// first, attempts=0, and could crowd out deliverable ones) and they are
+	// never settled NO_WEBHOOK - a terminal status no claim SELECT and no
+	// reaper ever revisits, which wrote off Article 19 propagation for every
+	// scope onboarded before its endpoint was registered (QUEUE-WORKER-6).
+	// They stay PENDING and deliver on the sweep after `sunder webhook set`.
+	// Reported once per sweep, per scope, rather than once per event.
+	g.warnBlockedScopes(settleCtx)
+
+	for i, e := range evs {
+		// A dead caller context means every remaining POST would fail
+		// instantly; hand the rest back to the queue instead of burning
+		// their attempt counters.
+		if ctx.Err() != nil {
+			release(evs[i:])
+			return delivered, nil
 		}
 		body, _ := json.Marshal(erasePayload{
 			Event: "erase", Scope: e.scope, CID: e.cid, ErasureID: e.erasureID,
@@ -704,6 +1205,7 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 		mac.Write(body)
 		req, err := http.NewRequestWithContext(ctx, "POST", *e.url, bytes.NewReader(body))
 		if err != nil {
+			release(evs[i : i+1])
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -714,36 +1216,80 @@ func (g *GDPR) DeliverPending(ctx context.Context) (delivered int, err error) {
 			_ = resp.Body.Close()
 		}
 		if ok {
-			terminal(e, "DELIVERED", "dsr.erase.delivered")
+			if serr := terminal(e, "DELIVERED", "dsr.erase.delivered"); serr != nil {
+				// The downstream system HAS deleted the record; only our
+				// bookkeeping failed. The reaper will requeue the claim and
+				// the next sweep re-delivers (at-least-once, as documented).
+				g.logger().Error("settle erasure event after successful POST",
+					"event_id", e.id, "err", serr.Error())
+				continue
+			}
 			delivered++
 			continue
 		}
+		// The POST failed. If it failed because OUR context died rather
+		// than because the endpoint is unhealthy, do not charge an attempt.
+		if ctx.Err() != nil {
+			release(evs[i:])
+			return delivered, nil
+		}
 		var attempts int
-		if err := g.Pool.QueryRow(ctx,
-			`UPDATE erasure_events SET attempts=attempts+1, status='PENDING'
-			 WHERE id=$1 RETURNING attempts`, e.id).Scan(&attempts); err != nil {
+		if uerr := g.Pool.QueryRow(settleCtx,
+			`UPDATE erasure_events SET attempts=attempts+1, status='PENDING', claimed_at=NULL
+			 WHERE id=$1 RETURNING attempts`, e.id).Scan(&attempts); uerr != nil {
+			g.logger().Error("requeue erasure event", "event_id", e.id, "err", uerr.Error())
 			continue
 		}
 		if attempts >= g.maxAttempts() {
 			// terminal() adds one more attempt in its UPDATE; compensate by
 			// marking FAILED directly here with an audited record.
-			tx, err := g.Pool.Begin(ctx)
-			if err != nil {
-				continue
+			if ferr := g.failEvent(settleCtx, e.id, e.erasureID, e.scope, e.cid, attempts); ferr != nil {
+				g.logger().Error("mark erasure event FAILED", "event_id", e.id, "err", ferr.Error())
 			}
-			if _, err := tx.Exec(ctx,
-				`UPDATE erasure_events SET status='FAILED' WHERE id=$1`, e.id); err == nil {
-				if audit.AppendTx(ctx, tx, audit.Entry{
-					ClientID: "system", Action: "dsr.erase.failed", CID: e.cid,
-					Detail: map[string]any{"erasure_id": e.erasureID, "scope": e.scope, "event_id": e.id, "attempts": attempts},
-				}) == nil {
-					_ = tx.Commit(ctx)
-				}
-			}
-			_ = tx.Rollback(ctx)
 		}
 	}
 	return delivered, nil
+}
+
+// warnBlockedScopes logs the scopes holding undeliverable erasure events.
+func (g *GDPR) warnBlockedScopes(ctx context.Context) {
+	rows, err := g.Pool.Query(ctx, `
+		SELECT e.scope, count(*) FROM erasure_events e
+		 WHERE e.status='PENDING'
+		   AND NOT EXISTS (SELECT 1 FROM webhooks w WHERE w.scope = e.scope)
+		 GROUP BY e.scope`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var scope string
+		var n int64
+		if rows.Scan(&scope, &n) != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
+			return
+		}
+		g.logger().Warn("erasure events are waiting for a scope webhook that does not exist - the downstream system has NOT been told to erase; register it with `sunder webhook set` and they deliver on the next sweep",
+			"scope", scope, "events", n)
+	}
+}
+
+func (g *GDPR) failEvent(ctx context.Context, id, erasureID int64, scope, cid string, attempts int) error {
+	tx, err := g.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
+		`UPDATE erasure_events SET status='FAILED', claimed_at=NULL WHERE id=$1`, id); err != nil {
+		return err
+	}
+	if err := audit.AppendTx(ctx, tx, audit.Entry{
+		ClientID: "system", Action: "dsr.erase.failed", CID: cid,
+		Detail: map[string]any{"erasure_id": erasureID, "scope": scope, "event_id": id, "attempts": attempts},
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // --- retention ------------------------------------------------------------------
@@ -795,7 +1341,7 @@ func RunRetention(ctx context.Context, pool *pgxpool.Pool) (wiped int64, otiPrun
 	var wipedCIDs []string
 	for rows.Next() {
 		var cid string
-		if err := rows.Scan(&cid); err != nil {
+		if err := rows.Scan(&cid); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
 			rows.Close()
 			return 0, 0, err
 		}
@@ -808,10 +1354,8 @@ func RunRetention(ctx context.Context, pool *pgxpool.Pool) (wiped int64, otiPrun
 	wiped = int64(len(wipedCIDs))
 	if wiped > 0 {
 		// The retention sweep NULLs the blob but the contact was left fully
-		// resolvable: blob history (F6) still returned old values, and the
-		// per-person search tokens still resolved through POST /v1/lookup and
-		// handed out the CID (S6). Prune both here, inside the same tx as the
-		// wipe.
+		// resolvable: blob history (F6) still returned old values. Prune it
+		// here, inside the same tx as the wipe.
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM cid_blob_versions WHERE cid = ANY($1)`, wipedCIDs); err != nil {
 			return 0, 0, err
@@ -823,39 +1367,19 @@ func RunRetention(ctx context.Context, pool *pgxpool.Pool) (wiped int64, otiPrun
 			`DELETE FROM value_tokens WHERE cid = ANY($1)`, wipedCIDs); err != nil {
 			return 0, 0, err
 		}
-		// person_tokens are keyed by person, not scope, and lookup is global,
-		// so a person's search tokens may only be dropped once NOTHING live
-		// remains anywhere: no attribute blob, no un-GC'd file, no standing
-		// share, no link. A blob-less CID minted by an OTI handoff can carry
-		// files and shares - a scope retaining those must keep resolving the
-		// person (F6). Only when the person's last datum is gone does the
-		// searchable identifier itself become the last datum, and then it
-		// goes too. All predicates read the just-wiped state (same tx).
-		if _, err := tx.Exec(ctx, `
-			DELETE FROM person_tokens pt
-			 WHERE pt.person_id IN (SELECT person_id FROM cids WHERE cid = ANY($1))
-			   AND NOT EXISTS (
-				SELECT 1 FROM cids c2
-				 WHERE c2.person_id = pt.person_id AND c2.pii_encrypted IS NOT NULL)
-			   AND NOT EXISTS (
-				SELECT 1 FROM files f JOIN cids c3 ON c3.cid = f.cid
-				 WHERE c3.person_id = pt.person_id AND f.gc_at IS NULL
-				   AND (f.expires_at IS NULL OR f.expires_at > now()))
-			   AND NOT EXISTS (
-				SELECT 1 FROM shared_records sr JOIN cids c4 ON c4.cid = sr.cid
-				 WHERE c4.person_id = pt.person_id AND sr.revoked_at IS NULL
-				   AND sr.expires_at > now())
-			   AND NOT EXISTS (
-				SELECT 1 FROM person_links pl
-				 WHERE pl.parent_person = pt.person_id OR pl.child_person = pt.person_id)
-			   AND NOT EXISTS (
-				SELECT 1 FROM value_tokens vt JOIN cids c5 ON c5.cid = vt.cid
-				 WHERE c5.person_id = pt.person_id
-				   AND (vt.expires_final IS NULL OR vt.expires_final > now())
-				   AND (vt.sliding_seconds IS NULL OR vt.last_used + make_interval(secs => vt.sliding_seconds) > now()))`,
-			wipedCIDs); err != nil {
-			return 0, 0, err
-		}
+	}
+
+	// Search-token cleanup runs on EVERY sweep and is not scoped to the CIDs
+	// this sweep happened to wipe (GDPR-ERASURE-7). It used to be: a CID can
+	// be wiped only once (the UPDATE requires pii_encrypted IS NOT NULL), so
+	// a person whose token deletion was blocked at that single instant by a
+	// then-live share, file, link or value token kept their searchable
+	// identifiers FOREVER - long after the blocker expired. The condition
+	// being enforced is level-triggered ("this person has no live data
+	// anywhere"), so the pass that enforces it must be too.
+	tokensPruned, err := pruneOrphanSearchTokens(ctx, tx)
+	if err != nil {
+		return 0, 0, err
 	}
 
 	tag, err := tx.Exec(ctx, `DELETE FROM oti WHERE expires_at < now() - interval '30 days'`)
@@ -863,8 +1387,9 @@ func RunRetention(ctx context.Context, pool *pgxpool.Pool) (wiped int64, otiPrun
 		return 0, 0, err
 	}
 	otiPruned = tag.RowsAffected()
-	if wiped > 0 || otiPruned > 0 {
-		detail := map[string]any{"blobs_wiped": wiped, "oti_pruned": otiPruned}
+	if wiped > 0 || otiPruned > 0 || tokensPruned > 0 {
+		detail := map[string]any{"blobs_wiped": wiped, "oti_pruned": otiPruned,
+			"search_tokens_pruned": tokensPruned}
 		const listCap = 500
 		if len(wipedCIDs) > listCap {
 			detail["cids"] = wipedCIDs[:listCap]
@@ -879,4 +1404,72 @@ func RunRetention(ctx context.Context, pool *pgxpool.Pool) (wiped int64, otiPrun
 		}
 	}
 	return wiped, otiPruned, tx.Commit(ctx)
+}
+
+// retentionTokenBatch bounds one pass of the search-token sweep. Persons whose
+// tokens are deleted stop being candidates, so the loop converges.
+const retentionTokenBatch = 5000
+
+// pruneOrphanSearchTokens deletes the keyed identifier tokens of persons who
+// have nothing live left. Two candidate sets:
+//
+//   - tombstoned persons. Erasure already deleted their tokens, so anything
+//     present is a resurrection - the rekey sweep used to re-create them
+//     under the newest key version (GDPR-ERASURE-2), and nothing else ever
+//     removed them again. No guards apply: an erased person must not be
+//     resolvable by an identifier under any circumstance.
+//   - persons under a scope with a retention policy who have no attribute
+//     blob, no un-GC'd file, no standing share, no link and no live value
+//     token anywhere. A blob-less CID minted by an OTI handoff can carry
+//     files and shares, and a scope retaining those must keep resolving the
+//     person (F6); only when the person's last datum is gone does the
+//     searchable identifier itself become the last datum, and then it goes
+//     too.
+func pruneOrphanSearchTokens(ctx context.Context, tx pgx.Tx) (int64, error) {
+	var total int64
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM person_tokens pt USING persons p
+		  WHERE p.id = pt.person_id AND p.erased_at IS NOT NULL`)
+	if err != nil {
+		return 0, err
+	}
+	total += tag.RowsAffected()
+
+	for {
+		tag, err := tx.Exec(ctx, `
+			WITH candidates AS (
+				SELECT DISTINCT pt.person_id FROM person_tokens pt
+				 WHERE EXISTS (
+					SELECT 1 FROM cids c JOIN retention_policies rp ON rp.scope = c.scope
+					 WHERE c.person_id = pt.person_id)
+				   AND NOT EXISTS (
+					SELECT 1 FROM cids c2
+					 WHERE c2.person_id = pt.person_id AND c2.pii_encrypted IS NOT NULL)
+				   AND NOT EXISTS (
+					SELECT 1 FROM files f JOIN cids c3 ON c3.cid = f.cid
+					 WHERE c3.person_id = pt.person_id AND f.gc_at IS NULL
+					   AND (f.expires_at IS NULL OR f.expires_at > now()))
+				   AND NOT EXISTS (
+					SELECT 1 FROM shared_records sr JOIN cids c4 ON c4.cid = sr.cid
+					 WHERE c4.person_id = pt.person_id AND sr.revoked_at IS NULL
+					   AND sr.expires_at > now())
+				   AND NOT EXISTS (
+					SELECT 1 FROM person_links pl
+					 WHERE pl.parent_person = pt.person_id OR pl.child_person = pt.person_id)
+				   AND NOT EXISTS (
+					SELECT 1 FROM value_tokens vt JOIN cids c5 ON c5.cid = vt.cid
+					 WHERE c5.person_id = pt.person_id
+					   AND (vt.expires_final IS NULL OR vt.expires_final > now())
+					   AND (vt.sliding_seconds IS NULL OR vt.last_used + make_interval(secs => vt.sliding_seconds) > now()))
+				 LIMIT $1)
+			DELETE FROM person_tokens pt USING candidates c WHERE pt.person_id = c.person_id`,
+			retentionTokenBatch)
+		if err != nil {
+			return total, err
+		}
+		total += tag.RowsAffected()
+		if tag.RowsAffected() == 0 {
+			return total, nil
+		}
+	}
 }

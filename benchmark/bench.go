@@ -40,7 +40,7 @@ type result struct {
 func main() {
 	target := flag.String("target", "", "sunder | databunker")
 	base := flag.String("base", "", "base URL")
-	cred := flag.String("cred", "", "Sunder bearer credential or Databunker root token")
+	cred := flag.String("cred", "", "DEPRECATED - use SUNDER_CRED. Sunder bearer credential or Databunker root token")
 	op := flag.String("op", "write", "write | read | lookup")
 	n := flag.Int("n", 5000, "total requests")
 	c := flag.Int("c", 16, "concurrent workers")
@@ -48,8 +48,16 @@ func main() {
 	purpose := flag.String("purpose", "benchmark", "Sunder purpose for attribute reads")
 	keyspace := flag.Int("keyspace", 0, "if >0, spread the N requests over a loaded set this large instead of hitting indices 0..N-1")
 	flag.Parse()
+	// The credential comes from the environment: on a command line it is
+	// readable through /proc/<pid>/cmdline, `ps auxww`, shell history and CI
+	// logs (OPS-CLI-CONFIG-9). -cred still works but warns.
+	if *cred != "" {
+		fmt.Fprintln(os.Stderr, "WARNING: -cred puts the credential on the command line. Use SUNDER_CRED instead.")
+	} else {
+		*cred = os.Getenv("SUNDER_CRED")
+	}
 	if *target == "" || *base == "" || *cred == "" {
-		fmt.Fprintln(os.Stderr, "need -target, -base, -cred")
+		fmt.Fprintln(os.Stderr, "need -target, -base and SUNDER_CRED")
 		os.Exit(2)
 	}
 

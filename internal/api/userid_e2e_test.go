@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"mime/multipart"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -43,7 +44,7 @@ func TestUserIDAttributionEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +133,7 @@ func TestPhoneSuffixLookupOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		SearchFuzzyName: true, SearchPhoneSuffix: true}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -172,7 +173,7 @@ func TestSearchUnlockStrictPosture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		SearchFuzzyName: true, SearchPhoneSuffix: true, SearchUnlock: true}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +241,7 @@ func TestValueTokenBulkRequiresUnlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +309,7 @@ func TestReviewF4_UnlockNotBurnedOnNonSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		SearchFuzzyName: true, SearchPhoneSuffix: true, SearchUnlock: true}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -356,7 +357,7 @@ func TestFileVaultOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		FilesStorage: "local", FilesDir: t.TempDir(), FilesMaxMB: 1}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -437,7 +438,7 @@ func TestValueTokenHTTPSingleItem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +479,7 @@ func TestFileAndTokenHTTPErrorPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		FilesStorage: "local", FilesDir: t.TempDir(), FilesMaxMB: 1}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -542,7 +543,7 @@ func TestNewEndpointsForbiddenPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		FilesStorage: "local", FilesDir: t.TempDir(), FilesMaxMB: 1}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -591,7 +592,7 @@ func TestTokenAndFileHandlerErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		FilesStorage: "local", FilesDir: t.TempDir(), FilesMaxMB: 1}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -671,7 +672,7 @@ func TestHandlerHardErrorPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		SearchPhoneSuffix: true, SearchUnlock: true}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -737,7 +738,7 @@ func TestBlobVersionsOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(), VersionsKeep: 5}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(), VersionsKeep: 5}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -782,7 +783,7 @@ func TestNewEndpointsRateLimited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -818,7 +819,7 @@ func TestReviewFixHandlerBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		FilesStorage: "local", FilesDir: t.TempDir(), FilesMaxMB: 1}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -884,7 +885,10 @@ func TestReviewFixHandlerBranches(t *testing.T) {
 }
 
 // TestFileDownloadTruncatedAfterHeaders covers the handler branch where
-// Download fails after Peek has already written the 200 headers.
+// Download fails after Peek has already written the 200 headers. Returning
+// cleanly there handed the client a 200 with a SHORT body it could only
+// detect by counting against Content-Length; the handler now aborts the
+// connection, which every HTTP client notices (FILES-STORAGE-5).
 func TestFileDownloadTruncatedAfterHeaders(t *testing.T) {
 	ctx := context.Background()
 	st := testutil.NewDB(t)
@@ -896,7 +900,7 @@ func TestFileDownloadTruncatedAfterHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		FilesStorage: "local", FilesDir: dir, FilesMaxMB: 1}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -927,11 +931,21 @@ func TestFileDownloadTruncatedAfterHeaders(t *testing.T) {
 	dreq := httptest.NewRequest("GET", "/v1/files/"+fileID+"?purpose=support", nil)
 	dreq.Header.Set("Authorization", "Bearer "+cred)
 	drec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(drec, dreq)
-	// The 200 header is already out; the body is truncated. The handler must
-	// not panic and must have logged the error.
-	if drec.Code != 200 {
-		t.Fatalf("headers were written before the failure, want 200 got %d", drec.Code)
+	aborted := func() (aborted bool) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec != http.ErrAbortHandler {
+					panic(rec)
+				}
+				aborted = true
+			}
+		}()
+		srv.Handler().ServeHTTP(drec, dreq)
+		return false
+	}()
+	if !aborted {
+		t.Fatalf("a mid-stream failure must abort the connection, not complete a short 200 (code %d, %d body bytes, Content-Length %s)",
+			drec.Code, drec.Body.Len(), drec.Header().Get("Content-Length"))
 	}
 }
 
@@ -947,7 +961,7 @@ func TestFileNameSanitized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		FilesStorage: "local", FilesDir: t.TempDir(), FilesMaxMB: 1}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -994,7 +1008,7 @@ func TestBulkTokenHandlerHardErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1032,7 +1046,7 @@ func TestPersonLinksOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1085,7 +1099,7 @@ func TestLinkHandlerErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1139,7 +1153,7 @@ func TestSharesOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1190,7 +1204,7 @@ func TestSharesPublicMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(), SharesPublic: true}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(), SharesPublic: true}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1235,7 +1249,7 @@ func TestShareHandlerErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1276,7 +1290,7 @@ func TestShareCreateRateLimited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1308,7 +1322,7 @@ func TestBulkCreateHardErrorWriteErr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1339,7 +1353,7 @@ func TestAdminUnlockRateLimited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1368,7 +1382,7 @@ func TestOpenAPIAndBulkReadForbidden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1400,7 +1414,7 @@ func TestOpenAPIAndBulkReadForbidden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv2, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st2)
+	srv2, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1434,7 +1448,7 @@ func TestFileUploadRefusesTruncatedBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	filesDir := t.TempDir()
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		FilesStorage: "local", FilesDir: filesDir, FilesMaxMB: 1}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -1493,7 +1507,7 @@ func TestNewSurfacesAreRateLimited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir(),
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir(),
 		FilesStorage: "local", FilesDir: t.TempDir(), FilesMaxMB: 1}, st)
 	if err != nil {
 		t.Fatal(err)
@@ -1502,10 +1516,20 @@ func TestNewSurfacesAreRateLimited(t *testing.T) {
 	_, out := e.do(t, cred, "POST", "/v1/contacts", map[string]any{"email": "rl@example.com"})
 	cid := out["cid"]
 
-	// Exhaust the window: shrink the client's limit to 1 and burn it.
-	if _, err := st.Pool.Exec(ctx, `UPDATE clients SET rate_limit=1 WHERE client_id='crm'`); err != nil {
+	// A SEPARATE credential carries the exhausted window: the limit is now
+	// enforced in middleware for every /v1/ route (AUTHZ-1), so the setup
+	// calls above would otherwise have already spent the probe client's
+	// budget.
+	probeCred, err := auth.Create(ctx, st.Pool, auth.Client{
+		ID: "probe", Name: "Probe", Scope: "crm",
+		AllowedActions: []string{auth.ActContactsRegister, auth.ActLookup, auth.ActFilesWrite, auth.ActFilesRead,
+			auth.ActTokensCreate, auth.ActTokensRead, auth.ActTokensDelete,
+			auth.ActSharesCreate, auth.ActLinksManage, auth.ActAttributesHistory, auth.ActAttributesRead},
+		AllowedPurposes: []string{"support"}, RateLimit: 1})
+	if err != nil {
 		t.Fatal(err)
 	}
+	cred = probeCred
 	if rec, _ := e.do(t, cred, "POST", "/v1/lookup", map[string]string{"email": "rl@example.com"}); rec.Code != 200 {
 		t.Fatalf("the one allowed request: %d", rec.Code)
 	}

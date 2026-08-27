@@ -62,6 +62,9 @@ type Config struct {
 	WebhookTimeout     time.Duration // SUNDER_WEBHOOK_TIMEOUT: per-delivery HTTP timeout, default "5s", range [1s, 5m]
 	WebhookMaxAttempts int           // SUNDER_WEBHOOK_MAX_ATTEMPTS: failed deliveries before FAILED, default 10, min 1
 	DeliverInterval    time.Duration // SUNDER_DELIVER_INTERVAL: background webhook retry cadence, default "1m", range [5s, 1h]
+	KeystoreAllowMint  bool          // SUNDER_KEYSTORE_ALLOW_MINT: let `serve` mint key material for a version live data already references (default false - a lost keystore volume must fail loudly, not manufacture an unreadable vault)
+	KeyRetireGrace     time.Duration // SUNDER_KEY_RETIRE_GRACE: how long a key version must be RETIRING before `keys retire` will purge it, default "60s", range [0, 24h]
+	WorkerClaimTTL     time.Duration // SUNDER_WORKER_CLAIM_TTL: how long a claimed outbox row may stay SENDING before a reaper returns it to PENDING, default "10m", range [1m, 24h]
 
 	// Audit sealing (P4.1). "async" keeps the instance-wide chain lock off
 	// the request path: audited operations INSERT unsealed rows and a
@@ -69,11 +72,12 @@ type Config struct {
 	// behaviour - lock in the business transaction, hash immediate, zero
 	// sealing window. This is a security trade-off, not a preference: see
 	// docs/THREAT-MODEL.md ("Audit chain") before changing either way.
-	AuditSealing      string        // SUNDER_AUDIT_SEALING: "async" (default) or "sync"
-	AuditSealInterval time.Duration // SUNDER_AUDIT_SEAL_INTERVAL: sealer cadence, default "200ms", range [50ms, 30s]
-	AuditSealDelay    time.Duration // SUNDER_AUDIT_SEAL_DELAY: how long a row must settle before it may be sealed, default "2s", range [100ms, 5m]
-	AuditSealBatch    int           // SUNDER_AUDIT_SEAL_BATCH: rows per sealing transaction, default 5000, min 100
-	AuditSealExternal bool          // SUNDER_AUDIT_SEAL_EXTERNAL=true: this process runs no sealer; a separate `sunder sealer` process does
+	AuditSealing       string        // SUNDER_AUDIT_SEALING: "async" (default) or "sync"
+	AuditSealInterval  time.Duration // SUNDER_AUDIT_SEAL_INTERVAL: sealer cadence, default "200ms", range [50ms, 30s]
+	AuditStaleUnsealed time.Duration // SUNDER_AUDIT_STALE_UNSEALED: oldest tolerated unchained row before verify-audit fails, default "15m", range [1s, 24h]
+	AuditSealDelay     time.Duration // SUNDER_AUDIT_SEAL_DELAY: how long a row must settle before it may be sealed, default "2s", range [100ms, 5m]
+	AuditSealBatch     int           // SUNDER_AUDIT_SEAL_BATCH: rows per sealing transaction, default 5000, min 100
+	AuditSealExternal  bool          // SUNDER_AUDIT_SEAL_EXTERNAL=true: this process runs no sealer; a separate `sunder sealer` process does
 	// Audit read events (P4.2). "bucketed" (default) aggregates lookups and
 	// attribute reads into hourly buckets, chained once per hour via a
 	// digest; "chained" keeps every read as its own chained row. See
@@ -121,6 +125,12 @@ type Config struct {
 	// cross-org partners who hold only the UUID). Off by default: the
 	// stronger default requires any valid client credential.
 	SharesPublic bool // SUNDER_SHARES_PUBLIC=true
+
+	// APIClientIPHeader is the trusted client-IP header on the API
+	// listener, used by the credential-less share fetch's per-IP limit.
+	// Unset means RemoteAddr. Separate from PortalClientIPHeader because
+	// the two sockets have different trust boundaries.
+	APIClientIPHeader string // SUNDER_API_CLIENT_IP_HEADER
 }
 
 func getenv(key, def string) string {
@@ -128,6 +138,28 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// getbool parses a boolean setting. Every boolean used to be
+// `os.Getenv(KEY) == "true"`, so `1`, `TRUE`, `yes` and `on` - all
+// conventional, all accepted by most container tooling - evaluated to FALSE
+// with no error and no log line, silently inverting two operator-selectable
+// security postures (SUNDER_REDIS_FAIL_CLOSED and SUNDER_SEARCH_UNLOCK)
+// while configuration review showed them enabled. docs/CONFIG.md promises
+// "a typo can never silently fall back to a default"; this is what makes
+// that true for booleans (DOCS-7).
+func getbool(key string, def bool) (bool, error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return def, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true", "1", "yes", "on":
+		return true, nil
+	case "false", "0", "no", "off":
+		return false, nil
+	}
+	return false, fmt.Errorf("%s: %q is not a boolean (accepted: true/false, 1/0, yes/no, on/off)", key, raw)
 }
 
 // getdur parses an env duration with a default and inclusive bounds.
@@ -159,30 +191,51 @@ func FromEnv() (Config, error) {
 // process, which holds keys and must never need database credentials.
 func FromEnvNoDB() (Config, error) {
 	c := Config{
-		DBURL:           os.Getenv("SUNDER_DB_URL"),
-		Listen:          getenv("SUNDER_LISTEN", ":8080"),
-		TLSCert:         os.Getenv("SUNDER_TLS_CERT"),
-		TLSKey:          os.Getenv("SUNDER_TLS_KEY"),
-		MTLSCA:          os.Getenv("SUNDER_MTLS_CA"),
-		Keystore:        getenv("SUNDER_KEYSTORE", "file"),
-		KeystorePath:    getenv("SUNDER_KEYSTORE_PATH", "./keystore"),
-		VaultAddr:       os.Getenv("SUNDER_VAULT_ADDR"),
-		VaultToken:      os.Getenv("SUNDER_VAULT_TOKEN"),
-		VaultMount:      getenv("SUNDER_VAULT_MOUNT", "secret"),
-		SignerSocket:    os.Getenv("SUNDER_SIGNER_SOCKET"),
-		TSAURL:          getenv("SUNDER_TSA_URL", "https://freetsa.org/tsr"),
-		MetricsToken:    os.Getenv("SUNDER_METRICS_TOKEN"),
-		TSACA:           os.Getenv("SUNDER_TSA_CACERT"),
-		AnchorDir:       os.Getenv("SUNDER_ANCHOR_DIR"),
-		RedisAddr:       os.Getenv("SUNDER_REDIS_ADDR"),
-		RedisPassword:   os.Getenv("SUNDER_REDIS_PASSWORD"),
-		RedisFailClosed: os.Getenv("SUNDER_REDIS_FAIL_CLOSED") == "true",
-
-		PortalEnabled:        os.Getenv("SUNDER_PORTAL_ENABLED") == "true",
+		DBURL:                os.Getenv("SUNDER_DB_URL"),
+		Listen:               getenv("SUNDER_LISTEN", ":8080"),
+		TLSCert:              os.Getenv("SUNDER_TLS_CERT"),
+		TLSKey:               os.Getenv("SUNDER_TLS_KEY"),
+		MTLSCA:               os.Getenv("SUNDER_MTLS_CA"),
+		Keystore:             getenv("SUNDER_KEYSTORE", "file"),
+		KeystorePath:         getenv("SUNDER_KEYSTORE_PATH", "./keystore"),
+		VaultAddr:            os.Getenv("SUNDER_VAULT_ADDR"),
+		VaultToken:           os.Getenv("SUNDER_VAULT_TOKEN"),
+		VaultMount:           getenv("SUNDER_VAULT_MOUNT", "secret"),
+		SignerSocket:         os.Getenv("SUNDER_SIGNER_SOCKET"),
+		TSAURL:               getenv("SUNDER_TSA_URL", "https://freetsa.org/tsr"),
+		MetricsToken:         os.Getenv("SUNDER_METRICS_TOKEN"),
+		TSACA:                os.Getenv("SUNDER_TSA_CACERT"),
+		AnchorDir:            os.Getenv("SUNDER_ANCHOR_DIR"),
+		RedisAddr:            os.Getenv("SUNDER_REDIS_ADDR"),
+		RedisPassword:        os.Getenv("SUNDER_REDIS_PASSWORD"),
 		PortalListen:         os.Getenv("SUNDER_PORTAL_LISTEN"),
 		PortalBaseURL:        os.Getenv("SUNDER_PORTAL_BASE_URL"),
-		PortalCookieInsecure: os.Getenv("SUNDER_PORTAL_COOKIE_INSECURE") == "true",
 		PortalClientIPHeader: os.Getenv("SUNDER_PORTAL_CLIENT_IP_HEADER"),
+		APIClientIPHeader:    os.Getenv("SUNDER_API_CLIENT_IP_HEADER"),
+	}
+	// Every boolean goes through getbool, which REFUSES an unrecognised
+	// value instead of quietly meaning false (DOCS-7).
+	for _, b := range []struct {
+		key string
+		dst *bool
+		def bool
+	}{
+		{"SUNDER_REDIS_FAIL_CLOSED", &c.RedisFailClosed, false},
+		{"SUNDER_PORTAL_ENABLED", &c.PortalEnabled, false},
+		{"SUNDER_PORTAL_COOKIE_INSECURE", &c.PortalCookieInsecure, false},
+		{"SUNDER_AUDIT_SEAL_EXTERNAL", &c.AuditSealExternal, false},
+		{"SUNDER_SEARCH_FUZZY_NAME", &c.SearchFuzzyName, false},
+		{"SUNDER_SEARCH_PHONE_SUFFIX", &c.SearchPhoneSuffix, false},
+		{"SUNDER_SEARCH_UNLOCK", &c.SearchUnlock, false},
+		{"SUNDER_FILES_S3_PATH_STYLE", &c.FilesS3PathStyle, false},
+		{"SUNDER_SHARES_PUBLIC", &c.SharesPublic, false},
+		{"SUNDER_KEYSTORE_ALLOW_MINT", &c.KeystoreAllowMint, false},
+	} {
+		v, err := getbool(b.key, b.def)
+		if err != nil {
+			return c, err
+		}
+		*b.dst = v
 	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		return c, fmt.Errorf("SUNDER_TLS_CERT and SUNDER_TLS_KEY must be set together")
@@ -218,6 +271,21 @@ func FromEnvNoDB() (Config, error) {
 	if c.DeliverInterval, err = getdur("SUNDER_DELIVER_INTERVAL", "1m", 5*time.Second, time.Hour); err != nil {
 		return c, err
 	}
+	// The claim lease. A row a worker claimed but never settled is returned
+	// to the queue once its claim is older than this. It must exceed the
+	// worst-case delivery time (WebhookTimeout x batch) or a slow endpoint
+	// causes a duplicate send; deliveries are at-least-once, so a duplicate
+	// is safe but noisy.
+	if c.WorkerClaimTTL, err = getdur("SUNDER_WORKER_CLAIM_TTL", "10m", time.Minute, 24*time.Hour); err != nil {
+		return c, err
+	}
+	// How long a key version must sit RETIRING before it may be retired.
+	// Must exceed the worst-case KeyRing cache staleness across the fleet,
+	// because the purge is one-shot: a replica still writing under the old
+	// version afterwards leaves orphan search-token rows (CONCURRENCY-CORE-4).
+	if c.KeyRetireGrace, err = getdur("SUNDER_KEY_RETIRE_GRACE", "60s", 0, 24*time.Hour); err != nil {
+		return c, err
+	}
 	c.PIIAlg = getenv("SUNDER_PII_ALG", crypto.AlgAES256GCM)
 	if !crypto.KnownAlg(c.PIIAlg) {
 		return c, fmt.Errorf("SUNDER_PII_ALG must be %q or %q", crypto.AlgAES256GCM, crypto.AlgXChaCha20)
@@ -241,14 +309,16 @@ func FromEnvNoDB() (Config, error) {
 	if c.AuditSealDelay, err = getdur("SUNDER_AUDIT_SEAL_DELAY", "2s", 100*time.Millisecond, 5*time.Minute); err != nil {
 		return c, err
 	}
+	// How old the oldest UNCHAINED row may get before `verify-audit` calls
+	// it a failure. Under async sealing a backlog is normal; a STALE one is
+	// the stalled-sealer incident, and it used to exit 0 (OPS-CLI-CONFIG-8).
+	if c.AuditStaleUnsealed, err = getdur("SUNDER_AUDIT_STALE_UNSEALED", "15m", time.Second, 24*time.Hour); err != nil {
+		return c, err
+	}
 	rawBatch := getenv("SUNDER_AUDIT_SEAL_BATCH", "5000")
 	if c.AuditSealBatch, err = strconv.Atoi(rawBatch); err != nil || c.AuditSealBatch < 100 {
 		return c, fmt.Errorf("SUNDER_AUDIT_SEAL_BATCH: %q must be an integer >= 100", rawBatch)
 	}
-	c.AuditSealExternal = os.Getenv("SUNDER_AUDIT_SEAL_EXTERNAL") == "true"
-	c.SearchFuzzyName = os.Getenv("SUNDER_SEARCH_FUZZY_NAME") == "true"
-	c.SearchPhoneSuffix = os.Getenv("SUNDER_SEARCH_PHONE_SUFFIX") == "true"
-	c.SearchUnlock = os.Getenv("SUNDER_SEARCH_UNLOCK") == "true"
 	c.FilesStorage = os.Getenv("SUNDER_FILES_STORAGE")
 	c.FilesDir = getenv("SUNDER_FILES_DIR", "./filestore")
 	c.FilesS3Endpoint = os.Getenv("SUNDER_FILES_S3_ENDPOINT")
@@ -256,8 +326,6 @@ func FromEnvNoDB() (Config, error) {
 	c.FilesS3Region = getenv("SUNDER_FILES_S3_REGION", "us-east-1")
 	c.FilesS3AccessKey = os.Getenv("SUNDER_FILES_S3_ACCESS_KEY")
 	c.FilesS3SecretKey = os.Getenv("SUNDER_FILES_S3_SECRET_KEY")
-	c.FilesS3PathStyle = os.Getenv("SUNDER_FILES_S3_PATH_STYLE") == "true"
-	c.SharesPublic = os.Getenv("SUNDER_SHARES_PUBLIC") == "true"
 	rawVK := getenv("SUNDER_VERSIONS_KEEP", "0")
 	if c.VersionsKeep, err = strconv.Atoi(rawVK); err != nil || c.VersionsKeep < 0 || c.VersionsKeep > 1000 {
 		return c, fmt.Errorf("SUNDER_VERSIONS_KEEP: %q must be 0-1000", rawVK)

@@ -1,0 +1,94 @@
+{
+  "id": "derived-search",
+  "title": "Find someone by a misspelled name or the last eight digits - once",
+  "summary": "Support staff rarely have the exact spelling or the full number. Derived search gives them phonetic names and phone suffixes as NARROWING keys - and answers only when the answer is a single person. A key that matches two people returns nothing, which is what stops it becoming an enumeration tool.",
+  "doc": "concepts/fuzzy-and-partial-search.md",
+  "roles": [
+    {
+      "name": "crm",
+      "label": "CRM (support desk)",
+      "scope": "crm",
+      "actions": ["contacts.register", "lookup", "attributes.read"],
+      "purposes": ["support"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "A customer with a name that has spelling variants",
+      "note": "Both features are OFF by default - each widens the search surface and adds token rows per contact, so switching them on is a deliberate act. This stack has them on.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {
+        "email": "{{demo_email}}",
+        "phone": "{{demo_phone}}",
+        "name": "{{demo_name}}",
+        "attributes": {"loyalty_tier": "gold"}
+      },
+      "expect": 201,
+      "capture": {"crm_cid": "cid"}
+    },
+    {
+      "label": "The exact identifier still works",
+      "note": "The baseline: an e-mail is an identifier, and identifiers resolve exactly.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"email": "{{demo_email}}"},
+      "expect": 200,
+      "capture": {"found_cid": "cid"},
+      "assert": [
+        {"kind": "equals", "left": "crm_cid", "right": "found_cid", "message": "an exact lookup must return the same pseudonym the registration minted"}
+      ]
+    },
+    {
+      "label": "A name alone is refused",
+      "note": "Names are not identifiers: they are shared by many people, and answering on one would make the API a directory. A name may only NARROW a search that already has an identifier.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"name": "{{demo_name}}"},
+      "expect": 400
+    },
+    {
+      "label": "The last eight digits, and only that",
+      "note": "The suffix is a keyed HMAC of the last eight digits - never the number. It answers because exactly one person in this scope matches. If two did, this would be a 404: a multi-hit is a miss, deliberately, so the endpoint cannot be walked to enumerate people.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"phone_suffix": "{{demo_phone_suffix}}"},
+      "expect": 200,
+      "capture": {"suffix_cid": "cid"},
+      "assert": [
+        {"kind": "equals", "left": "crm_cid", "right": "suffix_cid", "message": "the suffix lookup must resolve to the same person"}
+      ]
+    },
+    {
+      "label": "A suffix that is too short is refused",
+      "note": "Fewer than eight digits would match too many people to be a narrowing key at all - so it is refused rather than answered vaguely.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"phone_suffix": "1234"},
+      "expect": 400
+    },
+    {
+      "label": "A suffix nobody has: a plain miss",
+      "note": "Absent and ambiguous look identical from outside. The caller learns 'not exactly one person here', never how many.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"phone_suffix": "99999999"},
+      "expect": 404
+    },
+    {
+      "label": "The phonetic name narrows an identifier lookup",
+      "note": "The name is folded to a phonetic code, so common Croatian variants (Anic/Anić, Djuric/Đurić) land on the same key. It is still only a narrowing key beside the e-mail - never a search term on its own.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/lookup",
+      "body": {"email": "{{demo_email}}", "name": "{{demo_name}}"},
+      "expect": 200
+    }
+  ]
+}

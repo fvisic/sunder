@@ -147,6 +147,11 @@ func VerifyToken(tsr []byte, rootHex, caFile string) (bool, error) {
 // anchors OFF the database host (write-once storage, another machine) is
 // what makes them evidence against a privileged database attacker - tokens
 // living only in the same database are circular.
+// ErrAlreadyAnchored reports that the current chain head already carries an
+// anchor, so there is nothing new to stamp. Not a failure: the caller prints
+// it and exits 0.
+var ErrAlreadyAnchored = errors.New("chain head is already anchored")
+
 func Anchor(ctx context.Context, pool *pgxpool.Pool, tsaURL, caFile, outDir string) (root string, stampedAt string, err error) {
 	root, err = Head(ctx, pool)
 	if err != nil {
@@ -154,6 +159,25 @@ func Anchor(ctx context.Context, pool *pgxpool.Pool, tsaURL, caFile, outDir stri
 	}
 	if root == "" {
 		return "", "", nil
+	}
+	// Idempotent in the ROOT. Anchoring is not idempotent by construction:
+	// two rows sharing a root necessarily share one export filename while
+	// their TSA tokens differ (distinct serial and genTime), so
+	// VerifyAnchors reported one of them as "file: MISMATCH with database"
+	// FOREVER - the exact signal an operator is told means the anchor
+	// evidence was altered. It fired on any day the head had not moved: an
+	// idle instance, a weekend, or - viciously - a stalled sealer, which
+	// freezes the head by construction, so the incident that most needs
+	// anchoring was the one that permanently corrupted its verdict
+	// (AUDIT-CHAIN-4). Re-stamping an unchanged head buys no new evidence
+	// anyway, so this is also the right operational behaviour.
+	var already bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM audit_anchor WHERE root_hash=$1)`, root).Scan(&already); err != nil {
+		return "", "", err
+	}
+	if already {
+		return root, "", ErrAlreadyAnchored
 	}
 	tsq, err := BuildQuery(root)
 	if err != nil {
@@ -176,18 +200,26 @@ func Anchor(ctx context.Context, pool *pgxpool.Pool, tsaURL, caFile, outDir stri
 	if err != nil {
 		return "", "", err
 	}
-	if _, err = pool.Exec(ctx,
-		`INSERT INTO audit_anchor (root_hash, tsa_url, stamped_at, tsr) VALUES ($1,$2,$3,$4)`,
-		root, tsaURL, stampedAt, tsr); err != nil {
-		return "", "", err
-	}
+	// Export FIRST, then commit the row. The old order committed an
+	// undeletable row (audit_anchor is append-only) and only then wrote the
+	// file, so a crash or an EACCES between the two left a permanent
+	// "file: MISSING from export dir". An orphan file is already handled -
+	// VerifyAnchors reports InDB:false for it - so the reverse order is the
+	// recoverable one. 0o644 rather than 0o444: a write-once destination is
+	// the operator's job (the runbook says so), and an unwritable file is
+	// how a retry wedges.
 	if outDir != "" {
 		if err := os.MkdirAll(outDir, 0o755); err != nil {
 			return "", "", err
 		}
-		if err := os.WriteFile(filepath.Join(outDir, root+".tsr"), tsr, 0o444); err != nil {
+		if err := os.WriteFile(filepath.Join(outDir, root+".tsr"), tsr, 0o644); err != nil {
 			return "", "", err
 		}
+	}
+	if _, err = pool.Exec(ctx,
+		`INSERT INTO audit_anchor (root_hash, tsa_url, stamped_at, tsr) VALUES ($1,$2,$3,$4)`,
+		root, tsaURL, stampedAt, tsr); err != nil {
+		return "", "", err
 	}
 	return root, stampedAt, nil
 }

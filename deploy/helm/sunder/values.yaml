@@ -1,8 +1,8 @@
 image:
   repository: ghcr.io/fvisic/sunder
-  tag: v0.4.0
+  tag: v0.5.0
   # The ops image (anchor/verify-audit cron jobs) needs openssl:
-  opsTag: v0.4.0-ops
+  opsTag: v0.5.0-ops
 
 replicaCount: 2
 
@@ -15,6 +15,14 @@ keystore:
   # vault is the right choice on Kubernetes: the file driver would need a
   # ReadWriteMany volume shared across replicas.
   type: vault
+  # Let `serve` CREATE key material for a version live data was already
+  # written under. Off, and it should stay off: minting there recovers
+  # nothing - it manufactures a vault that cannot read its own contents and
+  # then reports healthy (/healthz 200, every lookup a 404). On Kubernetes
+  # the usual cause is a Vault path or token pointing at the wrong place, and
+  # failing closed is what makes that visible. `sunder bootstrap` always
+  # mints; it is the explicit "create this vault" act.
+  allowMint: false
   vault:
     addr: https://vault.internal:8200
     mount: secret
@@ -86,6 +94,72 @@ tunables:
   webhookTimeout: ""     # SUNDER_WEBHOOK_TIMEOUT, e.g. "30s" (default 5s)
   webhookMaxAttempts: "" # SUNDER_WEBHOOK_MAX_ATTEMPTS (default 10)
   deliverInterval: ""    # SUNDER_DELIVER_INTERVAL, e.g. "30s" (default 1m)
+  # How long a claimed erasure-notification or portal-mail row may go
+  # unsettled before a reaper returns it to PENDING. Both outboxes commit the
+  # claim BEFORE the side effect, so this is the only thing that recovers a
+  # claim abandoned by a killed worker - and on Kubernetes pods are killed
+  # routinely. Set it above the worst-case sweep (webhookTimeout x batch).
+  workerClaimTtl: ""     # SUNDER_WORKER_CLAIM_TTL, e.g. "5m" (default 10m)
+  # How long a key version sits RETIRING before `keys retire` purges it. Must
+  # exceed the worst-case KeyRing cache staleness ACROSS THE FLEET: the purge
+  # is one-shot, so a replica still writing under the old version afterwards
+  # leaves search-token rows nothing will ever match or delete. Raise it for a
+  # large replica count; never set it to 0 on more than one replica.
+  keyRetireGrace: ""     # SUNDER_KEY_RETIRE_GRACE, e.g. "5m" (default 60s)
+  # Header trusted for the per-IP limit on the credential-less share fetch,
+  # e.g. "X-Forwarded-For". Behind an ingress, RemoteAddr is the proxy for
+  # every requester, so the limit collapses to one shared bucket - but
+  # trusting the header where nothing appends it hands every requester a
+  # FRESH bucket. Set it only when a proxy you control writes it.
+  apiClientIpHeader: ""  # SUNDER_API_CLIENT_IP_HEADER
+
+# Derived search indexes (F1/F2). Both OFF by default: each widens the search
+# surface and adds token rows per contact. Enabling either on an existing
+# dataset means "flip the value, then run `sunder keys rekey`" - the sweep
+# backfills the derived tokens from the encrypted blobs.
+search:
+  fuzzyName: false      # SUNDER_SEARCH_FUZZY_NAME: phonetic name narrowing
+  phoneSuffix: false    # SUNDER_SEARCH_PHONE_SUFFIX: last-8-digit phone lookup
+  # Strict posture: fuzzy and partial lookups additionally spend a 60-second
+  # single-use unlock token. Off by default because a pre-flight round trip
+  # per caller-ID lookup kills that flow; BULK surfaces require one regardless.
+  unlock: false         # SUNDER_SEARCH_UNLOCK
+
+# Cross-org shares (F6).
+shares:
+  # When true, GET /v1/shares/{uuid} needs no credential - the UUID IS the
+  # bearer. Logged as a startup warning, and rate-limited per IP via
+  # tunables.apiClientIpHeader, which behind an ingress you must set for the
+  # limit to mean anything.
+  public: false         # SUNDER_SHARES_PUBLIC
+
+# Attribute version history (F8). Version history is personal data: the
+# retention sweep prunes it and erasure destroys it like any other blob.
+versions:
+  keep: ""              # SUNDER_VERSIONS_KEEP, e.g. "5" (0 = off, max 1000)
+  ttl: ""               # SUNDER_VERSIONS_TTL, e.g. "365d" (0s = count cap only)
+
+# File vault (F5). Off unless storage is set.
+#
+# `local` is deliberately NOT offered here: ciphertext would live in a
+# per-process directory while metadata and the wrapped DEK live in the shared
+# database, so a second replica answers a download with 200 and an empty body.
+# On Kubernetes that is not a configuration choice, it is a data-loss shape.
+files:
+  storage: ""           # SUNDER_FILES_STORAGE: "" (disabled) or "s3"
+  maxMB: ""             # SUNDER_FILES_MAX_MB, 1-256 with the s3 driver
+  # Simultaneous uploads. A single-PUT body is buffered whole, so peak upload
+  # memory is roughly this times maxMB - size it against the pod's limit.
+  maxConcurrentUploads: ""  # SUNDER_FILES_MAX_CONCURRENT_UPLOADS (default 4)
+  s3:
+    endpoint: ""        # SUNDER_FILES_S3_ENDPOINT, https
+    bucket: ""          # SUNDER_FILES_S3_BUCKET
+    region: ""          # SUNDER_FILES_S3_REGION (default us-east-1)
+    pathStyle: false    # SUNDER_FILES_S3_PATH_STYLE, true for MinIO
+    # Access key id and secret come from a Secret with keys
+    # SUNDER_FILES_S3_ACCESS_KEY and SUNDER_FILES_S3_SECRET_KEY - never from
+    # values.yaml, which lands in the release manifest.
+    existingSecret: ""
 
 anchor:
   enabled: true
@@ -118,6 +192,11 @@ audit:
   sealInterval: ""   # SUNDER_AUDIT_SEAL_INTERVAL, e.g. "200ms"
   sealDelay: ""      # SUNDER_AUDIT_SEAL_DELAY, e.g. "2s"
   sealBatch: ""      # SUNDER_AUDIT_SEAL_BATCH, e.g. "5000"
+  # How old the OLDEST unchained row may get before `verify-audit` calls it a
+  # failure. Under async sealing a backlog is normal; a STALE one is the
+  # stalled-sealer incident, and the daily verify CronJob below is what
+  # notices. Applies to the API pods and that CronJob alike.
+  staleUnsealed: ""  # SUNDER_AUDIT_STALE_UNSEALED, e.g. "5m" (default 15m)
   # The recommended hardening: sealing runs in a dedicated single-replica
   # deployment (SUNDER_AUDIT_SEAL_EXTERNAL on the API pods), so the API
   # role needs no UPDATE on the audit table.
@@ -134,3 +213,11 @@ audit:
 resources:
   requests: {cpu: 250m, memory: 256Mi}
   limits: {memory: 512Mi}
+
+# Startup budget for `serve`, which applies pending migrations before it
+# listens. periodSeconds x failureThreshold is how long a migration may take
+# before Kubernetes gives up; raise it for a large database. Liveness does
+# not start probing until the startup probe passes (OPS-CLI-CONFIG-6).
+startupProbe:
+  periodSeconds: 10
+  failureThreshold: 60   # 10 minutes

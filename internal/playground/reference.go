@@ -63,12 +63,38 @@ func (s *Server) handleSpec(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+// spec serves the instance's OpenAPI document, cached for specTTL.
+//
+// The lock is held only around the cache reads and the publish - NEVER
+// across the outbound fetch. Holding it across a 15-second HTTP call plus a
+// 4 MiB ReadAll meant concurrent visitors queued on the mutex rather than
+// the network, each pinning a handler goroutine for the full wait, and a
+// perfectly good cached document from a minute ago was discarded rather
+// than served when the upstream stopped answering (CONCURRENCY-CORE-7).
 func (s *Server) spec(ctx context.Context) ([]byte, error) {
 	s.specs.mu.Lock()
-	defer s.specs.mu.Unlock()
-	if s.specs.body != nil && time.Since(s.specs.fetched) < specTTL {
-		return s.specs.body, nil
+	cached, fetched := s.specs.body, s.specs.fetched
+	s.specs.mu.Unlock()
+	if cached != nil && time.Since(fetched) < specTTL {
+		return cached, nil
 	}
+
+	raw, err := s.fetchSpec(ctx)
+	if err != nil {
+		// Serve STALE rather than fail: a dead upstream must not also cost
+		// the visitor the copy we already have.
+		if cached != nil {
+			return cached, nil
+		}
+		return nil, err
+	}
+	s.specs.mu.Lock()
+	s.specs.body, s.specs.fetched = raw, time.Now()
+	s.specs.mu.Unlock()
+	return raw, nil
+}
+
+func (s *Server) fetchSpec(ctx context.Context) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", s.cfg.BaseURL+"/openapi.yaml", nil)
 	if err != nil {
 		return nil, err
@@ -81,12 +107,7 @@ func (s *Server) spec(ctx context.Context) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, errStatus(resp.StatusCode)
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, specMaxBytes))
-	if err != nil {
-		return nil, err
-	}
-	s.specs.body, s.specs.fetched = raw, time.Now()
-	return raw, nil
+	return io.ReadAll(io.LimitReader(resp.Body, specMaxBytes))
 }
 
 type errStatus int

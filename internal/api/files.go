@@ -42,9 +42,6 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, service.ErrForbidden)
 		return
 	}
-	if !s.allow(w, client) {
-		return
-	}
 	// Cap the whole request body at the per-file limit plus a small
 	// multipart overhead allowance (H2), and STREAM the multipart body
 	// instead of ParseMultipartForm: parsing would read and spool the whole
@@ -57,6 +54,19 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 {
 		limit = 25 << 20
 	}
+	// The bulk routes get their own transport deadline. The server-wide
+	// ReadTimeout/WriteTimeout are 30s - sized for small JSON calls - and
+	// Go arms the read deadline when the request starts, so the configured
+	// file sizes were simply unreachable: 256 MiB in 30s needs ~68 Mbps,
+	// and the upload's wait for a concurrency slot was charged against the
+	// same budget, so the failure got worse exactly under load
+	// (FILES-STORAGE-5).
+	extendDeadlines(w, transferBudget(limit))
+	// ...and again once the concurrency slot is granted, so the wait for a
+	// slot does not eat the transfer budget.
+	r = r.WithContext(service.WithUploadSlotHook(r.Context(), func() {
+		extendDeadlines(w, transferBudget(limit))
+	}))
 	r.Body = http.MaxBytesReader(w, r.Body, limit+(1<<20))
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -98,9 +108,6 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	purpose := r.URL.Query().Get("purpose")
 	// Validate everything that can fail BEFORE writing any header - once
 	// the 200 and Content-Length are out, a later error can only truncate
@@ -114,22 +121,22 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	extendDeadlines(w, transferBudget(meta.SizeBytes))
 	w.Header().Set("Content-Type", meta.ContentType)
 	w.Header().Set("Content-Length", itoa64(meta.SizeBytes))
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilename(meta.Name)+`"`)
 	if _, err := s.Files.Download(r.Context(), client, r.PathValue("id"), purpose, w); err != nil {
-		// Headers may already be gone; the truncated body plus the log
-		// line is the best honest signal left.
 		s.logErr(r, err)
-		return
+		// Content-Length is already on the wire, so returning cleanly hands
+		// the client a 200 with a SHORT body it cannot detect except by
+		// counting. Abort the connection instead: a broken transfer is
+		// something every HTTP client notices (FILES-STORAGE-5).
+		panic(http.ErrAbortHandler)
 	}
 }
 
 func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	out, err := s.Files.List(r.Context(), client, r.PathValue("cid"), r.URL.Query().Get("purpose"))
 	if err != nil {
 		s.logErr(r, err)
@@ -141,9 +148,6 @@ func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	if err := s.Files.Delete(r.Context(), client, r.PathValue("id")); err != nil {
 		s.logErr(r, err)
 		writeErr(w, err)
@@ -193,9 +197,6 @@ func fmtSscan(str string, out *int64) (int, error) {
 
 func (s *Server) handleVersionList(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	out, err := s.Contacts.ListVersions(r.Context(), client, r.PathValue("cid"))
 	if err != nil {
 		s.logErr(r, err)
@@ -207,9 +208,6 @@ func (s *Server) handleVersionList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleVersionAttribute(w http.ResponseWriter, r *http.Request) {
 	client := auth.FromContext(r.Context())
-	if !s.allow(w, client) {
-		return
-	}
 	var versionNo int64
 	if _, err := fmtSscan(r.PathValue("version"), &versionNo); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": "version must be a number"})
@@ -223,4 +221,25 @@ func (s *Server) handleVersionAttribute(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"value": val})
+}
+
+// transferBudget is the transport deadline for a bulk route: an ~8 Mbps
+// floor plus a flat allowance for the crypto and the storage round trip. A
+// deliberately generous floor - the point is that the configured file size
+// is reachable at all, not that slow clients are indulged.
+func transferBudget(sizeBytes int64) time.Duration {
+	mb := sizeBytes / (1 << 20)
+	return time.Duration(mb)*time.Second + 30*time.Second
+}
+
+// extendDeadlines pushes this connection's read and write deadlines out.
+// Called again after the upload slot is granted, so queue time is not
+// charged against transfer time.
+func extendDeadlines(w http.ResponseWriter, d time.Duration) {
+	rc := http.NewResponseController(w)
+	deadline := time.Now().Add(d)
+	// Both return ErrNotSupported on a ResponseWriter that cannot do it
+	// (httptest's recorder); the routes work either way.
+	_ = rc.SetReadDeadline(deadline)
+	_ = rc.SetWriteDeadline(deadline)
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -58,9 +59,18 @@ func (i *inbox) add(d Delivery) {
 // a shared demo - the payloads are fake, but showing strangers' records is
 // precisely the habit this product exists to break.
 func (i *inbox) list(vars map[string]string) []Delivery {
+	// Only values that ARE pseudonyms scope the inbox. Matching every value
+	// in the session map meant the constant `demo_name: "Ana Horvat"`,
+	// seeded into EVERY session, was a key anyone could deliver to: an
+	// unauthenticated POST /hooks/erasure with cid:"Ana Horvat" landed in
+	// every visitor's panel, and repeating it evicted the genuine
+	// deliveries from the bounded ring (GAP-5). No constant in
+	// newSessionVars is CID-shaped, so none can be a target.
 	mine := map[string]bool{}
 	for _, v := range vars {
-		mine[v] = true
+		if looksLikeCID(v) {
+			mine[v] = true
+		}
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -109,6 +119,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.Event, d.Scope, d.CID, d.ErasureID = payload.Event, payload.Scope, payload.CID, payload.ErasureID
+	// A delivery whose cid is not a pseudonym can belong to no visitor, so
+	// storing it only lets an anonymous caller evict real deliveries from
+	// the bounded ring (GAP-5).
+	if !looksLikeCID(d.CID) {
+		s.log.Warn("erasure webhook with a cid that is not a pseudonym - refused", "scope", d.Scope)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_cid"})
+		return
+	}
 	if d.Signature == "invalid" {
 		// Record it (the panel should be able to show a forged delivery)
 		// but answer with a failure, so Sunder's delivery queue reports
@@ -125,4 +143,26 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 	sess := s.session(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"deliveries": s.inbox.list(sess.Vars())})
+}
+
+// looksLikeCID is the vault's pseudonym shape: "CID-" plus RFC 4648 base32,
+// which is what crypto.NewCID emits. A delivery whose cid is not one cannot
+// belong to any visitor.
+//
+// The alphabet matters, and getting it wrong is not a cosmetic bug: this
+// used to check a CROCKFORD alphabet (digits 0-9, no U), while the vault
+// emits standard base32 (A-Z and 2-7). Every pseudonym containing a `U` -
+// about 56% of them, at 26 characters - was refused, so the erasure
+// walkthrough's signed callback silently never reached the inbox on roughly
+// every second run.
+func looksLikeCID(v string) bool {
+	if !strings.HasPrefix(v, "CID-") || len(v) < 8 || len(v) > 64 {
+		return false
+	}
+	for _, r := range v[4:] {
+		if !(r >= 'A' && r <= 'Z') && !(r >= '2' && r <= '7') {
+			return false
+		}
+	}
+	return true
 }

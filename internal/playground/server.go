@@ -189,6 +189,9 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) *Session {
 // 'unsafe-inline': the script and the stylesheet are separate same-origin
 // files, so there is nothing inline to allow (the API-reference tab lives
 // in its own document for the same reason).
+// SessionsForTest exposes the session store; see Sessions.AllForTest.
+func (s *Server) SessionsForTest() *Sessions { return s.sessions }
+
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	s.session(w, r)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

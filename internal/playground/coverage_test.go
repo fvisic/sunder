@@ -12,24 +12,32 @@ import (
 // document: one maps the shipped demo scripts onto walkthroughs, the other
 // keeps every walkthrough pointing at a guide page that exists.
 
-// pendingDemos are demo scripts with no walkthrough yet - the remaining
-// F1-F11 panels (PLAN P3.7). Remove an entry when its scenario lands; a
-// script that is neither covered nor listed fails the test, so a new demo
-// cannot quietly arrive without a panel.
-var pendingDemos = map[string]string{
-	"f4-value-tokens.sh":    "F4 value tokenization panel",
-	"f5-file-vault.sh":      "F5 file vault panel",
-	"f6-versioning.sh":      "F6 attribute versioning panel",
-	"f7-sub-accounts.sh":    "F7 sub-accounts panel",
-	"f8-shared-records.sh":  "F8 shared records panel",
-	"f9-shamir-recovery.sh": "F9 Shamir recovery walkthrough (CLI-only feature)",
-	"escalation.sh":         "delayed-notification walkthrough",
+// pendingDemos are demo scripts with no walkthrough yet (PLAN Phase 8).
+// Remove an entry when its scenario lands; a script that is neither covered
+// nor listed fails the test, so a new demo cannot quietly arrive without a
+// walkthrough. Phase 8's exit criterion is this map reaching empty, with
+// deliberateOmissions as the only escape hatch.
+var pendingDemos = map[string]string{}
+
+// deliberateOmissions are features that will NOT get a browser walkthrough,
+// each with the reason and where the reader should look instead. An entry
+// here is a decision someone wrote down - which is the whole point: silence
+// is what Phase 8 exists to make impossible.
+var deliberateOmissions = map[string]string{
+	"f9-shamir-recovery.sh": "custodian shares are an operator ceremony at a terminal, not a browser flow: " +
+		"the shares are printed once and must never transit a web page. See docs-site/docs/admin/shamir-recovery.md",
 }
 
 // demoToScenario maps a demo script to the walkthrough that tells the same
 // story through the UI.
 var demoToScenario = map[string]string{
-	"quickstart.sh": "lookup-handoff",
+	"quickstart.sh":        "lookup-handoff",
+	"f4-value-tokens.sh":   "value-tokens",
+	"f5-file-vault.sh":     "file-vault",
+	"f6-versioning.sh":     "attribute-history",
+	"f7-sub-accounts.sh":   "sub-accounts",
+	"f8-shared-records.sh": "shared-records",
+	"escalation.sh":        "delayed-notification",
 }
 
 func TestEveryDemoScriptHasAWalkthroughOrIsListedPending(t *testing.T) {
@@ -54,6 +62,9 @@ func TestEveryDemoScriptHasAWalkthroughOrIsListedPending(t *testing.T) {
 			}
 			continue
 		}
+		if _, omitted := deliberateOmissions[name]; omitted {
+			continue
+		}
 		if _, pending := pendingDemos[name]; !pending {
 			t.Errorf("demo/%s has no walkthrough and is not listed in pendingDemos: "+
 				"add a scenario or record the gap explicitly", name)
@@ -61,6 +72,11 @@ func TestEveryDemoScriptHasAWalkthroughOrIsListedPending(t *testing.T) {
 	}
 	// The reverse direction: a pending entry for a script that no longer
 	// exists is stale bookkeeping.
+	for name := range deliberateOmissions {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("deliberateOmissions lists demo/%s, which does not exist", name)
+		}
+	}
 	for name := range pendingDemos {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("pendingDemos lists demo/%s, which does not exist", name)

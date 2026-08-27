@@ -105,7 +105,7 @@ func TestPortalStartUnknownAndSessionErrors(t *testing.T) {
 func TestKeyRingInvalidateThrottled(t *testing.T) {
 	e := newFaultEnv(t)
 	ctx := context.Background()
-	ring := &service.KeyRing{Pool: e.admin.Pool}
+	ring := &service.KeyRing{Pool: e.admin.Pool, RetireGrace: -1}
 	if _, err := ring.Newest(ctx, "hmac-email"); err != nil {
 		t.Fatal(err)
 	}

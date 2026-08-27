@@ -1,0 +1,100 @@
+{
+  "id": "delayed-notification",
+  "title": "Send an e-mail hours later, without ever storing the address",
+  "summary": "A handoff token lives five minutes, so it cannot be saved for an escalation that happens tonight. The notifier consumes it now, stores only a pseudonym, and fetches the address just in time - which is also why one unsubscribe click stops the mail with no list to scrub.",
+  "doc": "howto/delayed-flows.md",
+  "roles": [
+    {
+      "name": "crm",
+      "label": "CRM (ticket desk)",
+      "scope": "crm",
+      "actions": ["contacts.register", "oti.issue"],
+      "purposes": ["escalation_notify"]
+    },
+    {
+      "name": "notifier",
+      "label": "Notifier service",
+      "scope": "notifier",
+      "actions": ["oti.verify", "attributes.read", "consent.manage"],
+      "purposes": ["escalation_notify"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "A ticket is opened",
+      "note": "The customer exists in the CRM with an address and a name.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {
+        "email": "{{demo_email}}",
+        "phone": "{{demo_phone}}",
+        "name": "{{demo_name}}",
+        "attributes": {"loyalty_tier": "gold"}
+      },
+      "expect": 201,
+      "capture": {"crm_cid": "cid"}
+    },
+    {
+      "label": "Hand off, authorizing the e-mail and nothing else",
+      "note": "share_attributes is the issuer saying WHICH fields may appear in the other system. A token cannot be stockpiled - it dies in five minutes - so the notifier must consume it now, at handoff time, not at send time.",
+      "actor": "crm",
+      "method": "POST",
+      "path": "/v1/oti",
+      "body": {
+        "cid": "{{crm_cid}}",
+        "purpose": "escalation_notify",
+        "audience": "notifier",
+        "share_attributes": ["email"]
+      },
+      "expect": 201,
+      "capture": {"oti": "token"}
+    },
+    {
+      "label": "The notifier consumes it and gets its OWN pseudonym",
+      "note": "This is the whole trick. The notifier now holds a stable handle for this customer that is unrelated to the CRM's - a leak of the notifier database joins with nothing.",
+      "actor": "notifier",
+      "method": "POST",
+      "path": "/v1/oti/verify",
+      "body": {"token": "{{oti}}", "purpose": "escalation_notify", "audience": "notifier"},
+      "expect": 200,
+      "capture": {"notifier_cid": "cid"},
+      "assert": [
+        {"kind": "differs", "left": "crm_cid", "right": "notifier_cid", "message": "the notifier must hold a different pseudonym than the CRM"}
+      ]
+    },
+    {
+      "label": "Hours later: fetch the address just in time",
+      "note": "The notifier stored a ticket id and a pseudonym - no address, no name. When the escalation fires it asks for the e-mail, purpose stated, and the read is consent-checked and on the audit chain.",
+      "actor": "notifier",
+      "method": "GET",
+      "path": "/v1/contacts/{{notifier_cid}}/attributes/email?purpose=escalation_notify",
+      "expect": 200
+    },
+    {
+      "label": "What the issuer did not share is simply not there",
+      "note": "The name was never authorized, so it never crossed. Not hidden by a filter in the notifier - absent from the notifier's scope entirely.",
+      "actor": "notifier",
+      "method": "GET",
+      "path": "/v1/contacts/{{notifier_cid}}/attributes/name?purpose=escalation_notify",
+      "expect": 404
+    },
+    {
+      "label": "The customer clicks unsubscribe",
+      "note": "One decision, recorded next to the data it governs.",
+      "actor": "notifier",
+      "method": "POST",
+      "path": "/v1/consent",
+      "body": {"cid": "{{notifier_cid}}", "purpose": "escalation_notify", "granted": false},
+      "expect": 200
+    },
+    {
+      "label": "The next escalation cannot get an address",
+      "note": "No code change in the notifier, no suppression list to maintain, no risk that one forgotten batch job still has a copy: the address is simply no longer obtainable for this purpose.",
+      "actor": "notifier",
+      "method": "GET",
+      "path": "/v1/contacts/{{notifier_cid}}/attributes/email?purpose=escalation_notify",
+      "expect": 403
+    }
+  ]
+}

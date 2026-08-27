@@ -2,8 +2,8 @@
 # database, keystore, or Vault path between customers.
 image:
   repository: ghcr.io/fvisic/sunder
-  tag: v0.3.0
-  opsTag: v0.3.0-ops
+  tag: v0.5.0
+  opsTag: v0.5.0-ops
 
 replicaCount: 2
 

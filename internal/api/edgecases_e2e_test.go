@@ -21,7 +21,7 @@ import (
 // GET /readyz: edge - the database is unreachable, readiness must say so.
 func TestReadyzReportsDeadDatabase(t *testing.T) {
 	st := testutil.NewDB(t)
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestReadyzReportsDeadDatabase(t *testing.T) {
 // and the GET itself still answers around it.
 func TestReadyzRejectsWrongMethod(t *testing.T) {
 	st := testutil.NewDB(t)
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestReadyzRejectsWrongMethod(t *testing.T) {
 // the database gone - liveness is NOT readiness.
 func TestHealthzEdges(t *testing.T) {
 	st := testutil.NewDB(t)
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestHealthzEdges(t *testing.T) {
 // content type, non-trivial, carries the paths), and a write method is 405.
 func TestOpenAPISpecServed(t *testing.T) {
 	st := testutil.NewDB(t)
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestOpenAPISpecServed(t *testing.T) {
 // to the embedded file, so a stale copy cannot be served.
 func TestOpenAPISpecMatchesEmbedded(t *testing.T) {
 	st := testutil.NewDB(t)
-	srv, err := New(config.Config{Keystore: "file", KeystorePath: t.TempDir()}, st)
+	srv, err := New(config.Config{Keystore: "file", KeyRetireGrace: -1, KeystorePath: t.TempDir()}, st)
 	if err != nil {
 		t.Fatal(err)
 	}

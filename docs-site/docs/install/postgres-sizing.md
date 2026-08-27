@@ -2,7 +2,9 @@
 
 You want to know which Postgres settings actually matter for Sunder and
 why - stock defaults (128 MB `shared_buffers`) measure the defaults, not
-the system, and Sunder holds no state of its own, so every sizing decision
+the system, and Sunder holds no state of its own (with two exceptions - the
+`file` keystore driver and the `local` file-vault driver, both
+single-instance; see the multi-replica guide), so every sizing decision
 is a Postgres decision.
 
 ```mermaid

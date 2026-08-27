@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,17 @@ type Server struct {
 	// closerInterval overrides the bucket-closer cadence in tests; zero
 	// means the production minute.
 	closerInterval time.Duration
+	// syncBacklogInterval overrides the sync-mode backlog sealer's cadence
+	// in tests; zero means syncBacklogSealInterval.
+	syncBacklogInterval time.Duration
+	// gaugeInterval overrides the operational-gauge cadence in tests; zero
+	// means the production 30 seconds.
+	gaugeInterval time.Duration
+
+	// The two constructed listeners, published by Run for ServersForTest.
+	testServersMu sync.Mutex
+	apiServer     *http.Server
+	portalServer  *http.Server
 }
 
 // OpenKeystore builds the configured keystore driver, wrapped
@@ -114,10 +126,20 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 
 	if st != nil {
 		eng := OpenEngine(cfg)
-		ring := &service.KeyRing{Pool: st.Pool}
+		ring := &service.KeyRing{Pool: st.Pool, RetireGrace: cfg.KeyRetireGrace}
 		// Bootstrap/rotation is the ONLY place key material comes into
 		// existence (the keystore itself is strict).
-		if err := ring.EnsureAll(context.Background(), eng); err != nil {
+		// `serve` does NOT mint by default. Minting on boot turns a lost or
+		// misconfigured keystore volume into a healthy-looking empty vault:
+		// /healthz 200, /readyz 200, every lookup a 404, every attribute
+		// undecryptable, and no signal anywhere (OPS-CLI-CONFIG-1). A first
+		// boot against a vault with no data still mints, because nothing
+		// references the missing versions.
+		ensure := ring.EnsureAll
+		if cfg.KeystoreAllowMint {
+			ensure = ring.EnsureAllAllowingMint
+		}
+		if err := ensure(context.Background(), eng); err != nil {
 			return nil, fmt.Errorf("keystore bootstrap: %w", err)
 		}
 		pii := crypto.NewPIIBox(eng)
@@ -127,7 +149,8 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 			VersionsKeep: cfg.VersionsKeep}
 		s.OTI = &service.OTI{Pool: st.Pool, Eng: eng, Ring: ring, Contacts: s.Contacts, TTL: cfg.OTITTL}
 		s.GDPR = &service.GDPR{Pool: st.Pool, Contacts: s.Contacts,
-			HTTPTimeout: cfg.WebhookTimeout, MaxAttempts: cfg.WebhookMaxAttempts}
+			HTTPTimeout: cfg.WebhookTimeout, MaxAttempts: cfg.WebhookMaxAttempts,
+			ClaimTTL: cfg.WorkerClaimTTL, Log: s.Log}
 		if cfg.PortalEnabled {
 			s.Portal = &service.Portal{GDPR: s.GDPR, Contacts: s.Contacts, BaseURL: cfg.PortalBaseURL}
 		}
@@ -202,7 +225,17 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		}
 		v1.HandleFunc("GET /v1/dsr/export", s.handleDSRExport)
 		s.Auth.Limiter = s.Limiter
-		s.mux.Handle("/v1/", s.Auth.Middleware(userIDMiddleware(capturePattern(v1))))
+		// The per-client rate limit is enforced HERE, once, for every /v1/
+		// route - not per handler. It used to be a per-handler call added
+		// feature by feature, and eleven routes never got it: the whole
+		// contacts surface (including GET .../attributes/{name}, the primary
+		// PII read), the whole consent and DSR surface (including
+		// POST /v1/dsr/erase, the most destructive call in the product),
+		// both OTI routes and the authed share fetch. The `rate_limit`
+		// column on `clients` - which THREAT-MODEL names as the mitigation
+		// for a stolen bearer credential - was silently inoperative on them
+		// (AUTHZ-1). One enforcement point means a new route cannot skip it.
+		s.mux.Handle("/v1/", s.Auth.Middleware(s.rateLimitMiddleware(userIDMiddleware(capturePattern(v1)))))
 		if cfg.SharesPublic {
 			// Credential-less partner fetch: a more specific pattern than the
 			// /v1/ guard, so it bypasses auth by design (the UUID is the bearer).
@@ -216,6 +249,25 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		}
 	}
 	return s, nil
+}
+
+// rateLimitMiddleware applies the per-client budget to every authenticated
+// v1 request. Narrower per-route buckets (claims:, audit-verify:,
+// audit-chain:, share-public:) stay layered on top as ADDITIONAL limits.
+func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		client := auth.FromContext(r.Context())
+		if client == nil {
+			// Unauthenticated requests never reach here (the auth middleware
+			// wraps this one), but fail closed rather than assume it.
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if !s.allow(w, client) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // allow applies the per-client rate limit to an audit-writing endpoint and
@@ -335,13 +387,20 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	// Erasure webhook delivery worker: retries PENDING events on the
-	// configured cadence (Erase also attempts an immediate delivery inline).
-	if s.GDPR != nil {
+	// configured cadence (Erase also dispatches a detached, erasure-scoped
+	// delivery of its own). deliveryDone closes once the delivery ticker goroutine has returned,
+	// so shutdown can WAIT for an in-flight sweep instead of abandoning its
+	// claims to the reaper's grace period (H1 / QUEUE-WORKER-3).
+	deliveryDone := make(chan struct{})
+	if s.GDPR == nil {
+		close(deliveryDone)
+	} else {
 		interval := s.Cfg.DeliverInterval
 		if interval <= 0 {
 			interval = time.Minute
 		}
 		go func() {
+			defer close(deliveryDone)
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
@@ -380,12 +439,24 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
-	errCh := make(chan error, 1)
+	// TWO producers whenever a dedicated portal listener is configured, and
+	// the ctx.Done() branch returns without draining - so a one-slot buffer
+	// parked one sender forever, holding its *http.Server and handler graph
+	// alive for the lifetime of the process (CONCURRENCY-CORE-5). Buffered
+	// for both, and every send is non-blocking so no future third producer
+	// can reintroduce it.
+	errCh := make(chan error, 2)
+	report := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
 	go func() {
 		if s.Cfg.TLSCert != "" {
-			errCh <- srv.ListenAndServeTLS(s.Cfg.TLSCert, s.Cfg.TLSKey)
+			report(srv.ListenAndServeTLS(s.Cfg.TLSCert, s.Cfg.TLSKey))
 		} else {
-			errCh <- srv.ListenAndServe()
+			report(srv.ListenAndServe())
 		}
 	}()
 
@@ -410,9 +481,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		go func() {
 			if s.Cfg.TLSCert != "" {
-				errCh <- portalSrv.ListenAndServeTLS(s.Cfg.TLSCert, s.Cfg.TLSKey)
+				report(portalSrv.ListenAndServeTLS(s.Cfg.TLSCert, s.Cfg.TLSKey))
 			} else {
-				errCh <- portalSrv.ListenAndServe()
+				report(portalSrv.ListenAndServe())
 			}
 		}()
 		s.Log.Info("portal listening", "addr", s.Cfg.PortalListen, "tls", s.Cfg.TLSCert != "")
@@ -426,11 +497,58 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.Portal != nil && s.Cfg.PortalListen == "" && s.Cfg.MTLSCA != "" {
 		s.Log.Warn("the portal is mounted on the mTLS-protected API listener: browsers cannot present a client certificate, so citizens will be refused - set SUNDER_PORTAL_LISTEN")
 	}
+	// The installed base: rows that predate the clients_unlock_needs_expiry
+	// constraint (migration 0037), which is NOT VALID precisely so an
+	// upgrade does not refuse to start on a state the bug created (AUTHZ-2).
+	if s.Store != nil {
+		var standing []string
+		if rows, err := s.Store.Pool.Query(ctx,
+			`SELECT client_id FROM clients
+			  WHERE 'admin.unlock' = ANY(allowed_actions) AND credential_expires_at IS NULL
+			  ORDER BY client_id`); err == nil {
+			for rows.Next() {
+				var id string
+				if rows.Scan(&id) == nil {
+					standing = append(standing, id)
+				}
+			}
+			rows.Close()
+		}
+		if len(standing) > 0 {
+			s.Log.Warn("client(s) hold admin.unlock on a NON-EXPIRING credential - a standing unlock grant makes the bulk-read second factor a permanent self-service dump; give them an expiry with `sunder client rotate-secret -id <id> -ttl 90d`",
+				"clients", strings.Join(standing, ","))
+		}
+	}
+	if s.Cfg.MetricsToken == "" {
+		// The series carry client ids and per-client volumes -
+		// sunder_lookup_misses_total{client=...} IS the enumeration
+		// detector's own signal, so an enumerating client that can scrape
+		// it paces itself under the threshold that only ever logs. The
+		// startup-warning block covered TLS, the portal and SharesPublic
+		// and said nothing about this (AUTHZ-6).
+		s.Log.Warn("/metrics is served WITHOUT a token on the API listener: its series name every client and their per-client volumes, including the enumeration-detector counter - set SUNDER_METRICS_TOKEN, or keep the listener off the network a scraper-less caller can reach")
+	}
+	if s.Cfg.FilesStorage == "local" {
+		// The file vault's `local` driver writes ciphertext to a
+		// PER-PROCESS directory while its metadata and wrapped DEK live in
+		// the shared database - so a second replica answers a download with
+		// 200, the recorded Content-Length and a body it does not have. The
+		// docs called Sunder stateless (true of everything else) and said
+		// nothing about this (DOCS-4).
+		s.Log.Warn("SUNDER_FILES_STORAGE=local keeps file ciphertext in a per-process directory: this is SINGLE-INSTANCE ONLY - a second replica cannot read files uploaded through the first, and `retention run` on one replica garbage-collects only its own objects. Use SUNDER_FILES_STORAGE=s3 for more than one replica",
+			"dir", s.Cfg.FilesDir)
+		s.Log.Warn("SUNDER_FILES_STORAGE=local is also a SEPARATE BACKUP UNIT: a database-and-keystore restore leaves every files row intact with its DEK and no object behind it (docs/RUNBOOK-BACKUP-DR.md)",
+			"dir", s.Cfg.FilesDir)
+	}
 	if s.Cfg.SharesPublic {
 		s.Log.Warn("SUNDER_SHARES_PUBLIC is on: GET /v1/shares/{uuid} answers WITHOUT any client credential (per-IP rate-limited, audited as \"public\") - every holder of a share UUID can read its fields until expiry or revocation")
 	}
 	s.Log.Info("listening", "addr", s.Cfg.Listen, "tls", s.Cfg.TLSCert != "",
 		"mtls", s.Cfg.MTLSCA != "", "portal", s.Portal != nil)
+
+	s.testServersMu.Lock()
+	s.apiServer, s.portalServer = srv, portalSrv
+	s.testServersMu.Unlock()
 
 	shutdown := func() error {
 		shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -441,6 +559,18 @@ func (s *Server) Run(ctx context.Context) error {
 				err = perr
 			}
 		}
+		// Drain the queue workers. Both settle on a detached context, so
+		// what this buys is that the process does not exit while a POST is
+		// still in flight - the delivery either completes and is recorded,
+		// or its claim is released, instead of waiting out the lease.
+		select {
+		case <-deliveryDone:
+		case <-shCtx.Done():
+			s.Log.Warn("delivery worker did not drain before shutdown deadline; claims will be reaped after SUNDER_WORKER_CLAIM_TTL")
+		}
+		if s.GDPR != nil {
+			s.GDPR.Drain()
+		}
 		return err
 	}
 	select {
@@ -450,6 +580,16 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = shutdown()
 		return err
 	}
+}
+
+// ServersForTest exposes the two constructed http.Servers so a test can
+// assert on their timeout sets. The portal is the UNAUTHENTICATED public
+// listener, and the only test that named its timeouts never looked at them
+// (TESTS-1); an accessor is what makes that assertable at all.
+func (s *Server) ServersForTest() (portal, api *http.Server) {
+	s.testServersMu.Lock()
+	defer s.testServersMu.Unlock()
+	return s.portalServer, s.apiServer
 }
 
 // startAuditSealing applies the configured sealing mode (P4.1). The mode
@@ -490,6 +630,19 @@ func (s *Server) startAuditSealing(ctx context.Context) error {
 		s.startUnsealedGauge(ctx)
 		if !s.Cfg.AuditSealExternal {
 			s.startBucketCloser(ctx)
+			// A low-frequency sealer runs in SYNC mode too. The drain above
+			// is point-in-time on state shared with every other replica: in
+			// a rolling async -> sync restart, replicas still on async keep
+			// inserting unsealed rows AFTER this process drained, and once
+			// the last async replica stops there is no sealer left in the
+			// fleet. Those rows are then stranded outside the chain
+			// indefinitely - `verify-audit` fails hard, /v1/admin/audit/verify
+			// answers ok:false, and the only cure is running `sunder sealer
+			// -once` under a DIFFERENT mode than the one configured
+			// (AUDIT-CHAIN-7). A tick that finds an empty backlog takes the
+			// lock, sees zero rows and commits: it costs nothing and makes
+			// the invariant self-healing regardless of restart order.
+			s.startSyncBacklogSealer(ctx)
 		}
 		return nil
 	}
@@ -597,8 +750,12 @@ func (s *Server) startUnsealedGauge(ctx context.Context) {
 	if s.Metrics == nil {
 		return
 	}
+	interval := s.gaugeInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -608,10 +765,64 @@ func (s *Server) startUnsealedGauge(ctx context.Context) {
 				if n, err := audit.UnsealedCount(ctx, s.Store.Pool); err == nil {
 					s.Metrics.Set("sunder_audit_unsealed_rows", float64(n))
 				}
+				// Key material this process created. Non-zero on anything
+				// other than a deliberate bootstrap means a lost keystore
+				// volume (OPS-CLI-CONFIG-1).
+				s.Metrics.Set("sunder_keystore_minted_total", float64(crypto.MintedKeys()))
+				// AES-GCM invocations per key version, so rotation can be
+				// driven by usage and not only by incident (CRYPTO-8).
+				for key, n := range crypto.SealCounts() {
+					s.Metrics.Set(fmt.Sprintf(`sunder_kek_seals_total{version=%q}`, key), float64(n))
+				}
+				// Claimed-but-unsettled erasure notifications. A value that
+				// does not return to zero means Article 19 notifications are
+				// stuck behind a dead worker (H1).
+				if s.GDPR != nil {
+					if sending, failed, err := service.ErasureQueueDepth(ctx, s.Store.Pool); err == nil {
+						s.Metrics.Set("sunder_erasure_events_sending", float64(sending))
+						s.Metrics.Set("sunder_erasure_events_failed", float64(failed))
+					}
+				}
 			}
 		}
 	}()
 }
+
+// startSyncBacklogSealer drains any rows that appear outside the chain while
+// this process is in sync mode. See the call site for why that can happen at
+// all.
+func (s *Server) startSyncBacklogSealer(ctx context.Context) {
+	interval := s.syncBacklogInterval
+	if interval <= 0 {
+		interval = syncBacklogSealInterval
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				n, err := audit.Drain(ctx, s.Store.Pool, s.sealBatch())
+				if err != nil {
+					if ctx.Err() == nil {
+						s.Log.Error("sync-mode backlog drain", "err", err.Error())
+					}
+					continue
+				}
+				if n > 0 {
+					s.Log.Warn("sealed rows that appeared outside the chain under sync sealing - another replica is still running in async mode",
+						"sealed", n)
+				}
+			}
+		}
+	}()
+}
+
+// syncBacklogSealInterval is deliberately slow: in a converged sync fleet
+// this finds nothing, every time.
+const syncBacklogSealInterval = 10 * time.Second
 
 func (s *Server) startBucketCloser(ctx context.Context) {
 	if audit.ReadsMode() != audit.ReadsBucketed {

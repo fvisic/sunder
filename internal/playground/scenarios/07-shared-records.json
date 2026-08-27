@@ -1,0 +1,167 @@
+{
+  "id": "shared-records",
+  "title": "Give a partner three fields, for three days, and take them back",
+  "summary": "A shared record is narrower than a pseudonym in every dimension: only the named fields, only until expiry, revocable at any moment - and a consent withdrawal revokes it for good, so a link that was handed out never quietly comes back.",
+  "doc": "concepts/shared-records.md",
+  "roles": [
+    {
+      "name": "vault",
+      "label": "CRM (share creator)",
+      "scope": "crm",
+      "actions": [
+        "contacts.register",
+        "attributes.read",
+        "shares.create",
+        "consent.manage"
+      ],
+      "purposes": [
+        "support"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "label": "A person with more fields than the partner should see",
+      "note": "The blob holds a tier, an IBAN and contact details. The partner needs one of them.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {
+        "email": "{{demo_email}}",
+        "phone": "{{demo_phone}}",
+        "name": "{{demo_name}}",
+        "attributes": {
+          "loyalty_tier": "gold",
+          "iban": "HR12 2360 0001",
+          "internal_note": "do not share"
+        }
+      },
+      "expect": 201,
+      "capture": {
+        "crm_cid": "cid"
+      }
+    },
+    {
+      "label": "Mint a share for exactly one field",
+      "note": "The share carries a purpose, and minting it requires the creator to be able to READ those fields itself - a share cannot leak what its creator may not see. The partner never gets a credential.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/shares",
+      "body": {
+        "cid": "{{crm_cid}}",
+        "fields": [
+          "loyalty_tier"
+        ],
+        "partner_label": "loyalty-partner",
+        "purpose": "support",
+        "ttl_seconds": 259200
+      },
+      "expect": 201,
+      "capture": {
+        "share_uuid": "uuid"
+      }
+    },
+    {
+      "label": "The partner reads the share",
+      "note": "One unguessable UUID, one field. Every fetch is audited with the partner label, so a leak is attributable to whoever was handed the link.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/shares/{{share_uuid}}",
+      "expect": 200
+    },
+    {
+      "label": "The person withdraws consent for that purpose",
+      "note": "Consent is re-checked at every fetch, not only when the share was minted - otherwise a link handed out a second before the withdrawal would keep working until it expired.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/consent",
+      "body": {
+        "cid": "{{crm_cid}}",
+        "purpose": "support",
+        "granted": false
+      },
+      "expect": 200
+    },
+    {
+      "label": "The same link stops answering",
+      "note": "Withdrawn, expired, revoked and never-existed all look identical from outside: one 404. The partner learns that their link no longer works, and nothing about why.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/shares/{{share_uuid}}",
+      "expect": 404
+    },
+    {
+      "label": "Consent restored - but the link does NOT come back",
+      "note": "The withdrawal did not mute the share, it REVOKED it. Re-granting consent restores the person's data flows in general, and deliberately does not resurrect a link that was already handed out: the partner has to be given a new one, which is a decision someone makes again.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/consent",
+      "body": {
+        "cid": "{{crm_cid}}",
+        "purpose": "support",
+        "granted": true
+      },
+      "expect": 200
+    },
+    {
+      "label": "Still 404 - revocation is not temporary",
+      "note": "This is the step worth pausing on. A share that came back to life by itself, because a consent flag flipped twice, would be a share nobody can reason about.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/shares/{{share_uuid}}",
+      "expect": 404
+    },
+    {
+      "label": "Mint a fresh share for the partner",
+      "note": "The ordinary way forward: a new UUID, a new expiry, a new decision on the audit chain.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/shares",
+      "body": {
+        "cid": "{{crm_cid}}",
+        "fields": [
+          "loyalty_tier"
+        ],
+        "partner_label": "loyalty-partner",
+        "purpose": "support",
+        "ttl_seconds": 259200
+      },
+      "expect": 201,
+      "capture": {
+        "share2_uuid": "uuid"
+      },
+      "assert": [
+        {
+          "kind": "differs",
+          "left": "share_uuid",
+          "right": "share2_uuid",
+          "message": "a replacement share is a new link, never the revoked one revived"
+        }
+      ]
+    },
+    {
+      "label": "The new link answers",
+      "note": "Same field, same purpose, different link - and the old one is still dead.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/shares/{{share2_uuid}}",
+      "expect": 200
+    },
+    {
+      "label": "Revoke it deliberately",
+      "note": "The ordinary end of a share: the partnership ends, the link dies, immediately - no waiting for the TTL.",
+      "actor": "vault",
+      "method": "DELETE",
+      "path": "/v1/shares/{{share2_uuid}}",
+      "expect": 200
+    },
+    {
+      "label": "And it stays dead",
+      "note": "Revocation is not a soft flag the reader may ignore: the fetch path checks it before it decrypts anything.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/shares/{{share2_uuid}}",
+      "expect": 404
+    }
+  ]
+}

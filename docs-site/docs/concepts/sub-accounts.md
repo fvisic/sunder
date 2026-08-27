@@ -72,6 +72,32 @@ curl -X POST "$SUNDER_URL/v1/dsr/erase" -H "Authorization: Bearer $DPO" \
     always reports the linked children and whether each was cascaded, so an
     erasure record can prove a child's data was left intact.
 
+### An interrupted cascade resumes, it does not half-finish
+
+A cascade is **one transaction per person, not one overall** - a single
+transaction spanning a large family would hold locks across every scope's
+blobs for its whole duration. The children are erased first and the parent
+last, and the plan (which children, which link types) is recorded durably
+inside the parent's own erasure transaction *before* any child is touched.
+
+So an interruption - a client timeout, a pod eviction, a lost connection -
+leaves an accurate record of what is still outstanding rather than a
+half-erased family nobody can reconstruct:
+
+```bash
+# What is still outstanding, per parent erasure:
+sunder dsr cascade-status
+
+# Re-issuing the IDENTICAL request resumes the outstanding children:
+curl -X POST "$SUNDER_URL/v1/dsr/erase" -H "Authorization: Bearer $DPO" \
+  -d '{"cid":"'$PARENT'","cascade":["guardian"]}'
+```
+
+Once everything in the plan is done, that same call answers **404** -
+deliberately indistinguishable from a cid that never existed, because a
+tombstone that answered differently would be an existence oracle for erased
+people.
+
 ## Security notes
 
 - Links live in the caller's scope only; both endpoints are resolved

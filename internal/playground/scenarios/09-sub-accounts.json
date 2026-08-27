@@ -1,0 +1,91 @@
+{
+  "id": "sub-accounts",
+  "title": "A guardian and a child, without joining them into one record",
+  "summary": "Sub-accounts link two people who are still two people: each keeps their own pseudonym, their own blob and their own rights. The link says how they relate, inside one scope, and it dies when either of them is erased.",
+  "doc": "concepts/sub-accounts.md",
+  "roles": [
+    {
+      "name": "vault",
+      "label": "Family accounts service",
+      "scope": "crm",
+      "actions": ["contacts.register", "attributes.read", "links.manage", "dsr.erase"],
+      "purposes": ["support"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "The guardian",
+      "note": "An ordinary person record - nothing about them says 'parent' yet.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {"email": "{{demo_email}}", "phone": "{{demo_phone}}", "name": "{{demo_name}}"},
+      "expect": 201,
+      "capture": {"parent_cid": "cid"}
+    },
+    {
+      "label": "The child, as their own person",
+      "note": "Deliberately NOT a field on the guardian's record. A child who becomes an adult must be able to keep their data and lose the link - which is impossible if they were only ever an attribute of someone else.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {"email": "child-{{demo_email}}", "name": "Child of {{demo_name}}"},
+      "expect": 201,
+      "capture": {"child_cid": "cid"},
+      "assert": [
+        {"kind": "differs", "left": "parent_cid", "right": "child_cid", "message": "guardian and child must be separate people with separate pseudonyms"}
+      ]
+    },
+    {
+      "label": "A link with a stated type",
+      "note": "guardian, member or owner - the relationship is named, not implied. Both ends must be in the caller's own scope: a link can never cross a scope boundary, or it would become the cross-system join key the whole design removes.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/links",
+      "body": {"parent_cid": "{{parent_cid}}", "child_cid": "{{child_cid}}", "link_type": "guardian"},
+      "expect": 201
+    },
+    {
+      "label": "A made-up relationship is refused",
+      "note": "The vocabulary is closed. 'overlord' is not a relationship the system can reason about, so it is not one it will store.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/links",
+      "body": {"parent_cid": "{{parent_cid}}", "child_cid": "{{child_cid}}", "link_type": "overlord"},
+      "expect": 400
+    },
+    {
+      "label": "List the guardian's links",
+      "note": "Each entry is the OTHER end's pseudonym in this scope, plus the type and the direction. This read is audited like every other read of a person.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{parent_cid}}/links",
+      "expect": 200
+    },
+    {
+      "label": "Erase the child",
+      "note": "One of the two people exercises Article 17. The other is untouched - that is the point of keeping them separate.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/dsr/erase",
+      "body": {"cid": "{{child_cid}}"},
+      "expect": 200
+    },
+    {
+      "label": "The link went with them",
+      "note": "A surviving link would keep leaking the erased person's pseudonym through the guardian's listing - and, once the child is a tombstone, nobody could remove it through the API any more. So erasure deletes links at both ends.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{parent_cid}}/links",
+      "expect": 200
+    },
+    {
+      "label": "The guardian is still here",
+      "note": "Erasing one person does not touch the other. Cascading to children is possible, but only when the caller asks for it explicitly.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{parent_cid}}/attributes/email?purpose=support",
+      "expect": 200
+    }
+  ]
+}

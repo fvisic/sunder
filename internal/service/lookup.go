@@ -137,7 +137,16 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 	if in.PhoneSuffix != "" {
 		by, primary = "phone_suffix", suffixToks
 	}
-	q := `SELECT DISTINCT pt.person_id FROM person_tokens pt WHERE pt.kind = $1 AND pt.token = ANY($2)`
+	// The persons join is the tombstone predicate: Lookup was the only
+	// cid-producing read path without one, relying entirely on erasure
+	// having deleted the token rows. Any path that re-creates a token row
+	// for an erased person (the rekey sweep did, GDPR-ERASURE-2) made the
+	// forgotten person searchable by e-mail, phone and name again, and the
+	// answer carries their stable pseudonym. Defence in depth: even a stray
+	// row cannot re-expose a tombstone.
+	q := `SELECT DISTINCT pt.person_id FROM person_tokens pt
+	       JOIN persons pe ON pe.id = pt.person_id AND pe.erased_at IS NULL
+	      WHERE pt.kind = $1 AND pt.token = ANY($2)`
 	args := []any{by, primary}
 	if in.PhoneSuffix != "" {
 		// Single-hit is decided WITHIN the caller's scope: suffixes

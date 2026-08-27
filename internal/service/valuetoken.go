@@ -93,8 +93,11 @@ func (v *ValueTokens) Tokenize(ctx context.Context, client *auth.Client, in Toke
 	if err != nil {
 		return "", err
 	}
+	// CID on the entry, not only in the row: without it the chained
+	// tokens.create is invisible to the Article 15 trail, which selects
+	// `WHERE cid = ANY(<the person's cids>)` (TOKENS-LOOKUP-7).
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
-		ClientID: client.ID, Action: "tokens.create",
+		ClientID: client.ID, Action: "tokens.create", CID: in.CID,
 		Detail: map[string]any{"type": in.Type, "unique": in.Unique},
 	}); err != nil {
 		return "", err
@@ -105,6 +108,26 @@ func (v *ValueTokens) Tokenize(ctx context.Context, client *auth.Client, in Toke
 	return token, nil
 }
 
+// valueAADCurrent is the AAD layout new rows are sealed under.
+const valueAADCurrent int16 = 2
+
+// valueAAD builds the associated data for a value token's ciphertext.
+//
+// aad_v 1 is the legacy layout, which named only the scope and the token.
+// value_tokens.cid became load-bearing for Article 17 in migration 0032, but
+// it stayed unauthenticated plaintext metadata that no read path checked - so
+// one `UPDATE value_tokens SET cid=NULL` hid the row from the erasure sweep
+// while the ciphertext still opened, and a completed, audited erasure left
+// the person's IBAN readable through the ordinary API (CRYPTO-4). aad_v 2
+// names the subject, so a repointed row fails to open instead of disclosing.
+// The domain byte differs so the two layouts cannot be confused.
+func valueAAD(aadV int16, scope, token, cid string) []byte {
+	if aadV < 2 {
+		return []byte("valtok\x00" + scope + "\x00" + token)
+	}
+	return []byte("valtok\x01" + scope + "\x00" + token + "\x00" + cid)
+}
+
 // Detokenize returns the sealed value and refreshes sliding expiry.
 func (v *ValueTokens) Detokenize(ctx context.Context, client *auth.Client, token string) (string, error) {
 	if !client.Can(auth.ActTokensRead) {
@@ -113,6 +136,8 @@ func (v *ValueTokens) Detokenize(ctx context.Context, client *auth.Client, token
 	var (
 		sealed         []byte
 		keyID, alg     string
+		cid            *string
+		aadV           int16
 		expiresFinal   *time.Time
 		slidingSeconds *int64
 		lastUsed       time.Time
@@ -121,11 +146,11 @@ func (v *ValueTokens) Detokenize(ctx context.Context, client *auth.Client, token
 	// app clock must not straddle the pruner's clock. A row that fails the
 	// live predicate is an indistinguishable miss.
 	err := v.Pool.QueryRow(ctx, `
-		SELECT ciphertext, key_id, alg, expires_final, sliding_seconds, last_used
+		SELECT ciphertext, key_id, alg, cid, aad_v, expires_final, sliding_seconds, last_used
 		  FROM value_tokens WHERE token=$1 AND scope=$2
 		    AND (expires_final IS NULL OR expires_final > now())
 		    AND (sliding_seconds IS NULL OR last_used + make_interval(secs => sliding_seconds) > now())`,
-		token, client.Scope).Scan(&sealed, &keyID, &alg, &expiresFinal, &slidingSeconds, &lastUsed)
+		token, client.Scope).Scan(&sealed, &keyID, &alg, &cid, &aadV, &expiresFinal, &slidingSeconds, &lastUsed)
 	if err == pgx.ErrNoRows {
 		return "", v.auditMiss(ctx, client)
 	}
@@ -133,14 +158,25 @@ func (v *ValueTokens) Detokenize(ctx context.Context, client *auth.Client, token
 		return "", err
 	}
 
+	boundCID := ""
+	if cid != nil {
+		boundCID = *cid
+	}
 	plain, err := v.Eng.Open(ctx, crypto.KeyPIIKEK+"/"+keyID, alg,
-		[]byte("valtok\x00"+client.Scope+"\x00"+token), sealed)
+		valueAAD(aadV, client.Scope, token, boundCID), sealed)
 	if err != nil {
 		return "", err
 	}
 	// Audit BEFORE release (fail closed), then refresh the sliding window.
+	//
+	// boundCID matters here: under the default bucketed posture ReadEvent
+	// upserts on (client_id, user_id, cid, action, hour), so without it
+	// every tokens.read in an hour collapsed into ONE row with cid='' -
+	// which the subject-access query can never match. A breach
+	// investigation could see a per-client count and not WHICH subjects
+	// were read (TOKENS-LOOKUP-7).
 	if err := audit.ReadEvent(ctx, v.Pool, audit.Entry{
-		ClientID: client.ID, Action: "tokens.read",
+		ClientID: client.ID, Action: "tokens.read", CID: boundCID,
 		Detail: map[string]any{"matched": true},
 	}); err != nil {
 		return "", fmt.Errorf("audit append: %w", err)
@@ -177,22 +213,25 @@ func (v *ValueTokens) Delete(ctx context.Context, client *auth.Client, token str
 	// RETURNING gives the audit record something to attribute: destroying
 	// the only copy of a sealed value must say WHAT was destroyed and whose
 	// mint it was, not land as an empty detail.
-	var createdBy *string
+	var createdBy, boundCID *string
 	err = tx.QueryRow(ctx,
-		`DELETE FROM value_tokens WHERE token=$1 AND scope=$2 RETURNING created_by`,
-		token, client.Scope).Scan(&createdBy)
+		`DELETE FROM value_tokens WHERE token=$1 AND scope=$2 RETURNING created_by, cid`,
+		token, client.Scope).Scan(&createdBy, &boundCID)
 	if err == pgx.ErrNoRows {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
-	minter := ""
+	minter, subject := "", ""
 	if createdBy != nil {
 		minter = *createdBy
 	}
+	if boundCID != nil {
+		subject = *boundCID
+	}
 	if err := audit.AppendTx(ctx, tx, audit.Entry{
-		ClientID: client.ID, Action: "tokens.delete",
+		ClientID: client.ID, Action: "tokens.delete", CID: subject,
 		Detail: map[string]any{"token": token, "created_by": minter}}); err != nil {
 		return err
 	}
@@ -360,7 +399,7 @@ func (v *ValueTokens) TokenizeBulk(ctx context.Context, client *auth.Client, ite
 // caller-supplied transaction. A token-PK collision retries inside a
 // savepoint so it cannot abort the surrounding batch.
 func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.Client, keyID string, in TokenizeInput) (string, error) {
-	tokenType, expiresFinal, uniqueHash, err := v.validateAndHash(ctx, client, keyID, in)
+	tokenType, expiresFinal, dk, err := v.validateAndHash(ctx, client, keyID, in)
 	if err != nil {
 		return "", err
 	}
@@ -382,7 +421,14 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 			return "", ErrNotFound
 		}
 		var live bool
-		err := tx.QueryRow(ctx, `
+		// The /*sunder:tokenize-lock*/ marker is load-bearing for
+		// TestS4_TokenizeRacingErasureCannotLandToken, which waits on
+		// pg_stat_activity for this exact statement to park on the row
+		// lock. Matching on "FOR UPDATE OF p" instead also matched the file
+		// vault's identical clause, so the barrier could be satisfied by the
+		// wrong query (TESTS-15). Do not remove it without updating that
+		// test.
+		err := tx.QueryRow(ctx, `/*sunder:tokenize-lock*/
 			SELECT NOT p.erased_at IS NOT NULL FROM cids c JOIN persons p ON p.id = c.person_id
 			 WHERE c.cid=$1 AND c.scope=$2 FOR UPDATE OF p`,
 			in.CID, client.Scope).Scan(&live)
@@ -405,14 +451,19 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 	cidKey := in.CID
 	if in.Unique {
 		var existing string
+		// = ANY(match): a hit under an OLDER key version is still a hit.
 		err := tx.QueryRow(ctx, `
 			SELECT token FROM value_tokens
-			 WHERE scope=$1 AND COALESCE(cid,'')=$2 AND unique_hash=$3
+			 WHERE scope=$1 AND COALESCE(cid,'')=$2 AND unique_hash = ANY($3)
 			   AND (expires_final IS NULL OR expires_final > now())
 			   AND (sliding_seconds IS NULL OR last_used + make_interval(secs => sliding_seconds) > now())`,
-			client.Scope, cidKey, uniqueHash).Scan(&existing)
+			client.Scope, cidKey, dk.match).Scan(&existing)
 		if err == nil {
-			if _, err := tx.Exec(ctx, `UPDATE value_tokens SET last_used=now() WHERE token=$1`, existing); err != nil {
+			// Converge the row onto the current key version on touch, so the
+			// rotation window closes itself for actively used tokens.
+			if _, err := tx.Exec(ctx,
+				`UPDATE value_tokens SET last_used=now(), unique_hash=$2, unique_key_version=$3 WHERE token=$1`,
+				existing, dk.write, dk.version); err != nil {
 				return "", err
 			}
 			return existing, nil
@@ -431,10 +482,10 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 		// letting our INSERT collide and return theirs.
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM value_tokens
-			 WHERE scope=$1 AND COALESCE(cid,'')=$2 AND unique_hash=$3
+			 WHERE scope=$1 AND COALESCE(cid,'')=$2 AND unique_hash = ANY($3)
 			   AND NOT ((expires_final IS NULL OR expires_final > now())
 			        AND (sliding_seconds IS NULL OR last_used + make_interval(secs => sliding_seconds) > now()))`,
-			client.Scope, cidKey, uniqueHash); err != nil {
+			client.Scope, cidKey, dk.match); err != nil {
 			return "", err
 		}
 		// Upgrade boundary: a live UNATTRIBUTED row for the same value may
@@ -446,11 +497,11 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 		if in.CID != "" {
 			var adopted string
 			err := tx.QueryRow(ctx, `
-				UPDATE value_tokens SET cid=$3, last_used=now()
-				 WHERE scope=$1 AND cid IS NULL AND unique_hash=$2
+				UPDATE value_tokens SET cid=$3, last_used=now(), unique_hash=$4, unique_key_version=$5
+				 WHERE scope=$1 AND cid IS NULL AND unique_hash = ANY($2)
 				   AND (expires_final IS NULL OR expires_final > now())
 				   AND (sliding_seconds IS NULL OR last_used + make_interval(secs => sliding_seconds) > now())
-				RETURNING token`, client.Scope, uniqueHash, in.CID).Scan(&adopted)
+				RETURNING token`, client.Scope, dk.match, in.CID, dk.write, dk.version).Scan(&adopted)
 			if err == nil {
 				return adopted, nil
 			}
@@ -465,7 +516,7 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 			return "", err
 		}
 		sealed, err := v.Eng.Seal(ctx, crypto.KeyPIIKEK+"/"+keyID, "aes256gcm",
-			[]byte("valtok\x00"+client.Scope+"\x00"+token), []byte(in.Value))
+			valueAAD(valueAADCurrent, client.Scope, token, in.CID), []byte(in.Value))
 		if err != nil {
 			return "", err
 		}
@@ -474,9 +525,9 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 			return "", err
 		}
 		_, err = sp.Exec(ctx, `
-			INSERT INTO value_tokens (token, scope, cid, token_type, ciphertext, key_id, alg, unique_hash, expires_final, sliding_seconds, created_by)
-			VALUES ($1,$2,NULLIF($3,''),$4,$5,$6,'aes256gcm',$7,$8,NULLIF($9,0),$10)`,
-			token, client.Scope, in.CID, tokenType, sealed, keyID, uniqueHash, expiresFinal, in.SlidingSeconds, client.ID)
+			INSERT INTO value_tokens (token, scope, cid, token_type, ciphertext, key_id, alg, unique_hash, expires_final, sliding_seconds, created_by, aad_v, unique_key_version)
+			VALUES ($1,$2,NULLIF($3,''),$4,$5,$6,'aes256gcm',$7,$8,NULLIF($9,0),$10,$11,NULLIF($12,''))`,
+			token, client.Scope, in.CID, tokenType, sealed, keyID, dk.write, expiresFinal, in.SlidingSeconds, client.ID, valueAADCurrent, dk.version)
 		if err == nil {
 			return token, sp.Commit(ctx)
 		}
@@ -494,10 +545,10 @@ func (v *ValueTokens) tokenizeInTx(ctx context.Context, tx pgx.Tx, client *auth.
 				var existing string
 				werr := tx.QueryRow(ctx, `
 					SELECT token FROM value_tokens
-					 WHERE scope=$1 AND COALESCE(cid,'')=$2 AND unique_hash=$3
+					 WHERE scope=$1 AND COALESCE(cid,'')=$2 AND unique_hash = ANY($3)
 					   AND (expires_final IS NULL OR expires_final > now())
 					   AND (sliding_seconds IS NULL OR last_used + make_interval(secs => sliding_seconds) > now())`,
-					client.Scope, cidKey, uniqueHash).Scan(&existing)
+					client.Scope, cidKey, dk.match).Scan(&existing)
 				if werr == nil {
 					return existing, nil
 				}
@@ -569,24 +620,85 @@ func (v *ValueTokens) ValidateInputs(items []TokenizeInput) error {
 	return nil
 }
 
-func (v *ValueTokens) validateAndHash(ctx context.Context, client *auth.Client, keyID string, in TokenizeInput) (tokenType string, expiresFinal *time.Time, uniqueHash []byte, err error) {
+// dedupKey is everything the unique-dedup slot needs: the hash new rows are
+// written with, the fully-qualified key version that produced it, and every
+// hash a pre-existing row for the same value could carry.
+//
+// Matching spans versions for the same reason identifier lookup does
+// (tokensAllVersions): a rotation must not break matching for the window in
+// which old and new rows coexist. The write-time-only "newest version"
+// discipline is what made `keys rotate -kind hmac-email` breed a second live
+// token for a value that already had one (CRYPTO-3).
+type dedupKey struct {
+	write   []byte
+	version string
+	match   [][]byte
+}
+
+// legacyUniqueInput is the pre-CRYPTO-3 derivation, keyed by hmac-email.
+// Recomputed only so rows written before the migration keep matching until
+// `keys rekey` converges them.
+func legacyUniqueInput(scope, tokenType, value string) []byte {
+	return []byte("valtok\x00" + scope + "\x00" + tokenType + "\x00" + value)
+}
+
+func uniqueInput(scope, tokenType, value string) []byte {
+	return []byte("valtok-uniq\x00" + scope + "\x00" + tokenType + "\x00" + value)
+}
+
+func (v *ValueTokens) dedupKeyFor(ctx context.Context, scope, tokenType, value string) (dedupKey, error) {
+	var dk dedupKey
+	newest, err := v.Ring.Newest(ctx, crypto.KeyHMACValue)
+	if err != nil {
+		return dk, err
+	}
+	dk.version = crypto.KeyHMACValue + "/" + newest
+	if dk.write, err = v.Eng.MAC(ctx, dk.version, uniqueInput(scope, tokenType, value)); err != nil {
+		return dk, err
+	}
+	dk.match = append(dk.match, dk.write)
+	// Every OTHER live version of the value key...
+	versions, err := v.Ring.Versions(ctx, crypto.KeyHMACValue)
+	if err != nil {
+		return dk, err
+	}
+	for _, ver := range versions {
+		if ver == newest {
+			continue
+		}
+		mac, err := v.Eng.MAC(ctx, crypto.KeyHMACValue+"/"+ver, uniqueInput(scope, tokenType, value))
+		if err != nil {
+			return dk, err
+		}
+		dk.match = append(dk.match, mac)
+	}
+	// ...plus the legacy hmac-email derivation, under every live version of
+	// that key, so pre-migration rows still deduplicate.
+	emailVersions, err := v.Ring.Versions(ctx, crypto.KeyHMACEmail)
+	if err != nil {
+		return dk, err
+	}
+	for _, ver := range emailVersions {
+		mac, err := v.Eng.MAC(ctx, crypto.KeyHMACEmail+"/"+ver, legacyUniqueInput(scope, tokenType, value))
+		if err != nil {
+			return dk, err
+		}
+		dk.match = append(dk.match, mac)
+	}
+	return dk, nil
+}
+
+func (v *ValueTokens) validateAndHash(ctx context.Context, client *auth.Client, keyID string, in TokenizeInput) (tokenType string, expiresFinal *time.Time, dk dedupKey, err error) {
 	tokenType, expiresFinal, err = validateShape(in)
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, dk, err
 	}
 	if in.Unique {
-		hmacV, herr := v.Ring.Newest(ctx, crypto.KeyHMACEmail)
-		if herr != nil {
-			return "", nil, nil, herr
+		if dk, err = v.dedupKeyFor(ctx, client.Scope, tokenType, in.Value); err != nil {
+			return "", nil, dedupKey{}, err
 		}
-		mac, merr := v.Eng.MAC(ctx, crypto.KeyHMACEmail+"/"+hmacV,
-			[]byte("valtok\x00"+client.Scope+"\x00"+tokenType+"\x00"+in.Value))
-		if merr != nil {
-			return "", nil, nil, merr
-		}
-		uniqueHash = mac
 	}
-	return tokenType, expiresFinal, uniqueHash, nil
+	return tokenType, expiresFinal, dk, nil
 }
 
 // DetokenizeBulk redeems up to bulkTokenLimit tokens. Misses come back as

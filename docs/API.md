@@ -220,8 +220,41 @@ privacy-officer client only. Returns every scope's data for the person
 (scope, CID, decrypted attributes, consents) plus the audit trail of who
 touched them. Audited.
 
+Each scope also carries the holdings that do **not** live in the attribute
+blob, because Article 15(1) is "what do you hold about me" and 15(1)(c) is
+"who did you disclose it to":
+
+| Field | What it answers | Contents |
+|---|---|---|
+| `value_tokens` | tokenized IBANs / PANs / national ids held for this person | token, type, scope, who minted it, when, last used, expiry - **never the value** |
+| `files` | files stored for this person | id, name, content type, size, timestamps - never the content |
+| `shares` | **recipients**: every disclosure to a named partner | uuid, `partner_label`, fields, purpose, who created it, timestamps, whether revoked |
+| `links` | relationships to other persons in the same scope | the other CID, link type, role |
+
+`shares` includes **revoked and expired** entries on purpose: the subject's
+question is who the data has been disclosed to, not who holds it right now.
+
+Reads of a cid-bound value token are attributed to that person's CID, so the
+returned `audit_trail` answers "who read my tokenized IBAN, and how often".
+
 ### POST /v1/dsr/erase - right to be forgotten (org-wide)
-Action: `dsr.erase`. Body `{"cid": "..."}`. In one transaction: every
+Action: `dsr.erase`. Body `{"cid": "...", "cascade": ["guardian"]}` -
+`cascade` is optional and names the link types (`guardian`, `member`,
+`owner`) whose linked children are erased along with this person (F7).
+Omitted, the children are only listed, never touched. The response is
+`{erasure_id, scopes, linked}`, where `linked[]` reports every child, its
+link type and whether it was cascaded.
+
+**A cascade is one transaction PER PERSON, not one overall.** The children
+are erased first and the parent last, and the plan is recorded durably
+inside the parent's own erasure transaction - so an interruption (a client
+timeout, a pod eviction) leaves an accurate record of what is outstanding.
+Re-issuing the identical request for the parent's cid RESUMES the
+outstanding children. Once everything is done the same call answers 404,
+indistinguishable from a cid that never existed. `sunder dsr cascade-status`
+lists any outstanding child erasures.
+
+For a single person, in one transaction: every
 scope's blob is wiped (with its version history), all search tokens
 deleted, value tokens bound to the person's CIDs deleted, shares, links and
 queued portal mail deleted, the person becomes a tombstone (client-side CID
@@ -229,11 +262,18 @@ references never break), and one erasure event per scope is queued. Events are d
 (`sunder webhook set -scope crm -url ...`) as JSON signed with
 `X-Sunder-Signature: hex(HMAC-SHA256(secret, body))`; a worker retries
 PENDING deliveries every minute (`sunder dsr events` shows the queue).
+Delivery is **at-least-once**: the worker commits its claim before the POST,
+so a receiver must be idempotent on `(scope, cid, erasure_id)`. A claim left
+behind by a killed worker is returned to the queue after
+`SUNDER_WORKER_CLAIM_TTL`; alert on the age of `SENDING` rows
+(`sunder_erasure_events_sending`) as well as on `FAILED`.
 Re-registering the same identifiers afterwards creates a brand-new person.
 
 ### GET /v1/dsr/export?cid=... - data portability (caller scope)
 Action: `dsr.export`. Machine-readable JSON of what the caller's scope
-holds: `{scope, cid, attributes, consents}`. Audited.
+holds: `{scope, cid, attributes, consents, value_tokens, files, shares,
+links}` - the same holdings sections the access answer carries, for the
+caller's scope only. Audited.
 
 **Grant sparingly**: export is a bulk read - it returns the whole
 caller-scope blob in one audited call, without per-attribute purpose or

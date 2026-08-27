@@ -906,3 +906,192 @@ func TestVersionsAndLinksListAudit(t *testing.T) {
 		}
 	}
 }
+
+// FILES-STORAGE-3: a storage PUT that lands but reports failure used to
+// leave ciphertext no code path could ever find - the reap defer was
+// registered AFTER the Put, so the early return skipped it, and RunFileGC
+// enumerates victims from `files` rows while the Driver interface has no
+// List. The s3 driver can fail over a stored object (a lost 200, a reset
+// after the body ACK, a deadline).
+func TestAmbiguousPutIsReaped(t *testing.T) {
+	e, f, client, cid := filesEnv(t)
+	ctx := context.Background()
+
+	// A driver whose Put stores the object and THEN reports failure.
+	amb := &ambiguousDriver{Driver: f.Store}
+	f.Store = amb
+
+	_, err := f.Upload(ctx, client, cid, "x.txt", "text/plain",
+		bytes.NewReader([]byte("hello")))
+	if err == nil {
+		t.Fatal("the upload must fail when the driver reports failure")
+	}
+	if amb.stored == "" {
+		t.Fatal("precondition: the driver should have stored the object")
+	}
+	// The object must have been reaped: nothing references it, and nothing
+	// ever could.
+	if _, gerr := amb.Driver.Get(ctx, amb.stored); gerr == nil {
+		t.Fatal("a PUT that landed but reported failure left unreferenced ciphertext behind")
+	}
+	var rows int
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM files`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("no files row should exist, got %d", rows)
+	}
+}
+
+type ambiguousDriver struct {
+	storage.Driver
+	stored string
+}
+
+func (d *ambiguousDriver) Put(ctx context.Context, key string, r io.Reader, size int64) error {
+	if err := d.Driver.Put(ctx, key, r, size); err != nil {
+		return err
+	}
+	d.stored = key
+	return errors.New("storage: ambiguous failure after the object landed")
+}
+
+// FILES-STORAGE-7: an object the driver cannot delete must fall to the BACK
+// of the sweep, not hold a slot in every future window. Without an order and
+// a demotion, enough poison rows starve everything queued behind them -
+// including files crypto-shredded by an Article 17 erasure - while the sweep
+// reports reaped=0 as a success.
+func TestFileGCDemotesUndeletableObjects(t *testing.T) {
+	e, f, client, cid := filesEnv(t)
+	ctx := context.Background()
+
+	poison, err := f.Upload(ctx, client, cid, "poison.txt", "text/plain",
+		bytes.NewReader([]byte("stuck")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	good, err := f.Upload(ctx, client, cid, "good.txt", "text/plain",
+		bytes.NewReader([]byte("collectable")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mark both for GC the way an EXPIRY does - Files.Delete deletes the
+	// object and the row inline on success, which is not the path the sweep
+	// exists for.
+	if _, err := e.admin.Pool.Exec(ctx,
+		`UPDATE files SET gc_at = now() - interval '1 minute'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// A driver that refuses to delete exactly one key, with an error that is
+	// NOT "already gone".
+	var poisonKey string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT storage_key FROM files WHERE id=$1`, poison.ID).Scan(&poisonKey); err != nil {
+		t.Fatal(err)
+	}
+	stubborn := &refusingDriver{Driver: f.Store, refuse: poisonKey}
+
+	reaped, err := service.RunFileGC(ctx, e.admin.Pool, stubborn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reaped != 1 {
+		t.Fatalf("the collectable file must still be reaped past the poison one, got %d", reaped)
+	}
+	var left int
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM files`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 1 {
+		t.Fatalf("only the undeletable row may remain, got %d", left)
+	}
+	// It was demoted, so a later sweep reaches whatever queued behind it.
+	var gcAt time.Time
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT gc_at FROM files WHERE id=$1`, poison.ID).Scan(&gcAt); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(gcAt) > time.Minute {
+		t.Fatal("a failed delete must re-stamp gc_at so oldest-first rotates the row to the back")
+	}
+	// Once the driver cooperates, it goes.
+	if _, err := service.RunFileGC(ctx, e.admin.Pool, f.Store); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM files`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatalf("%d row(s) survived a cooperating sweep", left)
+	}
+	_ = good
+}
+
+type refusingDriver struct {
+	storage.Driver
+	refuse string
+}
+
+func (d *refusingDriver) Delete(ctx context.Context, key string) error {
+	if key == d.refuse {
+		return errors.New("storage: delete forbidden by bucket policy")
+	}
+	return d.Driver.Delete(ctx, key)
+}
+
+// The file vault's failure branches, one denied table per subtest. Files are
+// the one data class whose loss is invisible (metadata survives in the
+// database), so every path that cannot complete must leave NO row claiming
+// an object exists.
+func TestFileVaultFailsClosedOnADeniedTable(t *testing.T) {
+	for _, table := range []string{"files", "person_record_keys", "audit"} {
+		t.Run(table, func(t *testing.T) {
+			e := newFaultEnv(t, table)
+			ctx := context.Background()
+			cid := e.register(t)
+			dir := t.TempDir()
+			drv, err := storage.Open(storage.Config{Kind: "local", Dir: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := &service.Files{Pool: e.svc.Pool, Eng: e.svc.PII.Engine(), Ring: e.svc.Ring,
+				Store: drv, Contacts: e.svc, MaxBytes: 1 << 20}
+			client := &auth.Client{ID: "crm", Scope: "crm",
+				AllowedActions:  []string{auth.ActFilesWrite, auth.ActFilesRead},
+				AllowedPurposes: []string{"support"}}
+
+			if _, err := f.Upload(ctx, client, cid, "x.txt", "text/plain",
+				bytes.NewReader([]byte("content"))); err == nil {
+				t.Fatalf("upload must fail closed when %s is unavailable", table)
+			}
+			// No row claims an object...
+			var rows int
+			if err := e.admin.Pool.QueryRow(ctx, `SELECT count(*) FROM files`).Scan(&rows); err != nil {
+				t.Fatal(err)
+			}
+			if rows != 0 {
+				t.Errorf("a failed upload left %d files row(s) behind", rows)
+			}
+			// ...and no orphan ciphertext survives in the store, which no
+			// sweep could ever find (FILES-STORAGE-3).
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var objects int
+			for _, ent := range entries {
+				if !ent.IsDir() {
+					objects++
+				}
+			}
+			if objects != 0 {
+				t.Errorf("a failed upload left %d unreferenced object(s) in the store", objects)
+			}
+			// The read paths answer honestly rather than serving something.
+			if _, err := f.List(ctx, client, cid, "support"); err == nil && table == "files" {
+				t.Error("list must fail when the metadata table is unavailable")
+			}
+		})
+	}
+}

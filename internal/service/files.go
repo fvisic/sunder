@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -40,6 +41,12 @@ import (
 // of a corrupted chunk. Per-upload memory is bounded by MaxBytes (a single-
 // PUT SigV4 body is buffered whole; see the note at the encrypt loop) and
 // total upload memory by MaxConcurrentUploads * MaxBytes.
+//
+// That is 1x the payload per upload, and it is a real bound only because the
+// s3 driver takes the already-materialised buffer instead of copying it into
+// a second one: io.Copy into a bytes.Buffer reallocates to ~2x at the end of
+// the read, which put ~4x the payload live at once and made the figure an
+// operator sizes containers from wrong by that factor (FILES-STORAGE-2).
 const fileChunkSize = 4 << 20
 
 // defaultUploadConcurrency bounds simultaneous uploads when the config knob
@@ -67,6 +74,18 @@ type Files struct {
 	uploadSem chan struct{}
 }
 
+// uploadSlotHookKey carries a callback the HTTP layer uses to re-arm the
+// connection's transport deadlines once the upload slot is granted. Queue
+// time would otherwise be charged against transfer time, so the failure got
+// worse exactly under load (FILES-STORAGE-5).
+type uploadSlotHookKey struct{}
+
+// WithUploadSlotHook attaches fn, called once the upload concurrency slot
+// has been acquired and before any file content is read.
+func WithUploadSlotHook(ctx context.Context, fn func()) context.Context {
+	return context.WithValue(ctx, uploadSlotHookKey{}, fn)
+}
+
 // acquireUpload blocks until an upload slot is free (or ctx is done), and
 // returns a release func. Excess uploads WAIT rather than all buffer at once.
 // The HTTP handler streams the multipart body (no ParseMultipartForm spool),
@@ -80,8 +99,14 @@ func (f *Files) acquireUpload(ctx context.Context) (func(), error) {
 		}
 		f.uploadSem = make(chan struct{}, n)
 	})
+	notifyAcquired := func() {
+		if fn, ok := ctx.Value(uploadSlotHookKey{}).(func()); ok && fn != nil {
+			fn()
+		}
+	}
 	select {
 	case f.uploadSem <- struct{}{}:
+		notifyAcquired()
 		return func() { <-f.uploadSem }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -234,18 +259,22 @@ func (f *Files) UploadWithExpiry(ctx context.Context, client *auth.Client, cid, 
 	if size == 0 {
 		return nil, fmt.Errorf("%w: empty file", ErrValidation)
 	}
-	if err := f.Store.Put(ctx, storageKey, &sealedBuf, int64(sealedBuf.Len())); err != nil {
-		return nil, fmt.Errorf("storage put: %w", err)
-	}
-	// From here the ciphertext is in storage but no row references it yet.
-	// Every path that does not end in a committed row must reap the object,
-	// or RunFileGC (which reaps only keys it can find via a files row) can
-	// never get to it (H9). One defer covers ALL such paths - the tombstone
-	// re-check, the INSERT, the audit append and the commit itself. The reap
-	// must NOT ride the request context: the commonest late failure IS that
-	// context dying (client disconnect, deadline), and both drivers
-	// short-circuit on a dead context - a reap under ctx would be a silent
-	// no-op exactly when it is needed (F3).
+	// The reap defer is registered BEFORE the Put, not after it.
+	//
+	// Once the PUT is in flight the ciphertext may be durable even when the
+	// call reports failure: the s3 driver sends the whole body, then a lost
+	// 200, a reset after the body ACK or a deadline yields an error over a
+	// stored object. Registering the defer after the Put meant that early
+	// `return` never reaped, leaving ciphertext no code path could ever find
+	// - RunFileGC enumerates victims from `files` rows, and the Driver
+	// interface has no List (FILES-STORAGE-3).
+	//
+	// Every path that does not end in a committed row now reaps: the PUT
+	// itself, the tombstone re-check, the INSERT, the audit append and the
+	// commit (H9). The reap must NOT ride the request context: the commonest
+	// late failure IS that context dying (client disconnect, deadline), and
+	// both drivers short-circuit on a dead context - a reap under ctx would
+	// be a silent no-op exactly when it is needed (F3).
 	committed := false
 	defer func() {
 		if !committed {
@@ -254,6 +283,9 @@ func (f *Files) UploadWithExpiry(ctx context.Context, client *auth.Client, cid, 
 			_ = f.Store.Delete(reapCtx, storageKey)
 		}
 	}()
+	if err := f.Store.Put(ctx, storageKey, &sealedBuf, int64(sealedBuf.Len())); err != nil {
+		return nil, fmt.Errorf("storage put: %w", err)
+	}
 
 	// Wrap the DEK under the record key, bound to this file id.
 	dekWrapped := gcmSeal(recordKey, dekAAD(fileID, cid), dek)
@@ -495,7 +527,15 @@ func RunFileGC(ctx context.Context, pool *pgxpool.Pool, store storage.Driver) (i
 		 WHERE gc_at IS NULL AND expires_at IS NOT NULL AND expires_at < now()`); err != nil {
 		return 0, err
 	}
-	rows, err := pool.Query(ctx, `SELECT id, storage_key FROM files WHERE gc_at IS NOT NULL LIMIT 1000`)
+	// ORDER BY gc_at, and re-stamp gc_at on failure below. Without an order
+	// the fixed window could refill with the same permanently-undeletable
+	// rows every sweep - a bucket policy that 403s DeleteObject, a directory
+	// that lost write permission - and starve everything queued behind them,
+	// including files crypto-shredded by an Article 17 erasure, while
+	// reporting reaped=0 as a success (FILES-STORAGE-7). The partial index
+	// files_gc_idx already supports the order.
+	rows, err := pool.Query(ctx,
+		`SELECT id, storage_key FROM files WHERE gc_at IS NOT NULL ORDER BY gc_at LIMIT 1000`)
 	if err != nil {
 		return 0, err
 	}
@@ -513,15 +553,29 @@ func RunFileGC(ctx context.Context, pool *pgxpool.Pool, store storage.Driver) (i
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-	var reaped int64
+	var reaped, skipped int64
 	for _, v := range victims {
 		if err := store.Delete(ctx, v.key); err != nil && !storage.IsNotExist(err) {
-			continue // transient: the next sweep retries
+			// Transient OR permanent - we cannot tell. Re-stamp gc_at so
+			// oldest-first rotates this row to the back instead of letting
+			// it hold a slot in every future window.
+			skipped++
+			if _, uerr := pool.Exec(ctx,
+				`UPDATE files SET gc_at = now() WHERE id=$1`, v.id); uerr != nil {
+				return reaped, uerr
+			}
+			continue
 		}
 		if _, err := pool.Exec(ctx, `DELETE FROM files WHERE id=$1`, v.id); err != nil {
 			return reaped, err
 		}
 		reaped++
+	}
+	if skipped > 0 {
+		// A sweep that deleted nothing because everything failed is not a
+		// success, and `reaped` alone cannot say so.
+		slog.Warn("file GC could not delete some objects - they are re-queued at the back of the sweep; check the storage driver's delete permissions",
+			"skipped", skipped, "reaped", reaped)
 	}
 	return reaped, nil
 }

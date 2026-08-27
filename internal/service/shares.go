@@ -87,6 +87,17 @@ func (s *Shares) Create(ctx context.Context, client *auth.Client, in ShareInput)
 		return "", time.Time{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Liveness re-checked INSIDE the transaction, under erasePerson's own
+	// row locks. personForClientCID above ran on the pool, and between it
+	// and this INSERT sit a consent read and a BEGIN - an erasure landing
+	// there ran deleteSharesForCID against a row that did not exist yet, so
+	// a live, fetchable share carrying the forgotten person's pseudonym,
+	// partner label, field names and purpose survived for up to 90 days
+	// (GDPR-ERASURE-5). deleteSharesForCID deletes rather than revokes
+	// precisely so no such row can linger.
+	if _, err := lockPersonRows(ctx, tx, in.CID); err != nil {
+		return "", time.Time{}, err
+	}
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO shared_records (uuid, cid, scope, fields, partner_label, expires_at, created_by, purpose)
 		VALUES ($1,$2,$3,$4,$5, now() + make_interval(secs => $6), $7, $8) RETURNING expires_at`,
@@ -114,9 +125,14 @@ func (s *Shares) Fetch(ctx context.Context, actor, uuid string) (map[string]stri
 		cid, scope, partner, purpose string
 		fields                       []string
 	)
+	// The persons join is defence in depth: a share row that outlived its
+	// subject's erasure - by the race above, or by any future path - answers
+	// 404 like an absent one instead of 200 with the erased person's data.
 	err := s.Pool.QueryRow(ctx, `
-		SELECT cid, scope, fields, partner_label, purpose FROM shared_records
-		 WHERE uuid=$1 AND revoked_at IS NULL AND expires_at > now()`,
+		SELECT sr.cid, sr.scope, sr.fields, sr.partner_label, sr.purpose FROM shared_records sr
+		  JOIN cids c ON c.cid = sr.cid
+		  JOIN persons p ON p.id = c.person_id AND p.erased_at IS NULL
+		 WHERE sr.uuid=$1 AND sr.revoked_at IS NULL AND sr.expires_at > now()`,
 		uuid).Scan(&cid, &scope, &fields, &partner, &purpose)
 	if err == pgx.ErrNoRows {
 		// A miss (absent, expired or revoked) is audited and indistinguishable.

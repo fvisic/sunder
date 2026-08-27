@@ -89,9 +89,12 @@ type Entry struct {
 	// minimum about employees. It arrives as the "user_id" body field
 	// (POST routes) or the X-Sunder-User-Id header (GET routes) and is
 	// CLIENT-ASSERTED - Sunder cannot verify it. Stored as a real,
-	// queryable column on audit rows and as a bucket key column;
-	// deliberately NOT part of canonical() - every pre-existing chain must
-	// keep verifying - so the append-only trigger, not the hash, pins it.
+	// queryable column on audit rows and as a bucket key column, and PART
+	// OF THE HASHED TUPLE for hash_v >= 2 (see canonical and hashV2): it
+	// was the one audited field a database attacker could edit without
+	// tripping verification. Rows sealed under v1 keep the v1 tuple
+	// forever - a sealed chain cannot retroactively cover a new field - and
+	// there the append-only trigger alone pins it.
 	UserID string
 }
 
@@ -138,9 +141,17 @@ type querier interface {
 // Both modes and the sealer read the head through this one function: the
 // old `ORDER BY seq DESC` head becomes wrong the moment unsealed rows can
 // exist, because the newest row by seq may not be in the chain yet.
+// The chain_seq IS NOT NULL predicate is not redundant with the
+// audit_seal_consistent CHECK (migration 0036): a row that predates the
+// migration, or one written while it was disabled, must degrade the VERDICT
+// and never the machinery. ORDER BY chain_seq DESC is NULLS FIRST by
+// default, so one such row sorted itself to the head and every consumer -
+// sync AppendTx, the sealer, Head, anchoring - failed on "cannot scan NULL
+// into *int64", permanently and unrepairably (AUDIT-CHAIN-1).
 func sealedHead(ctx context.Context, q querier) (hash string, chainSeq int64, err error) {
 	err = q.QueryRow(ctx,
-		`SELECT hash, chain_seq FROM audit WHERE hash IS NOT NULL ORDER BY chain_seq DESC LIMIT 1`,
+		`SELECT hash, chain_seq FROM audit WHERE hash IS NOT NULL AND chain_seq IS NOT NULL
+		  ORDER BY chain_seq DESC LIMIT 1`,
 	).Scan(&hash, &chainSeq)
 	if err == pgx.ErrNoRows {
 		return "", 0, nil
@@ -374,16 +385,39 @@ func UnsealedCount(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 	return n, err
 }
 
+// OldestUnsealed returns the age of the oldest row that has not entered the
+// chain, or 0 when everything is sealed. It keys off db_ts (the DATABASE
+// clock, as the sealer's own age filter does), so an application clock skew
+// cannot make a stalled sealer look healthy.
+func OldestUnsealed(ctx context.Context, pool *pgxpool.Pool) (time.Duration, error) {
+	var secs *float64
+	if err := pool.QueryRow(ctx,
+		`SELECT EXTRACT(EPOCH FROM (now() - min(COALESCE(db_ts, ts)))) FROM audit WHERE hash IS NULL`).Scan(&secs); err != nil {
+		return 0, err
+	}
+	if secs == nil {
+		return 0, nil
+	}
+	return time.Duration(*secs * float64(time.Second)), nil
+}
+
 // Verify recomputes the whole sealed chain and returns the first broken
 // chain position, or 0 if the chain is intact. Unsealed rows are pending,
 // not broken: they are reported in pending and never counted as a failure
 // here - the alarm for a stalled sealer is the unsealed-rows gauge, and
 // the append-only trigger still protects pending rows from edits.
 func Verify(ctx context.Context, pool *pgxpool.Pool) (brokenSeq int64, reason string, pending int64, err error) {
+	// A row with a hash and a NULL chain_seq cannot be produced by any code
+	// path and is refused by audit_seal_consistent, but one that predates
+	// that constraint must be reported as a BREAK, not returned as a scan
+	// error: an error here becomes HTTP 500 on /v1/admin/audit/verify and a
+	// non-zero exit with no verdict from `sunder verify-audit`, which is
+	// exactly the "verification machinery is down" state a forger wants
+	// (AUDIT-CHAIN-1). ORDER BY puts it first, so it is reported first.
 	rows, err := pool.Query(ctx,
 		`SELECT chain_seq, seq, ts, COALESCE(client_id,''), action, COALESCE(cid,''),
 		        COALESCE(detail,'null'), COALESCE(prev_hash,''), hash, COALESCE(user_id,''), hash_v
-		 FROM audit WHERE hash IS NOT NULL ORDER BY chain_seq`)
+		 FROM audit WHERE hash IS NOT NULL ORDER BY chain_seq NULLS FIRST`)
 	if err != nil {
 		return 0, "", 0, err
 	}
@@ -391,13 +425,18 @@ func Verify(ctx context.Context, pool *pgxpool.Pool) (brokenSeq int64, reason st
 	prev := ""
 	var expect int64
 	for rows.Next() {
-		var chainSeq, seq int64
+		var chainSeqNull *int64
+		var seq int64
 		var ts time.Time
 		var clientID, action, cid, detail, prevHash, hash, userID string
 		var hashV int16
-		if err := rows.Scan(&chainSeq, &seq, &ts, &clientID, &action, &cid, &detail, &prevHash, &hash, &userID, &hashV); err != nil {
+		if err := rows.Scan(&chainSeqNull, &seq, &ts, &clientID, &action, &cid, &detail, &prevHash, &hash, &userID, &hashV); err != nil {
 			return 0, "", 0, err
 		}
+		if chainSeqNull == nil {
+			return -1, fmt.Sprintf("sealed row seq=%d has a hash but no chain_seq (forged insert)", seq), 0, nil
+		}
+		chainSeq := *chainSeqNull
 		expect++
 		if chainSeq != expect {
 			// chain_seq is assigned densely from 1; a gap means a sealed
@@ -477,4 +516,106 @@ func Tail(ctx context.Context, pool *pgxpool.Pool, limit int) ([]ChainRow, error
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// Report is the complete verification verdict over every attestation
+// mechanism the chain has: the per-record hash chain, and the hourly digests
+// that attest read events under SUNDER_AUDIT_READS=bucketed.
+//
+// It exists so the CLI and the HTTP endpoint cannot drift apart. They did:
+// `sunder verify-audit` checked read buckets and the endpoint did not, so
+// the surface most likely to be wired to alerting answered ok:true while the
+// CLI reported the read log - where lookup, attributes.read, files.read,
+// shares.fetch, tokens.read and versions live - as tampered (AUDIT-CHAIN-3).
+type Report struct {
+	OK             bool   `json:"ok"`
+	Reason         string `json:"reason,omitempty"`
+	BrokenChainSeq int64  `json:"broken_chain_seq,omitempty"`
+	BadHour        string `json:"bad_hour,omitempty"`
+	Pending        int64  `json:"pending"`
+	PendingHours   int64  `json:"pending_hours"`
+	// OldestPendingSeconds is the age of the oldest row outside the chain.
+	// Under async sealing a backlog is benign only if it is BOUNDED and
+	// RECENT; a growing one is the stalled-sealer incident the threat model
+	// describes, and every shipped detection path used to miss it
+	// (OPS-CLI-CONFIG-8).
+	OldestPendingSeconds float64 `json:"oldest_pending_seconds"`
+	Sealing              string  `json:"sealing"`
+	Reads                string  `json:"reads"`
+}
+
+// DefaultStaleUnsealed is how old the oldest unchained row may get before
+// verification calls it a failure under async sealing. Generous relative to
+// the default seal cadence (200ms interval, 2s delay): this is the "the
+// sealer is gone" threshold, not a latency SLO.
+const DefaultStaleUnsealed = 15 * time.Minute
+
+// VerifyAll runs every check that does not need external material (anchor
+// tokens need a CA bundle and an export directory, so they stay with the
+// CLI, which has both). A broken chain is a VERDICT, never an error: an
+// error here would answer HTTP 500 and exit non-zero with no reason, which
+// is indistinguishable from the verifier itself being broken.
+func VerifyAll(ctx context.Context, pool *pgxpool.Pool) (Report, error) {
+	rep := Report{OK: true, Sealing: Mode(), Reads: ReadsMode()}
+	broken, reason, pending, err := Verify(ctx, pool)
+	if err != nil {
+		return rep, err
+	}
+	rep.Pending = pending
+	if broken != 0 {
+		rep.OK, rep.BrokenChainSeq, rep.Reason = false, broken, reason
+		return rep, nil
+	}
+	badHour, bucketReason, pendingHours, err := VerifyReadBuckets(ctx, pool)
+	if err != nil {
+		return rep, err
+	}
+	rep.PendingHours = pendingHours
+	if badHour != "" {
+		rep.OK, rep.BadHour, rep.Reason = false, badHour, bucketReason
+		return rep, nil
+	}
+	// Under sync sealing a backlog cannot be in-flight work: sync seals at
+	// insert. Rows pending there are stranded OUTSIDE the chain.
+	if Mode() == ModeSync && pending > 0 {
+		rep.OK = false
+		rep.Reason = fmt.Sprintf("%d unsealed row(s) under sync sealing: outside the chain, "+
+			"and they will not seal on their own - drain them with `sunder sealer -once` "+
+			"under SUNDER_AUDIT_SEALING=async", pending)
+		return rep, nil
+	}
+	// Under async sealing a backlog is normal - a STALE one is not. The
+	// hard failure used to be gated on sync mode alone, so the daily
+	// verify-audit CronJob exited 0 with an unbounded and growing async
+	// backlog: every shipped detection path reported healthy while tamper
+	// evidence was absent for everything written since the sealer stopped.
+	oldest, err := OldestUnsealed(ctx, pool)
+	if err != nil {
+		return rep, err
+	}
+	rep.OldestPendingSeconds = oldest.Seconds()
+	if pending > 0 && oldest > StaleUnsealedBound() {
+		rep.OK = false
+		rep.Reason = fmt.Sprintf("%d unsealed row(s), oldest %s outside the chain (limit %s): "+
+			"the sealer is not making progress - check the `sunder sealer` process (or "+
+			"SUNDER_AUDIT_SEAL_EXTERNAL) and the sunder_audit_unsealed_rows gauge",
+			pending, oldest.Truncate(time.Second), StaleUnsealedBound())
+	}
+	return rep, nil
+}
+
+// staleUnsealed is the configurable bound behind StaleUnsealedBound.
+var staleUnsealed atomic.Int64
+
+// SetStaleUnsealedBound overrides how old the oldest unchained row may get
+// before verification fails. Zero restores the default. Wired from
+// SUNDER_AUDIT_STALE_UNSEALED.
+func SetStaleUnsealedBound(d time.Duration) { staleUnsealed.Store(int64(d)) }
+
+// StaleUnsealedBound reports the active bound.
+func StaleUnsealedBound() time.Duration {
+	if d := staleUnsealed.Load(); d > 0 {
+		return time.Duration(d)
+	}
+	return DefaultStaleUnsealed
 }
