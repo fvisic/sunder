@@ -220,6 +220,24 @@ jobs:
           docker compose -f deploy/docker-compose.yml \
                          -f deploy/docker-compose.playground.yml logs --tail=100 seed playground deliver
 
+  cold-boot:
+    # The conditions a customer's FIRST deployment meets and nothing else
+    # does: an empty database, an empty keystore, and two processes starting
+    # together. The migration race that crash-looped the whole stack was
+    # found by accident, because one leg happened to boot that way - this
+    # makes it deliberate. Every scenario tears down with `down -v`, so a
+    # stack restarted onto existing data can never mask a cold-boot bug.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cold-boot and multi-replica scenarios
+        run: ./ops/coldboot-scenarios.sh
+      - name: Stack logs on failure
+        if: failure()
+        run: |
+          docker compose -f deploy/docker-compose.yml \
+                         -f deploy/docker-compose.playground.yml logs --tail=80 || true
+
   docs-site:
     runs-on: ubuntu-latest
     steps:

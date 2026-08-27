@@ -70,19 +70,35 @@ crash-safe and *not tested* that way.
 - Exit criterion: for each kill point, a named test stating the invariant it
   protects, and a documented recovery path in the runbook.
 
-### 7.3 Cold-boot and multi-replica scenarios in CI
+### 7.3 Cold-boot and multi-replica scenarios in CI - STARTED
 
 The migration race was found because one CI leg happened to boot two
-processes against an empty volume. That should be a deliberate test, not an
-accident.
+processes against an empty volume. That is now deliberate:
+`ops/coldboot-scenarios.sh` runs as its own CI job, and every scenario tears
+down with `down -v` so a stack restarted onto existing data can never mask a
+cold-boot bug.
 
-- Scenarios: two replicas from an empty database and an empty keystore; a
-  key rotation while traffic runs; sealer failover with
-  `SUNDER_AUDIT_SEAL_EXTERNAL=true`; a replica joining mid-rekey; a rolling
-  restart across a sealing-mode change.
-- Exit criterion: each scenario is a compose or kind-based CI job that fails
-  loudly, and each has an entry in the operations runbook describing what an
-  operator sees when it goes wrong.
+Shipped (4 scenarios, all green):
+
+| Scenario | Invariant asserted |
+|---|---|
+| two processes, empty database, empty keystore | nothing crash-loops; exactly one row per migration |
+| a second replica joins and shares the keystore | 12/12 lookups resolve across both - no replica re-minted key material |
+| a key rotation while lookups run | 200/200 lookups stay 200 throughout |
+| a 20-event burst under the sealer | `verify-audit` reports no break |
+
+Documented with sequence diagrams in
+`docs-site/docs/admin/multi-replica.md`, including what an operator SEES when
+each goes wrong and how to recover.
+
+Still to do:
+
+- a replica joining mid-rekey (the sweep and a new writer on the same rows)
+- a rolling restart across a sealing-mode change (`async` -> `sync` with the
+  fleet up, which the docs say must not be done - the test should prove the
+  failure is visible rather than silent)
+- the same set on Kubernetes (kind), not only compose: probes, ordering and
+  the startupProbe budget only exist there.
 
 ### 7.4 Scale re-measurement on the v0.5.0 build
 
