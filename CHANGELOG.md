@@ -196,6 +196,30 @@ fixes generalise an existing guard rather than invent one.
 `SUNDER_API_CLIENT_IP_HEADER`, `SUNDER_SEALER_HEALTH_ADDR`. Booleans now
 accept `true/false`, `1/0`, `yes/no`, `on/off` and REFUSE anything else.
 
+### The rekey sweep was unusable at scale (found by Phase 7.4)
+`sunder keys rekey` paginated with `id::text > $1 ORDER BY id::text`. Casting
+the uuid makes `persons_pkey` unusable, so **every batch became a parallel
+sequential scan of the whole table plus a top-N sort**. Measured on the
+26.9M-contact dataset:
+
+| | `id::text` | `id` |
+|---|---|---|
+| plan | Parallel Seq Scan + Sort 26.9M | Index Scan `persons_pkey` |
+| shared buffers per batch | 172,867 | 513 |
+| execution | - | 5.2 ms |
+
+At `-batch 500` that is 53,842 batches; one sweep recorded **6.3 billion**
+sequential tuple reads from `pg_stat_user_tables`, ran past 21 minutes
+without finishing, and held its pool connections in `idle in transaction`
+long enough that concurrent registrations timed out at 30 seconds.
+
+Nothing about the sweep's RESULT was wrong, which is why every functional
+test passed: it is a query-plan defect, invisible on a dataset small enough
+to scan. Key rotation is a security operation - an operator whose response to
+a suspected key compromise is unusable at their data size does not have that
+option. `TestRekeyPaginationUsesThePrimaryKeyIndex` asserts on the plan's
+sort key, so re-introducing the cast fails the build.
+
 ### Phase 7 groundwork
 - **Cold-boot and multi-replica scenarios** run as their own CI job
   (`ops/coldboot-scenarios.sh`): two processes migrating one empty database,

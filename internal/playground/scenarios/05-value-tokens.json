@@ -1,0 +1,112 @@
+{
+  "id": "value-tokens",
+  "title": "Tokenize a value, and keep the bulk door shut",
+  "summary": "An IBAN or a card number your systems must keep somewhere becomes an opaque token; the value itself lives sealed in the vault. The interesting part is not the swap - it is what the vault refuses: bulk redemption without a deliberate, single-use unlock.",
+  "doc": "concepts/value-tokenization.md",
+  "roles": [
+    {
+      "name": "vault",
+      "label": "Payments service (value vault)",
+      "scope": "crm",
+      "actions": ["contacts.register", "attributes.read", "tokens.create", "tokens.read", "tokens.delete", "admin.unlock"],
+      "purposes": ["support", "bulk-tokens"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "A person to attach the value to",
+      "note": "A token can be bound to a person. That binding is what makes it die when they exercise Article 17 - an unbound token would outlive them.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {"email": "{{demo_email}}", "phone": "{{demo_phone}}", "name": "{{demo_name}}"},
+      "expect": 201,
+      "capture": {"crm_cid": "cid"}
+    },
+    {
+      "label": "Swap the IBAN for a token",
+      "note": "The value goes in sealed under the PII KEK and scope-bound. What comes back is opaque: it carries no part of the input, so a stolen token tells the thief nothing and works in no other tenant.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/tokens",
+      "body": {"value": "HR12 2360 0001 1010 0000 5", "cid": "{{crm_cid}}", "unique": true},
+      "expect": 201,
+      "capture": {"iban_token": "token"}
+    },
+    {
+      "label": "The same value returns the same token",
+      "note": "Dedup is a keyed HMAC of the value, never the value. Without it every write would breed a new alias for the same IBAN, and there would be no way to answer 'is this the account we already know'.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/tokens",
+      "body": {"value": "HR12 2360 0001 1010 0000 5", "cid": "{{crm_cid}}", "unique": true},
+      "expect": 201,
+      "capture": {"iban_token_again": "token"},
+      "assert": [
+        {"kind": "equals", "left": "iban_token", "right": "iban_token_again", "message": "the same value must dedup to the same token, not breed an alias"}
+      ]
+    },
+    {
+      "label": "A card token keeps the shape, loses the BIN",
+      "note": "Legacy validators check length and the Luhn digit, so the token satisfies both - but the issuer prefix is random. A preserved BIN would leak the bank and the country, which is most of what the number was worth.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/tokens",
+      "body": {"type": "card", "value": "4111 1111 1111 1111", "cid": "{{crm_cid}}"},
+      "expect": 201,
+      "capture": {"card_token": "token"}
+    },
+    {
+      "label": "Redeem one token, deliberately",
+      "note": "Single redemption is a read like any other: audited, scope-checked, one value at a time.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/tokens/{{iban_token}}",
+      "expect": 200
+    },
+    {
+      "label": "Bulk redemption without an unlock token: refused",
+      "note": "This is the point of the walkthrough. Bulk is where quiet exfiltration lives, so it ALWAYS needs a second, deliberate act - regardless of configuration. A credential alone is not enough.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/tokens/bulk/read",
+      "body": {"tokens": ["{{iban_token}}", "{{card_token}}"]},
+      "expect": 403
+    },
+    {
+      "label": "Mint the unlock token",
+      "note": "60 seconds, single use, bound to this client and this purpose, and its minting is on the audit chain. An operator has to decide to do this.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/admin/unlock",
+      "body": {"purpose": "bulk-tokens"},
+      "expect": 201,
+      "capture": {"unlock": "unlock_token"}
+    },
+    {
+      "label": "A card value that fails Luhn is refused",
+      "note": "The vault will not pretend a non-card is a card: tokenizing it would produce a token that legacy validators accept for data that was never a card number.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/tokens",
+      "body": {"type": "card", "value": "4111 1111 1111 1112"},
+      "expect": 400
+    },
+    {
+      "label": "Delete a token: the mapping is destroyed",
+      "note": "The row is the only copy of the sealed value, so deletion is unrecoverable - which is why the action is not in any broad role preset and why the audit record says what was destroyed and who minted it.",
+      "actor": "vault",
+      "method": "DELETE",
+      "path": "/v1/tokens/{{card_token}}",
+      "expect": 200
+    },
+    {
+      "label": "The deleted token is gone",
+      "note": "Absent, foreign-scope and expired all answer the same way. A distinguishable 'this token existed' would be an oracle.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/tokens/{{card_token}}",
+      "expect": 404
+    }
+  ]
+}
