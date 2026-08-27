@@ -82,6 +82,149 @@ of which replica happened to answer. There is no SDK call for this check;
 it is exercising the ordinary lookup call under load, and every SDK's
 lookup method surfaces `429` as its `RateLimited` error the same way.
 
+## Scenarios a fleet meets that a single instance never does
+
+Four situations behave differently with more than one replica, and the
+difference is invisible in a single-instance test. Each is exercised by
+`ops/coldboot-scenarios.sh`, which boots from nothing every time - a stack
+restarted onto existing data cannot reproduce any of them.
+
+### 1. Cold boot: two processes, empty database
+
+The first `up` of a new deployment is the only moment where two processes
+migrate a schemaless database at the same time. Sunder serializes migrations
+with an advisory lock; the subtlety is that the bookkeeping table must be
+created INSIDE that lock, because `CREATE TABLE IF NOT EXISTS` is not atomic
+- the existence check and the creation are separate steps.
+
+```mermaid
+sequenceDiagram
+    participant A as Replica A
+    participant B as Replica B
+    participant DB as PostgreSQL (empty)
+
+    A->>DB: BEGIN, pg_advisory_xact_lock(SUNM)
+    B->>DB: BEGIN, pg_advisory_xact_lock(SUNM)
+    Note over B,DB: B blocks - the lock is instance-wide
+    A->>DB: CREATE TABLE IF NOT EXISTS schema_migrations
+    A->>DB: apply 0001..00NN, INSERT one row each
+    A->>DB: COMMIT (lock released)
+    DB-->>B: lock acquired
+    B->>DB: CREATE TABLE IF NOT EXISTS - now a real no-op
+    B->>DB: every version already present, applies nothing
+    B->>DB: COMMIT
+    Note over A,B: exactly one row per migration, both replicas live
+```
+
+Before the table moved inside the lock, both replicas passed the not-exists
+check and the loser died with `duplicate key value violates unique
+constraint "pg_type_typname_nsp_index"` - a table creates its row type too.
+On Kubernetes that is a crash loop on the very first deployment, and it
+never reproduces once the database has a schema.
+
+**What an operator sees when it goes wrong:** one pod `Running`, the other in
+`CrashLoopBackOff` with a `pg_type` duplicate-key error, and a partially
+migrated database. **Recovery:** scale to one replica, let it finish, scale
+back up.
+
+### 2. A replica joins and shares the keystore
+
+Two replicas on one keystore volume must agree on key BYTES, not merely both
+"have a key". The file driver elects a single generator with `O_EXCL`; the
+elected process must then re-check whether the key already exists, because
+its decision to mint was made before it held the lock.
+
+```mermaid
+sequenceDiagram
+    participant A as Replica A
+    participant KS as Keystore volume
+    participant B as Replica B
+
+    A->>KS: read hmac-email/v1 - absent
+    B->>KS: read hmac-email/v1 - absent
+    A->>KS: O_EXCL lock - won
+    B->>KS: O_EXCL lock - busy, waits
+    A->>KS: generate, write .tmp, rename into place
+    A->>KS: release lock
+    B->>KS: O_EXCL lock - won (A released it)
+    Note over B,KS: B's decision to mint is now STALE
+    B->>KS: re-check under the lock - the key exists
+    B-->>B: use A's key, mint nothing
+```
+
+Skip that re-check and B mints over A's key. Every search token A wrote is
+then unmatchable and every blob sealed under it is unreadable, while both
+replicas report healthy: `/healthz` 200, and lookups simply return 404. The
+observable invariant is the one the scenario asserts - a contact registered
+through A resolves through B.
+
+!!! danger "The file keystore is not the multi-replica answer"
+    It needs a `ReadWriteMany` volume and it is single-writer by design. On
+    Kubernetes use `keystore.type: vault`; the chart defaults to it. The
+    scenario above exists because a shared-volume deployment is *possible*,
+    not because it is recommended.
+
+### 3. Key rotation while traffic runs
+
+Rotation mints the next version and new writes pick it up immediately.
+Reads must keep working under the old version throughout - there is no
+window where a lookup misses because its token was written under a version
+that is no longer current.
+
+```mermaid
+flowchart TB
+    R["sunder keys rotate -kind hmac-email"] --> V2["v2 minted, marked current"]
+    V2 --> W["new writes tokenize under v2"]
+    V2 --> L["lookups try EVERY live version"]
+    L --> H1["v2 token - hit"]
+    L --> H2["v1 token - hit"]
+    W --> RK["sunder keys rekey backfills v1 rows to v2"]
+    RK --> RT["sunder keys retire -kind hmac-email -version v1"]
+    RT --> G{"SUNDER_KEY_RETIRE_GRACE elapsed<br/>on EVERY replica?"}
+    G -->|no| Refuse["refused - a replica may still write under v1"]
+    G -->|yes| Purge["purge v1"]
+```
+
+The grace period is the multi-replica part. `KeyRing` caches key material per
+process, so a replica can still be writing under v1 for as long as its cache
+is stale. The purge is one-shot: a replica writing v1 tokens after it leaves
+rows nothing will ever match or delete. Set `tunables.keyRetireGrace` above
+the worst-case cache staleness across the whole fleet, and never set it to
+`0` with more than one replica.
+
+### 4. Sealing across a fleet
+
+Under `async` (the default) each replica seals the rows it can see, and the
+chain stays linear because `chain_seq` is assigned under a lock. The
+hardened arrangement moves sealing out of the API entirely.
+
+```mermaid
+flowchart LR
+    subgraph API["API replicas (SUNDER_AUDIT_SEAL_EXTERNAL=true)"]
+      A1["replica 1"]
+      A2["replica 2"]
+      A3["replica N"]
+    end
+    A1 -->|"INSERT unsealed row"| AUD[("audit")]
+    A2 -->|"INSERT unsealed row"| AUD
+    A3 -->|"INSERT unsealed row"| AUD
+    S["sunder sealer<br/>single replica"] -->|"UPDATE prev_hash, hash,<br/>chain_seq, hash_v"| AUD
+    S --> HP["/healthz<br/>SUNDER_SEALER_HEALTH_ADDR"]
+    AUD --> G["sunder_audit_unsealed_rows"]
+    G --> AL{"backlog growing<br/>or not shrinking?"}
+    AL -->|yes| Page["SunderAuditSealerStalled /<br/>SunderAuditSealerStopped"]
+```
+
+With the API role holding `INSERT` but no `UPDATE` on `audit`, a compromised
+API replica cannot seal or forge hashes over its own rows. The sealer's own
+`/healthz` answers 200 only while its last SUCCESSFUL pass is recent - it
+logs-and-continues on error by design, so without that probe a sealer that
+lost its `UPDATE` grant stays `Running` and `Ready` forever while the backlog
+grows.
+
+**Sealing mode changes are the one operation that needs the whole fleet
+stopped**, and only in one direction - see below.
+
 ## Other multi-replica behavior worth knowing
 
 Audit sealing mode (`SUNDER_AUDIT_SEALING`) also has a multi-replica rule:
