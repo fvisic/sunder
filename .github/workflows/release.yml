@@ -35,6 +35,15 @@ jobs:
           path: .
           format: spdx-json
           output-file: dist/sunder-${{ github.ref_name }}.sbom.spdx.json
+          # The action's own upload/attach steps are OFF on purpose. Its
+          # release attachment needs `actions: read` to fetch the artifact it
+          # just uploaded, and without it the v0.4.0 release run failed at
+          # "Attaching SBOMs to release" with a 403 AFTER every artifact was
+          # already built and signed. The SBOM is attached below anyway, as
+          # part of dist/* in the `gh release create` call - so the extra
+          # path was never needed, only a way to fail the run.
+          upload-artifact: false
+          upload-release-assets: false
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -65,6 +74,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "Sunder $GITHUB_REF_NAME" \
-            --generate-notes
+          # Idempotent on purpose. A release can already exist for the tag -
+          # created by hand, or by an earlier run of this workflow that failed
+          # after this step. `gh release create` refuses that outright, which
+          # is how v0.4.0 ended up published with ZERO assets: no binaries, no
+          # SHA256SUMS, no signatures, no SBOM. Upload into the existing
+          # release instead, clobbering same-named assets so a re-run repairs
+          # a partial upload rather than duplicating it.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "Sunder $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
