@@ -11,6 +11,7 @@ package service_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/fvisic/sunder/internal/crypto"
@@ -321,5 +322,73 @@ func TestEnsureCIDRefusesTombstone(t *testing.T) {
 	e.gdpr.Drain()
 	if _, err := e.svc.IssueScopedCid(ctx, e.crm, cid, "billing"); err == nil {
 		t.Fatal("a tombstoned person must not gain a pseudonym in a new scope")
+	}
+}
+
+// TestRekeyPaginationUsesThePrimaryKeyIndex is a PLAN regression, not a
+// behaviour one: the sweep produced correct results either way, and every
+// functional test passed while it read 6.3 billion tuples from a 26.9M-row
+// table.
+//
+// The sweep paginated with `id::text > $1 ORDER BY id::text`. Casting the
+// uuid makes persons_pkey unusable, so each batch became a parallel
+// sequential scan plus a top-N sort of the WHOLE table. Measured on the
+// 26.9M-contact dataset: 172,867 shared buffers per batch against 513 for
+// the uncast form - 337x the I/O, repeated once per batch. Registrations
+// running concurrently with the sweep timed out at 30 seconds.
+//
+// The assertion is on the sort key rather than on "Index Scan": a small test
+// table can legitimately be scanned sequentially, but a sort keyed on a CAST
+// of the paginating column can only come from re-introducing the cast.
+func TestRekeyPaginationUsesThePrimaryKeyIndex(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	// Enough rows that the planner has a real choice to make.
+	for i := 0; i < 300; i++ {
+		if _, err := e.admin.Pool.Exec(ctx,
+			`INSERT INTO persons (id) VALUES (gen_random_uuid())`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.admin.Pool.Exec(ctx, `ANALYZE persons`); err != nil {
+		t.Fatal(err)
+	}
+
+	// The exact statement the sweep issues.
+	var plan string
+	rows, err := e.admin.Pool.Query(ctx,
+		`EXPLAIN SELECT id FROM persons WHERE erased_at IS NULL AND id > $1::uuid ORDER BY id LIMIT $2`,
+		"00000000-0000-0000-0000-000000000000", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		plan += line + "\n"
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(plan, "(id)::text") {
+		t.Fatalf("the sweep is sorting on a CAST of the paginating column - "+
+			"persons_pkey cannot be used and every batch scans the whole table:\n%s", plan)
+	}
+
+	// And the sweep itself must still visit every live person, so the plan
+	// fix cannot have changed what it covers.
+	before, err := e.svc.Rekey(ctx, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Persons < 300 {
+		t.Fatalf("the sweep visited %d persons, fewer than the 300 just inserted - "+
+			"uuid ordering must still cover the whole table", before.Persons)
 	}
 }

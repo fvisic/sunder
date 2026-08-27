@@ -1,0 +1,105 @@
+{
+  "id": "attribute-history",
+  "title": "What the record said last month, under the same gate as today",
+  "summary": "History is the same personal data, one generation older - so reading it costs the same purpose, the same consent and the same audit record as reading the current value. And it dies with the person, in the same transaction.",
+  "doc": "concepts/attribute-versioning.md",
+  "roles": [
+    {
+      "name": "vault",
+      "label": "Back office (history reader)",
+      "scope": "crm",
+      "actions": ["contacts.register", "attributes.read", "attributes.history", "consent.manage", "dsr.erase"],
+      "purposes": ["support"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "A person with a tier",
+      "note": "Versioning is off by default: history extends the storage-limitation clock, so switching it on is a deliberate act. This stack has SUNDER_VERSIONS_KEEP set.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {
+        "email": "{{demo_email}}",
+        "phone": "{{demo_phone}}",
+        "name": "{{demo_name}}",
+        "attributes": {"loyalty_tier": "bronze"}
+      },
+      "expect": 201,
+      "capture": {"crm_cid": "cid"}
+    },
+    {
+      "label": "The tier changes",
+      "note": "Re-registering the same identifiers merges into the same person's blob. The value that is about to be overwritten is snapshotted first, inside the same transaction - history cannot miss a generation nor record one that never landed.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {
+        "email": "{{demo_email}}",
+        "attributes": {"loyalty_tier": "silver"}
+      },
+      "expect": 201
+    },
+    {
+      "label": "And changes again",
+      "note": "Two overwrites, so there are two prior generations to ask about.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {
+        "email": "{{demo_email}}",
+        "attributes": {"loyalty_tier": "gold"}
+      },
+      "expect": 201
+    },
+    {
+      "label": "The current value is gold",
+      "note": "The ordinary read path, for contrast.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/attributes/loyalty_tier?purpose=support",
+      "expect": 200
+    },
+    {
+      "label": "List the versions",
+      "note": "Metadata only: which generation, written by whom, when. This listing is itself an audited read - asking what history exists is a disclosure about the person.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/versions",
+      "expect": 200
+    },
+    {
+      "label": "Read version 1 without a purpose: refused",
+      "note": "The gate does not weaken with age. No purpose, no answer.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/versions/1/attributes/loyalty_tier",
+      "expect": 400
+    },
+    {
+      "label": "With a purpose, the old value comes back",
+      "note": "Bronze - what the record said before the first change. Purpose, consent, the attribute allowlist, scope and the tombstone check all ran, and the audit row was written BEFORE the value was released.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/versions/1/attributes/loyalty_tier?purpose=support",
+      "expect": 200
+    },
+    {
+      "label": "Erase the person",
+      "note": "The interesting question for history is what Article 17 does to it.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/dsr/erase",
+      "body": {"cid": "{{crm_cid}}"},
+      "expect": 200
+    },
+    {
+      "label": "History died with them",
+      "note": "Not pruned later by a sweep - deleted in the erasure transaction. History that outlived erasure would be the loudest possible way to fail Article 17.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{crm_cid}}/versions/1/attributes/loyalty_tier?purpose=support",
+      "expect": 404
+    }
+  ]
+}

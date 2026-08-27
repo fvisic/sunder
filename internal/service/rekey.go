@@ -55,10 +55,22 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 		return stats, err
 	}
 
-	lastID := ""
+	// Paginate on the uuid ITSELF, never on id::text.
+	//
+	// `id::text > $1 ORDER BY id::text` is not sargable: the cast makes
+	// persons_pkey unusable, so every batch became a parallel sequential scan
+	// of the whole table plus a top-N sort. Measured on 26.9M persons:
+	// 172,867 shared buffers per batch against 513 for the uncast form - 337x
+	// the I/O, 53,842 times over. `pg_stat_user_tables` recorded 6.3 BILLION
+	// sequential tuple reads from one sweep, and registrations concurrent
+	// with it timed out at 30s while the sweep held its connections.
+	//
+	// The uuid zero value is the lower bound; uuid ordering differs from text
+	// ordering, which does not matter to a sweep that must visit every row.
+	lastID := "00000000-0000-0000-0000-000000000000"
 	for {
 		rows, err := c.Pool.Query(ctx,
-			`SELECT id FROM persons WHERE erased_at IS NULL AND id::text > $1 ORDER BY id::text LIMIT $2`,
+			`SELECT id FROM persons WHERE erased_at IS NULL AND id > $1::uuid ORDER BY id LIMIT $2`,
 			lastID, batch)
 		if err != nil {
 			return stats, err
