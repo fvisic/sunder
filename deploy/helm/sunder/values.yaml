@@ -1,8 +1,8 @@
 image:
   repository: ghcr.io/fvisic/sunder
-  tag: v0.5.0
+  tag: v0.5.1
   # The ops image (anchor/verify-audit cron jobs) needs openssl:
-  opsTag: v0.5.0-ops
+  opsTag: v0.5.1-ops
 
 replicaCount: 2
 
@@ -112,6 +112,13 @@ tunables:
   # trusting the header where nothing appends it hands every requester a
   # FRESH bucket. Set it only when a proxy you control writes it.
   apiClientIpHeader: ""  # SUNDER_API_CLIENT_IP_HEADER
+  # Persons per page in `sunder keys rekey`, and how many persons' search
+  # tokens go into ONE INSERT. The sweep used to write a token per statement:
+  # on 26.9M contacts that is 193.6 million synchronous round trips and about
+  # 87 hours, with PostgreSQL idle. A key rotation is a security response, so
+  # a sweep nobody can finish is a capability nobody has. Lower it to hold
+  # less memory per batch and be gentler on a loaded database.
+  rekeyBatch: ""         # SUNDER_REKEY_BATCH, 1-10000 (default 500)
 
 # Derived search indexes (F1/F2). Both OFF by default: each widens the search
 # surface and adds token rows per contact. Enabling either on an existing

@@ -238,6 +238,33 @@ if missing:
 print(f"  {len(ref)} variables in the reference, all present on the published page")
 PY
 
+# ------------------------------------------------------- corruption --------
+section "tests: data is corrupted by mutation, never by assignment"
+python3 - <<'PYEOF2' || fail=1
+import re, subprocess, sys
+
+# A test that "corrupts" a byte by ASSIGNING a constant is a no-op whenever
+# the byte already held that constant. Three sites in this tree used
+# overlay(x placing 0xff from N for 1); one took a CI leg down with a
+# 1-in-256 failure that reproduced in no local run, and the other two were
+# the same bug waiting its turn. The assertion still passed - on an intact
+# payload, which is a test passing for the wrong reason.
+#
+# Mutation (XOR) corrupts whatever the byte held.
+res = subprocess.run(
+    ["grep", "-rn", "--include=*_test.go", "--include=*.go", "-E",
+     "overlay[(].*placing", "internal/", "cmd/", "benchmark/"],
+    capture_output=True, text=True)
+bad = [ln for ln in res.stdout.splitlines() if ln.strip()]
+if bad:
+    print("::error::data corrupted by ASSIGNMENT - a no-op when the byte already holds that value:")
+    for b in bad:
+        print("   ", b[:150])
+    print("  Use XOR: set_byte(x, N, get_byte(x, N) # 255), or in Go: b[i] ^= 0xFF")
+    sys.exit(1)
+print("  no assignment-style corruption in tests")
+PYEOF2
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "::error::artifact coverage check failed - a feature is missing from an artifact that describes it"

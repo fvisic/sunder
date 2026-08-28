@@ -10,8 +10,12 @@ package service_test
 // under the newest key version, permanently.
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/fvisic/sunder/internal/crypto"
@@ -390,5 +394,408 @@ func TestRekeyPaginationUsesThePrimaryKeyIndex(t *testing.T) {
 	if before.Persons < 300 {
 		t.Fatalf("the sweep visited %d persons, fewer than the 300 just inserted - "+
 			"uuid ordering must still cover the whole table", before.Persons)
+	}
+}
+
+// TestBatchedTokenFlushStillRefusesAnErasedPerson is GDPR-ERASURE-2 re-asked
+// of the batched write path.
+//
+// The sweep now accumulates every token in a batch and writes them in one
+// statement. That is 90x faster - and it WIDENS the window the original
+// finding lived in: a person read at the top of a 500-person batch has their
+// tokens written at the bottom of it, so an erasure landing between the two
+// has more room, not less. If the liveness check had moved from per-row to
+// per-batch during that change, deleted search tokens would come back under
+// the newest key version, permanently, and be immediately usable.
+//
+// The seam erases the person after their tokens are in the batch and before
+// the batch is written, which is exactly that window, deterministically.
+func TestBatchedTokenFlushStillRefusesAnErasedPerson(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	cid, err := e.svc.Register(ctx, e.crm, service.RegisterInput{Email: "batched@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var personID string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT person_id::text FROM cids WHERE cid=$1`, cid).Scan(&personID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rotate so the sweep has real work: it will mint tokens under v2.
+	if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, crypto.KeyHMACEmail); err != nil {
+		t.Fatal(err)
+	}
+
+	// Erase inside the window: the person is already in the batch, the batch
+	// has not been written yet.
+	fired := false
+	service.BeforeTokenFlushForTest = func() {
+		if fired {
+			return
+		}
+		fired = true
+		if _, err := e.admin.Pool.Exec(ctx,
+			`DELETE FROM person_tokens WHERE person_id=$1`, personID); err != nil {
+			t.Error(err)
+		}
+		if _, err := e.admin.Pool.Exec(ctx,
+			`UPDATE persons SET erased_at=now() WHERE id=$1`, personID); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { service.BeforeTokenFlushForTest = nil })
+
+	if _, err := e.svc.Rekey(ctx, false, 100); err != nil {
+		t.Fatal(err)
+	}
+	if !fired {
+		t.Fatal("the seam never ran - the sweep wrote no batch, so this proves nothing")
+	}
+
+	var revived int
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM person_tokens WHERE person_id=$1`, personID).Scan(&revived); err != nil {
+		t.Fatal(err)
+	}
+	if revived != 0 {
+		t.Fatalf("the batched flush re-created %d search token(s) for an erased person - "+
+			"they are immediately usable and nothing will ever delete them again "+
+			"(GDPR-ERASURE-2)", revived)
+	}
+}
+
+// TestBatchedFlushWritesEveryTokenItAccumulated is the other half: the fast
+// path must not silently drop rows. A join that filtered too much would look
+// exactly like success.
+func TestBatchedFlushWritesEveryTokenItAccumulated(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	const people = 25
+	ids := make([]string, 0, people)
+	for i := 0; i < people; i++ {
+		cid, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email: fmt.Sprintf("bulk%d@example.com", i),
+			Phone: fmt.Sprintf("+3859100000%02d", i),
+			Name:  fmt.Sprintf("Person Number%d", i),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, cid)
+	}
+
+	before := map[string]int{}
+	countTokens(t, e, &before)
+
+	// Rotate every identifier kind, then sweep: each person must gain tokens
+	// under the new versions, through the batched path.
+	for _, kind := range []string{crypto.KeyHMACEmail, crypto.KeyHMACPhone, crypto.KeyHMACName} {
+		if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, kind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := e.svc.Rekey(ctx, false, 10) // batch smaller than the population
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Persons < people {
+		t.Fatalf("the sweep visited %d persons, expected at least %d", stats.Persons, people)
+	}
+	if stats.TokensInserted == 0 {
+		t.Fatal("a rotation across all three kinds inserted no tokens - the batch was dropped")
+	}
+
+	after := map[string]int{}
+	countTokens(t, e, &after)
+	for kind, n := range after {
+		if n <= before[kind] {
+			t.Fatalf("kind %q did not gain tokens after a rotation (%d -> %d)", kind, before[kind], n)
+		}
+	}
+	// And every registered contact still resolves - the point of the tokens.
+	for i, cid := range ids {
+		got, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+			Email: fmt.Sprintf("bulk%d@example.com", i)})
+		if err != nil {
+			t.Fatalf("contact %d no longer resolves after the batched sweep: %v", i, err)
+		}
+		if got != cid {
+			t.Fatalf("contact %d resolved to %q, want %q", i, got, cid)
+		}
+	}
+}
+
+func countTokens(t *testing.T, e *faultEnv, out *map[string]int) {
+	t.Helper()
+	rows, err := e.admin.Pool.Query(context.Background(),
+		`SELECT kind, count(*) FROM person_tokens GROUP BY kind`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	m := map[string]int{}
+	for rows.Next() {
+		var k string
+		var n int
+		if err := rows.Scan(&k, &n); err != nil {
+			t.Fatal(err)
+		}
+		m[k] = n
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	*out = m
+}
+
+// TestRekeyResumesFromWhereItStopped: the sweep used to restart from the
+// first person on every run. Mid-backfill on the 26.9M dataset that cost 2.7
+// HOURS of re-reading persons it had already covered, before reaching any
+// outstanding work - and that cost grows as the backfill advances, so the
+// operator who has to interrupt a sweep is punished hardest.
+func TestRekeyResumesFromWhereItStopped(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	const people = 30
+	for i := 0; i < people; i++ {
+		if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email: fmt.Sprintf("resume%d@example.com", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, crypto.KeyHMACEmail); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stop the first run part-way by failing a flush after two batches.
+	batches := 0
+	service.BeforeTokenFlushForTest = func() {
+		batches++
+		if batches == 3 {
+			panic("stop here")
+		}
+	}
+	t.Cleanup(func() { service.BeforeTokenFlushForTest = nil })
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = e.svc.Rekey(ctx, false, 5)
+	}()
+	service.BeforeTokenFlushForTest = nil
+
+	var saved string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT last_person_id::text FROM rekey_progress WHERE id`).Scan(&saved); err != nil {
+		t.Fatalf("an interrupted sweep recorded no resume point: %v", err)
+	}
+
+	// The second run must pick that up rather than starting over.
+	stats, err := e.svc.Rekey(ctx, false, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stats.Resumed {
+		t.Fatal("the second run started from the beginning - the resume point was ignored")
+	}
+	if stats.PersonsSkipped == 0 {
+		t.Fatal("resumed, but reported 0 persons already covered - the operator cannot tell how far along the sweep is")
+	}
+	if stats.Persons >= people {
+		t.Fatalf("the resumed run visited %d persons of %d - it re-read the ones already done",
+			stats.Persons, people)
+	}
+
+	// Finishing clears the point: leaving it would make the NEXT run skip a
+	// person registered below it.
+	var left int
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM rekey_progress`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatal("a completed sweep left its resume point behind")
+	}
+
+	// And every contact still resolves: resuming must not have skipped work.
+	for i := 0; i < people; i++ {
+		if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+			Email: fmt.Sprintf("resume%d@example.com", i)}); err != nil {
+			t.Fatalf("contact %d does not resolve after a resumed sweep: %v", i, err)
+		}
+	}
+}
+
+// TestRekeyIgnoresAResumePointFromDifferentWork is the dangerous half.
+//
+// A resume point means "persons below this uuid are done" - true ONLY for
+// the outstanding set the interrupted run was working through. Rotate a key
+// afterwards and persons below that point have work again; honouring the
+// stale point would skip them permanently, and no rerun would ever revisit
+// them because the point advances past them each time. The scope
+// fingerprint is what prevents it.
+func TestRekeyIgnoresAResumePointFromDifferentWork(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	for i := 0; i < 20; i++ {
+		if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email: fmt.Sprintf("scope%d@example.com", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, crypto.KeyHMACEmail); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plant a resume point that claims almost everything is done, under the
+	// CURRENT scope, then change the work by rotating again.
+	if _, err := e.admin.Pool.Exec(ctx,
+		// uuid has no max(); order and take the last, which is what the
+		// sweep's own pagination would have reached.
+		`INSERT INTO rekey_progress (id, scope, last_person_id, persons_done)
+		 SELECT TRUE, 'stale-scope-from-different-work', id, 19
+		   FROM persons ORDER BY id DESC LIMIT 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, crypto.KeyHMACEmail); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := e.svc.Rekey(ctx, false, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Resumed {
+		t.Fatal("the sweep honoured a resume point recorded for DIFFERENT work - " +
+			"persons below it would never be revisited")
+	}
+	if stats.Persons < 20 {
+		t.Fatalf("the sweep visited %d persons, expected all 20: a stale resume point "+
+			"caused work to be skipped permanently", stats.Persons)
+	}
+	// The tokens for the newest version must exist for every contact.
+	for i := 0; i < 20; i++ {
+		if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+			Email: fmt.Sprintf("scope%d@example.com", i)}); err != nil {
+			t.Fatalf("contact %d lost its tokens to a stale resume point: %v", i, err)
+		}
+	}
+}
+
+// TestRekeySweepReportsProgress: the 26.9M backfill ran for SEVEN HOURS
+// without emitting a single line. An operator watching it could not
+// distinguish a working sweep from a hung one, and the only way to find out
+// was to query the database behind the sweep's back. A long operation that
+// says nothing is an operational defect, not a cosmetic one.
+func TestRekeySweepReportsProgress(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	var buf syncBuffer
+	e.svc.Log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	for i := 0; i < 5; i++ {
+		if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email: fmt.Sprintf("progress%d@example.com", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.svc.Rekey(ctx, false, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	out := buf.String()
+	// Start and finish must both be there: a sweep that only logs on
+	// completion still leaves the operator blind while it runs, and one that
+	// only logs on start never says it succeeded.
+	for _, want := range []string{"rekey sweep starting", "rekey sweep finished", "live_persons", "took"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the sweep's log is missing %q - an operator cannot tell what it is doing:\n%s", want, out)
+		}
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for a logger writing from any goroutine.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestRekeyFetchesBlobsPerPageNotPerPerson pins the read shape.
+//
+// The per-person SELECT was 70% of the sweep's wall clock - 1.65 ms of
+// waiting against 0.71 ms of decryption and tokenization, so 26.9M persons
+// spent 12.3 hours doing nothing while a database measured at 54,000 rows/s
+// sat idle.
+//
+// The seam is not laziness: the first version of this test counted scans in
+// pg_stat_user_tables, and PASSED after per-person fetching was deliberately
+// reintroduced - those statistics are collected asynchronously, so the
+// assertion was measuring noise. A test that cannot fail is worse than no
+// test, because it is claimed as coverage.
+func TestRekeyFetchesBlobsPerPageNotPerPerson(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	const people = 40
+	for i := 0; i < people; i++ {
+		if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email: fmt.Sprintf("perpage%d@example.com", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, crypto.KeyHMACEmail); err != nil {
+		t.Fatal(err)
+	}
+
+	var fetches int
+	var sizes []int
+	service.OnBlobFetchForTest = func(n int) {
+		fetches++
+		sizes = append(sizes, n)
+	}
+	t.Cleanup(func() { service.OnBlobFetchForTest = nil })
+
+	const batch = 10
+	if _, err := e.svc.Rekey(ctx, false, batch); err != nil {
+		t.Fatal(err)
+	}
+
+	// One fetch per page: 40 persons in pages of 10 is 4 pages (the final
+	// empty page ends the loop before fetching).
+	if fetches > people/batch+1 {
+		t.Fatalf("the sweep fetched blobs %d times for %d persons in pages of %d - "+
+			"that is per-PERSON fetching, which measured 70%% of the sweep's wall clock",
+			fetches, people, batch)
+	}
+	for i, n := range sizes {
+		if n == 1 && people > 1 {
+			t.Fatalf("fetch %d covered a single person: the page fetch degenerated "+
+				"into the per-person form it replaced", i)
+		}
+	}
+
+	// And it must still be correct: every contact resolves.
+	for i := 0; i < people; i++ {
+		if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+			Email: fmt.Sprintf("perpage%d@example.com", i)}); err != nil {
+			t.Fatalf("contact %d lost its tokens to the batched fetch: %v", i, err)
+		}
 	}
 }

@@ -12,8 +12,11 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
+	"sort"
 	"time"
 
 	"github.com/fvisic/sunder/internal/audit"
@@ -32,11 +35,147 @@ type RekeyStats struct {
 	RecordKeysRewrapped  int64 // F5 per-person record keys re-wrapped (M5)
 	VersionsRewrapped    int64 // F6 attribute-version blobs re-encrypted (S5)
 	OutboxRewrapped      int64 // portal_outbox payloads re-sealed under the newest KEK (GAP-1)
+	// Resumed reports that this run picked up a previous run's resume point
+	// instead of starting from the first person, and PersonsSkipped is how
+	// many that previous run had already covered. The operator needs both:
+	// "persons: 500" after a resume means something very different from
+	// "persons: 500" on a fresh sweep, and silently reporting the smaller
+	// number would read as a sweep that had barely started.
+	Resumed        bool
+	PersonsSkipped int64
 	// Raced counts blobs a concurrent writer touched between this sweep's
 	// read and its write. They were NOT converted and a rerun is required -
 	// distinct from Skipped, which means "could not be decrypted at all"
 	// (TOKENS-LOOKUP-2).
 	Raced int64
+}
+
+// blobRow is one scope's encrypted attribute blob for one person.
+type blobRow struct {
+	personID  string
+	cid       string
+	blob      []byte
+	keyID     string
+	alg       string
+	updatedAt time.Time
+}
+
+// blobsForBatch fetches every blob for a whole page of persons in ONE query.
+//
+// This used to be one SELECT per person, and that single round trip was 70%
+// of the sweep's wall clock: measured at 1.65 ms against 0.71 ms of actual
+// decryption and tokenization, so 26.9M persons spent 12.3 hours waiting on
+// a database that was measured accepting 54,000 rows/s. The work was never
+// the problem; asking for it one person at a time was.
+//
+// Same shape as the token flush that preceded it - unnest the page, let
+// PostgreSQL do one index scan over the set - and the same reason.
+func (c *Contacts) blobsForBatch(ctx context.Context, personIDs []string) (map[string][]blobRow, error) {
+	if OnBlobFetchForTest != nil {
+		// A test seam, not a feature. Whether this is called once per PAGE
+		// or once per PERSON is the difference between 5 hours and 17, and
+		// it cannot be observed from the outside: pg_stat_user_tables
+		// updates asynchronously, so a statistics-based assertion passes
+		// with per-person fetching too - which it did, before this existed.
+		OnBlobFetchForTest(len(personIDs))
+	}
+	rows, err := c.Pool.Query(ctx,
+		`SELECT person_id::text, cid, COALESCE(pii_encrypted,''::bytea),
+		        COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm'), updated_at
+		   FROM cids WHERE person_id = ANY($1::uuid[])`, personIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][]blobRow, len(personIDs))
+	for rows.Next() {
+		var b blobRow
+		if err := rows.Scan(&b.personID, &b.cid, &b.blob, &b.keyID, &b.alg, &b.updatedAt); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
+			return nil, err
+		}
+		out[b.personID] = append(out[b.personID], b)
+	}
+	// No marker here: the fault tests reach this branch through a denied
+	// table, so it IS covered - and the gate refuses a defensive marker on a
+	// covered block precisely so the exclusion list cannot rot into a pile
+	// of stale excuses.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// rekeyScope fingerprints what a sweep is doing, so a resume point can only
+// be honoured by a sweep doing the SAME work.
+//
+// This is the whole safety argument for resuming. The resume point says
+// "persons below this uuid are done" - true only for the outstanding set the
+// interrupted run was working through. Rotate a key, flip
+// SUNDER_SEARCH_FUZZY_NAME, or rerun with -reencrypt-pii after a run
+// without it, and persons BELOW the resume point now have work again.
+// Fingerprinting every input that decides the outstanding set turns that
+// from a rule someone has to remember into a string comparison.
+func rekeyScope(newest map[string]string, newestKEK string, reencryptPII, fuzzyName, phoneSuffix bool) string {
+	kinds := make([]string, 0, len(newest))
+	for k := range newest {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds) // map order is not a fingerprint
+	h := sha256.New()
+	for _, k := range kinds {
+		fmt.Fprintf(h, "%s=%s;", k, newest[k])
+	}
+	fmt.Fprintf(h, "kek=%s;pii=%t;fuzzy=%t;suffix=%t", newestKEK, reencryptPII, fuzzyName, phoneSuffix)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+const rekeyStartID = "00000000-0000-0000-0000-000000000000"
+
+// loadResumePoint returns where to start, and how many persons a previous
+// run had already covered. A scope mismatch, or no row at all, starts over.
+func (c *Contacts) loadResumePoint(ctx context.Context, scope string) (string, int64) {
+	var last string
+	var done int64
+	err := c.Pool.QueryRow(ctx,
+		`SELECT last_person_id::text, persons_done FROM rekey_progress WHERE id AND scope=$1`,
+		scope).Scan(&last, &done)
+	if err != nil || last == "" {
+		return rekeyStartID, 0
+	}
+	return last, done
+}
+
+// saveResumePoint records the page boundary. Best-effort by design: losing
+// it costs re-reading, never correctness, so a failure here must not abort a
+// sweep that is otherwise making progress.
+func (c *Contacts) saveResumePoint(ctx context.Context, scope, lastID string, done int64) {
+	_, _ = c.Pool.Exec(ctx,
+		`INSERT INTO rekey_progress (id, scope, last_person_id, persons_done, updated_at)
+		 VALUES (TRUE, $1, $2::uuid, $3, now())
+		 ON CONFLICT (id) DO UPDATE SET scope=EXCLUDED.scope,
+		   last_person_id=EXCLUDED.last_person_id,
+		   persons_done=EXCLUDED.persons_done, updated_at=now()`,
+		scope, lastID, done)
+}
+
+// livePersonCount is for the progress line's ETA only. An estimate is
+// enough - reltuples avoids a count(*) over 26.9M rows just to print a
+// percentage - and a zero simply omits the ETA rather than failing a sweep.
+func (c *Contacts) livePersonCount(ctx context.Context) (int64, error) {
+	var n int64
+	err := c.Pool.QueryRow(ctx,
+		`SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE relname='persons'`).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// clearResumePoint drops the row once the sweep has reached the end. Leaving
+// it would make the NEXT run of the same scope skip everything - correct
+// only until someone registers a person below the point.
+func (c *Contacts) clearResumePoint(ctx context.Context) {
+	_, _ = c.Pool.Exec(ctx, `DELETE FROM rekey_progress WHERE id`)
 }
 
 // Rekey sweeps all non-erased persons in id order.
@@ -55,6 +194,27 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 		return stats, err
 	}
 
+	scope := rekeyScope(newestByKind, newestKEK, reencryptPII, c.FuzzyName, c.PhoneSuffix)
+	resumeFrom, alreadyDone := c.loadResumePoint(ctx, scope)
+	stats.Resumed = resumeFrom != rekeyStartID
+	stats.PersonsSkipped = alreadyDone
+
+	// Progress, because this sweep is long. The 26.9M-contact backfill ran
+	// for SEVEN HOURS without emitting a single line: an operator watching it
+	// could not tell a working sweep from a hung one, and the only way to
+	// find out was to query the database behind its back. A sweep that takes
+	// hours has to say so while it takes them.
+	log := c.logger()
+	total, _ := c.livePersonCount(ctx)
+	started := time.Now()
+	if stats.Resumed {
+		log.Info("rekey sweep resuming", "from_person", resumeFrom,
+			"already_covered", alreadyDone, "live_persons", total)
+	} else {
+		log.Info("rekey sweep starting", "live_persons", total, "batch", batch)
+	}
+	lastReport := started
+
 	// Paginate on the uuid ITSELF, never on id::text.
 	//
 	// `id::text > $1 ORDER BY id::text` is not sargable: the cast makes
@@ -67,7 +227,8 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 	//
 	// The uuid zero value is the lower bound; uuid ordering differs from text
 	// ordering, which does not matter to a sweep that must visit every row.
-	lastID := "00000000-0000-0000-0000-000000000000"
+	lastID := resumeFrom
+	tokens := newTokenBatch()
 	for {
 		rows, err := c.Pool.Query(ctx,
 			`SELECT id FROM persons WHERE erased_at IS NULL AND id > $1::uuid ORDER BY id LIMIT $2`,
@@ -89,15 +250,57 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 			return stats, err
 		}
 		if len(ids) == 0 {
+			log.Info("rekey sweep finished",
+				"persons_this_run", stats.Persons,
+				"persons_total", alreadyDone+stats.Persons,
+				"tokens_written", stats.TokensInserted,
+				"took", time.Since(started).Round(time.Second).String())
+			// Reached the end: the resume point has served its purpose, and
+			// keeping it would make the next run of the same scope skip a
+			// person registered below it.
+			c.clearResumePoint(ctx)
 			break
 		}
+		// One query for the whole page's blobs, not one per person.
+		blobs, err := c.blobsForBatch(ctx, ids)
+		if err != nil {
+			return stats, err
+		}
 		for _, id := range ids {
-			if err := c.rekeyPerson(ctx, id, newestByKind, newestKEK, reencryptPII, &stats); err != nil {
+			if err := c.rekeyPerson(ctx, id, blobs[id], newestByKind, newestKEK, reencryptPII, &stats, tokens); err != nil {
 				return stats, fmt.Errorf("person %s: %w", id, err)
 			}
 			stats.Persons++
 		}
+		// One statement for the whole batch's tokens.
+		if err := c.flushTokens(ctx, tokens, &stats); err != nil {
+			return stats, err
+		}
 		lastID = ids[len(ids)-1]
+		// Record the page boundary AFTER its tokens are committed, never
+		// before: a resume point ahead of the work it claims would skip
+		// persons permanently, and nothing would ever revisit them.
+		c.saveResumePoint(ctx, scope, lastID, alreadyDone+stats.Persons)
+
+		// One line every 30s, not one per batch: at batch=500 a large sweep
+		// would otherwise produce tens of thousands of lines and bury the
+		// warnings that matter.
+		if time.Since(lastReport) >= 30*time.Second {
+			lastReport = time.Now()
+			covered := alreadyDone + stats.Persons
+			rate := float64(stats.Persons) / time.Since(started).Seconds()
+			attrs := []any{
+				"persons_this_run", stats.Persons,
+				"persons_total", covered,
+				"tokens_written", stats.TokensInserted,
+				"persons_per_sec", int64(rate),
+			}
+			if total > covered && rate > 0 {
+				attrs = append(attrs, "eta",
+					(time.Duration(float64(total-covered)/rate) * time.Second).Round(time.Minute).String())
+			}
+			log.Info("rekey sweep progress", attrs...)
+		}
 	}
 
 	if reencryptPII {
@@ -123,34 +326,118 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 	return stats, nil
 }
 
-func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[string]string, newestKEK string, reencryptPII bool, stats *RekeyStats) error {
-	rows, err := c.Pool.Query(ctx,
-		`SELECT cid, COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm'), updated_at
-		 FROM cids WHERE person_id=$1`, personID)
-	if err != nil {
-		return err
-	}
-	type blobRow struct {
-		cid       string
-		blob      []byte
-		keyID     string
-		alg       string
-		updatedAt time.Time
-	}
-	var blobs []blobRow
-	for rows.Next() {
-		var b blobRow
-		if err := rows.Scan(&b.cid, &b.blob, &b.keyID, &b.alg, &b.updatedAt); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
-			rows.Close()
-			return err
-		}
-		blobs = append(blobs, b)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
-		return err
-	}
+// BeforeTokenFlushForTest runs immediately before a token batch is written,
+// nil in production. See flushTokens.
+var BeforeTokenFlushForTest func()
 
+// OnBlobFetchForTest reports how many persons each blob fetch covered, nil
+// in production. See blobsForBatch.
+var OnBlobFetchForTest func(persons int)
+
+// tokenBatch accumulates the search tokens produced across every person in
+// one sweep batch, so they land in ONE statement instead of one per token.
+//
+// The sweep used to Exec once per token: 7.2 synchronous round trips per
+// person, each waiting for the previous reply. Measured on 26.9M contacts
+// that is 193.6 MILLION round trips and ~87 hours, while the same database
+// accepts 54,000 rows/s in-server - the bottleneck was never PostgreSQL or
+// the decryption, only the latency of asking one row at a time.
+type tokenBatch struct {
+	personIDs []string
+	kinds     []string
+	tokens    []string
+	versions  []string
+	seen      map[string]bool // dedup within the batch, cheaper than a conflict
+}
+
+func newTokenBatch() *tokenBatch { return &tokenBatch{seen: map[string]bool{}} }
+
+func (b *tokenBatch) add(personID, kind, token, version string) {
+	key := personID + "\x00" + kind + "\x00" + token
+	if b.seen[key] {
+		return
+	}
+	b.seen[key] = true
+	b.personIDs = append(b.personIDs, personID)
+	b.kinds = append(b.kinds, kind)
+	b.tokens = append(b.tokens, token)
+	b.versions = append(b.versions, version)
+}
+
+func (b *tokenBatch) len() int { return len(b.personIDs) }
+
+func (b *tokenBatch) reset() {
+	b.personIDs, b.kinds, b.tokens, b.versions = b.personIDs[:0], b.kinds[:0], b.tokens[:0], b.versions[:0]
+	clear(b.seen)
+}
+
+// flushTokens writes the whole batch in one statement.
+//
+// The join onto persons is the per-ROW liveness check the single-row form
+// had as `WHERE EXISTS (... erased_at IS NULL)`. It is load-bearing, not
+// tidiness: the batch snapshot is arbitrarily stale by the time this runs,
+// and an erasure landing in that window used to have its deleted search
+// tokens RE-CREATED here, under the newest key version, permanently - and
+// immediately usable (GDPR-ERASURE-2). Evaluating it per row inside the
+// statement keeps that invariant exactly where it was.
+func (c *Contacts) flushTokens(ctx context.Context, b *tokenBatch, stats *RekeyStats) error {
+	if b.len() == 0 {
+		return nil
+	}
+	if BeforeTokenFlushForTest != nil {
+		// A test seam, not a feature. Batching WIDENS the window between
+		// reading a person and writing their tokens - the very window
+		// GDPR-ERASURE-2 lives in - so a test has to be able to erase
+		// someone inside it deterministically rather than by racing.
+		BeforeTokenFlushForTest()
+	}
+	tag, err := c.Pool.Exec(ctx,
+		`INSERT INTO person_tokens (person_id, kind, token, key_version)
+		 SELECT u.pid, u.kind, u.tok, u.ver
+		   FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[]) AS u(pid, kind, tok, ver)
+		   JOIN persons p ON p.id = u.pid AND p.erased_at IS NULL
+		 ON CONFLICT (person_id, kind, token) DO NOTHING`,
+		b.personIDs, b.kinds, b.tokens, b.versions)
+	if err != nil {
+		// person_tokens_ident_uq (UNIQUE on (kind, token) for email/phone) is
+		// the dedup invariant and is NOT the conflict target above, so a
+		// violation of it aborts the statement - and with it the whole batch.
+		// That is the same outcome the single-row form had (it returned the
+		// error too), but the diagnostic would be worse: "a batch of 500
+		// failed" instead of "this person failed". Replay row by row to name
+		// the offender, then surface the original error.
+		if who := c.findOffendingRow(ctx, b); who != "" {
+			return fmt.Errorf("token batch failed at person %s: %w", who, err)
+		}
+		return err
+	}
+	stats.TokensInserted += tag.RowsAffected()
+	b.reset()
+	return nil
+}
+
+// findOffendingRow re-runs a failed batch one row at a time and reports the
+// first person whose insert fails. Diagnostics only: the caller returns the
+// batch's original error either way.
+func (c *Contacts) findOffendingRow(ctx context.Context, b *tokenBatch) string {
+	for i := range b.personIDs {
+		_, err := c.Pool.Exec(ctx,
+			`INSERT INTO person_tokens (person_id, kind, token, key_version)
+			 SELECT $1,$2,$3,$4
+			  WHERE EXISTS (SELECT 1 FROM persons WHERE id=$1 AND erased_at IS NULL)
+			 ON CONFLICT (person_id, kind, token) DO NOTHING`,
+			b.personIDs[i], b.kinds[i], b.tokens[i], b.versions[i])
+		if err != nil {
+			return b.personIDs[i]
+		}
+	}
+	return ""
+}
+
+// rekeyPerson processes one person from a page whose blobs were already
+// fetched in bulk by blobsForBatch. It issues no query of its own on the
+// read path - that per-person SELECT was 70% of the sweep's wall clock.
+func (c *Contacts) rekeyPerson(ctx context.Context, personID string, blobs []blobRow, newest map[string]string, newestKEK string, reencryptPII bool, stats *RekeyStats, batch *tokenBatch) error {
 	// Collect identifiers across every scope's blob (values are stored
 	// normalized at registration time).
 	emails := map[string]bool{}
@@ -234,6 +521,9 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 		}
 	}
 
+	// Accumulate rather than Exec. The liveness check that used to ride each
+	// INSERT now rides the batch's join onto persons - same invariant, same
+	// place in the statement, one statement per batch instead of per token.
 	insert := func(rowKind string, values map[string]bool,
 		tokFn func(ctx context.Context, version, normalized string) (string, error), version string) error {
 		for v := range values {
@@ -241,23 +531,7 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 			if err != nil {
 				return err
 			}
-			// The liveness of the batch snapshot (rekey.go's person SELECT)
-			// is arbitrarily stale by the time this runs - each person costs
-			// several signer round trips. An erasure landing in that window
-			// used to see its deleted search tokens RE-CREATED here, under
-			// the newest key version, permanently: nothing deletes them
-			// again, and they are immediately usable (GDPR-ERASURE-2). The
-			// EXISTS makes liveness a per-write invariant.
-			tag, err := c.Pool.Exec(ctx,
-				`INSERT INTO person_tokens (person_id, kind, token, key_version)
-				 SELECT $1,$2,$3,$4
-				  WHERE EXISTS (SELECT 1 FROM persons WHERE id=$1 AND erased_at IS NULL)
-				 ON CONFLICT (person_id, kind, token) DO NOTHING`,
-				personID, rowKind, tok, version)
-			if err != nil {
-				return err
-			}
-			stats.TokensInserted += tag.RowsAffected()
+			batch.add(personID, rowKind, tok, version)
 		}
 		return nil
 	}

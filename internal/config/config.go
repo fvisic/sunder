@@ -121,6 +121,17 @@ type Config struct {
 	VersionsKeep int           // SUNDER_VERSIONS_KEEP
 	VersionsTTL  time.Duration // SUNDER_VERSIONS_TTL: prune history older than this (0 = only the count cap)
 
+	// RekeyBatch is how many persons `sunder keys rekey` pages through at a
+	// time, and how many persons' search tokens go into one INSERT.
+	//
+	// It is a throughput knob with a real floor: the sweep used to write one
+	// token per statement, which on 26.9M contacts meant 193.6 MILLION
+	// synchronous round trips and ~87 hours - the database was never the
+	// bottleneck, the latency of asking one row at a time was. Batching is
+	// what makes a key rotation an operation you can actually perform, so
+	// setting this to 1 restores the old behaviour and the old duration.
+	RekeyBatch int // SUNDER_REKEY_BATCH
+
 	// SharesPublic enables credential-less fetch of F8 shared records (for
 	// cross-org partners who hold only the UUID). Off by default: the
 	// stronger default requires any valid client credential.
@@ -326,6 +337,13 @@ func FromEnvNoDB() (Config, error) {
 	c.FilesS3Region = getenv("SUNDER_FILES_S3_REGION", "us-east-1")
 	c.FilesS3AccessKey = os.Getenv("SUNDER_FILES_S3_ACCESS_KEY")
 	c.FilesS3SecretKey = os.Getenv("SUNDER_FILES_S3_SECRET_KEY")
+	rawRB := getenv("SUNDER_REKEY_BATCH", "500")
+	// The ceiling is memory, not correctness: one batch holds every token for
+	// its persons in four parallel slices before the INSERT, and the four
+	// arrays are bound as one statement's parameters.
+	if c.RekeyBatch, err = strconv.Atoi(rawRB); err != nil || c.RekeyBatch < 1 || c.RekeyBatch > 10000 {
+		return c, fmt.Errorf("SUNDER_REKEY_BATCH: %q must be 1-10000", rawRB)
+	}
 	rawVK := getenv("SUNDER_VERSIONS_KEEP", "0")
 	if c.VersionsKeep, err = strconv.Atoi(rawVK); err != nil || c.VersionsKeep < 0 || c.VersionsKeep > 1000 {
 		return c, fmt.Errorf("SUNDER_VERSIONS_KEEP: %q must be 0-1000", rawVK)

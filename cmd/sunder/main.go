@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -786,7 +787,9 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 	case "rekey":
 		fs := flag.NewFlagSet("keys rekey", flag.ContinueOnError)
 		reenc := fs.Bool("reencrypt-pii", true, "also re-encrypt attribute blobs under the newest pii-kek")
-		batch := fs.Int("batch", 500, "persons per page")
+		// The flag overrides the configured default, so an operator can slow
+		// a sweep down on a loaded database without redeploying.
+		batch := fs.Int("batch", cfg.RekeyBatch, "persons per page, and per token INSERT (SUNDER_REKEY_BATCH)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -799,13 +802,26 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		pii.Alg = cfg.PIIAlg
 		contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: pii, Ring: ring,
 			FuzzyName: cfg.SearchFuzzyName, PhoneSuffix: cfg.SearchPhoneSuffix,
-			VersionsKeep: cfg.VersionsKeep}
+			VersionsKeep: cfg.VersionsKeep,
+			// The sweep runs for hours on a large dataset; without this the
+			// operator watches a silent terminal and cannot tell a working
+			// sweep from a hung one.
+			Log: slog.Default()}
 		stats, err := contacts.Rekey(ctx, *reenc, *batch)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("rekey sweep: %d person(s), %d token(s) written, %d blob(s) re-encrypted, %d blob(s) undecryptable\n",
+		if stats.Resumed {
+			// Without this line "500 persons" after a resume reads as a sweep
+			// that has barely started, when it is actually near the end.
+			fmt.Printf("resumed from a previous run's position: %d person(s) were already covered\n",
+				stats.PersonsSkipped)
+		}
+		fmt.Printf("rekey sweep: %d person(s) this run, %d token(s) written, %d blob(s) re-encrypted, %d blob(s) undecryptable\n",
 			stats.Persons, stats.TokensInserted, stats.BlobsReenc, stats.Skipped)
+		if stats.Resumed {
+			fmt.Printf("  %d person(s) covered in total across runs\n", stats.PersonsSkipped+stats.Persons)
+		}
 		if stats.Raced > 0 {
 			// NOT a warning to be ignored: these rows were written by a
 			// concurrent request between this sweep's read and its write, so
