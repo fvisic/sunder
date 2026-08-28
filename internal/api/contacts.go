@@ -27,6 +27,13 @@ func writeErr(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "purpose_not_allowed"})
 	case errors.Is(err, service.ErrConsentDenied):
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "consent_denied"})
+	case errors.Is(err, service.ErrCascadeTooLarge):
+		// The detail is safe and load-bearing: it carries the child count and
+		// the limit, which is exactly what the operator needs to decide
+		// between batching and raising the bound. Nothing is erased when this
+		// is returned - saying so plainly is the point of a distinct code.
+		writeJSON(w, http.StatusBadRequest,
+			map[string]string{"error": "cascade_too_large", "detail": err.Error()})
 	case errors.Is(err, service.ErrValidation):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validation", "detail": err.Error()})
 	case errors.Is(err, service.ErrTokenUsed):

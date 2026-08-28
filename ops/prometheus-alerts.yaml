@@ -96,6 +96,18 @@ groups:
           summary: "Erasure webhook events stuck in SENDING"
           description: "{{ $value }} event(s) have been claimed but not settled for 30 minutes. The worker reaps its own stale claims each sweep, so a value that persists means delivery is failing to make progress. Inspect with `sunder dsr events`; force a requeue with `sunder dsr requeue -all` once no worker is running."
 
+      # Children named by an erasure and not yet erased. The AGE is the
+      # signal, not the count: a large cascade in progress and one that
+      # stopped an hour ago look identical by count alone, and the second is
+      # an Article 17 commitment the organisation is not keeping.
+      - alert: SunderErasureCascadeStalled
+        expr: sunder_erasure_cascade_oldest_seconds{job="sunder"} > 3600
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "A cascading erasure has been outstanding for {{ $value | humanizeDuration }}"
+          description: "One or more people named by a cascading erasure are still not erased. The background sweep retries every SUNDER_DELIVER_INTERVAL, so a persistent value means a child cannot be erased at all - check the service log for 'pending cascade did not finish' and the erasure_cascade table for the erasure_id. These are people the organisation has committed to forgetting."
+
       - alert: SunderErasureEventsFailed
         expr: sunder_erasure_events_failed{job="sunder"} > 0
         labels: {severity: critical}

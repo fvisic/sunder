@@ -119,6 +119,10 @@ capabilities: {drop: [ALL]}
 - name: SUNDER_REKEY_BATCH
   value: {{ . | quote }}
 {{- end }}
+{{- with .Values.tunables.maxCascadeChildren }}
+- name: SUNDER_MAX_CASCADE_CHILDREN
+  value: {{ . | quote }}
+{{- end }}
 {{- if .Values.keystore.allowMint }}
 - name: SUNDER_KEYSTORE_ALLOW_MINT
   value: "true"

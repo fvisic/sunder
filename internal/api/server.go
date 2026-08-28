@@ -150,7 +150,8 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		s.OTI = &service.OTI{Pool: st.Pool, Eng: eng, Ring: ring, Contacts: s.Contacts, TTL: cfg.OTITTL}
 		s.GDPR = &service.GDPR{Pool: st.Pool, Contacts: s.Contacts,
 			HTTPTimeout: cfg.WebhookTimeout, MaxAttempts: cfg.WebhookMaxAttempts,
-			ClaimTTL: cfg.WorkerClaimTTL, Log: s.Log}
+			ClaimTTL: cfg.WorkerClaimTTL, Log: s.Log,
+			MaxCascadeChildren: cfg.MaxCascadeChildren}
 		if cfg.PortalEnabled {
 			s.Portal = &service.Portal{GDPR: s.GDPR, Contacts: s.Contacts, BaseURL: cfg.PortalBaseURL}
 		}
@@ -433,6 +434,18 @@ func (s *Server) Run(ctx context.Context) error {
 							}
 						}()
 					}
+					// Cascades interrupted mid-flight. The durable plan made
+					// them recoverable; this is what makes them recover
+					// without an operator noticing and re-issuing the call.
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						if n, err := s.GDPR.RunPendingCascades(ctx); err != nil {
+							s.Log.Error("pending cascades", "err", err.Error())
+						} else if n > 0 {
+							s.Log.Info("interrupted cascades finished", "erasures", n)
+						}
+					}()
 					wg.Wait()
 				}
 			}
@@ -781,6 +794,15 @@ func (s *Server) startUnsealedGauge(ctx context.Context) {
 					if sending, failed, err := service.ErasureQueueDepth(ctx, s.Store.Pool); err == nil {
 						s.Metrics.Set("sunder_erasure_events_sending", float64(sending))
 						s.Metrics.Set("sunder_erasure_events_failed", float64(failed))
+					}
+					// Children named by an erasure and not yet erased. The
+					// AGE matters more than the count: a large cascade in
+					// progress and a cascade that stopped an hour ago look
+					// identical by count alone, and the second is an Article
+					// 17 breach in progress (L6).
+					if pending, oldest, err := service.PendingCascades(ctx, s.Store.Pool); err == nil {
+						s.Metrics.Set("sunder_erasure_cascade_pending", float64(pending))
+						s.Metrics.Set("sunder_erasure_cascade_oldest_seconds", oldest)
 					}
 				}
 			}

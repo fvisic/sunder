@@ -119,6 +119,11 @@ tunables:
   # a sweep nobody can finish is a capability nobody has. Lower it to hold
   # less memory per batch and be gentler on a loaded database.
   rekeyBatch: ""         # SUNDER_REKEY_BATCH, 1-10000 (default 500)
+  # Upper bound on one cascading erasure. A cascade erases one person per
+  # transaction; unbounded, a link type with tens of thousands of members
+  # would hold connections for minutes inside a single request. Above this
+  # count the request is REFUSED before anything is erased.
+  maxCascadeChildren: "" # SUNDER_MAX_CASCADE_CHILDREN, 1-1000000 (default 1000)
 
 # Derived search indexes (F1/F2). Both OFF by default: each widens the search
 # surface and adds token rows per contact. Enabling either on an existing

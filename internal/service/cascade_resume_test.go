@@ -10,6 +10,9 @@ package service_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/fvisic/sunder/internal/auth"
@@ -301,5 +304,144 @@ func TestCascadeSurfacesAChildFailure(t *testing.T) {
 	}
 	if erased {
 		t.Fatal("the plan is written in the erasure's OWN transaction - a failure there must roll the erasure back too")
+	}
+}
+
+// TestCascadeRefusesBeyondTheLimit: a cascading erasure runs one transaction
+// PER PERSON. Unbounded, a request naming a link type that happens to have
+// tens of thousands of members holds connections for minutes inside one HTTP
+// call, with no way to stop it and no way for the caller to learn how far it
+// got when their client times out.
+//
+// The refusal has to land BEFORE anything is erased, and this test asserts
+// exactly that: after the 400, the parent still resolves and every child
+// still has its attributes. A limit enforced mid-loop would be worse than
+// none - it would leave a family half-erased and the map to the rest deleted.
+func TestCascadeRefusesBeyondTheLimit(t *testing.T) {
+	e, links, client := cascadeEnv(t)
+	ctx := context.Background()
+	e.gdpr.MaxCascadeChildren = 2 // small, so the test states the rule not the number
+
+	parent, err := e.svc.Register(ctx, client, service.RegisterInput{Email: "bigparent@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kids := make([]string, 3) // one over the limit
+	for i := range kids {
+		kids[i], err = e.svc.Register(ctx, client, service.RegisterInput{
+			Email:      fmt.Sprintf("member%d@example.com", i),
+			Attributes: map[string]string{"tier": "gold"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := links.Link(ctx, client, parent, kids[i], "member"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, _, _, err = e.gdpr.EraseWithCascade(ctx, client, parent, []string{"member"})
+	if !errors.Is(err, service.ErrCascadeTooLarge) {
+		t.Fatalf("a cascade of 3 with a limit of 2 must be refused, got %v", err)
+	}
+	// The message has to carry both numbers: an operator deciding between
+	// batching and raising the bound needs to know the size they hit.
+	if !strings.Contains(err.Error(), "3") || !strings.Contains(err.Error(), "2") {
+		t.Fatalf("the refusal names neither the count nor the limit: %v", err)
+	}
+
+	// NOTHING may have been erased.
+	if _, lerr := e.svc.Lookup(ctx, client, service.LookupInput{Email: "bigparent@example.com"}); lerr != nil {
+		t.Fatalf("the parent was erased by a REFUSED cascade: %v", lerr)
+	}
+	for i := range kids {
+		if _, aerr := e.svc.GetAttribute(ctx, client, kids[i], "tier", "support"); aerr != nil {
+			t.Fatalf("child %d lost its data to a refused cascade: %v", i, aerr)
+		}
+	}
+
+	// And under the limit it still works - the guard must not block ordinary use.
+	e.gdpr.MaxCascadeChildren = 10
+	if _, _, _, err := e.gdpr.EraseWithCascade(ctx, client, parent, []string{"member"}); err != nil {
+		t.Fatalf("a cascade within the limit must proceed: %v", err)
+	}
+}
+
+// TestPendingCascadesAreFinishedByTheWorker: the durable plan made an
+// interrupted cascade RECOVERABLE, and nothing made it recover. The only
+// thing that resumed one was an operator re-issuing the identical call -
+// which assumes they know it stopped, and the report that would have told
+// them is what the interruption swallowed.
+func TestPendingCascadesAreFinishedByTheWorker(t *testing.T) {
+	e, links, client := cascadeEnv(t)
+	ctx := context.Background()
+
+	parent, err := e.svc.Register(ctx, client, service.RegisterInput{Email: "wparent@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := e.svc.Register(ctx, client, service.RegisterInput{
+		Email: "wchild@example.com", Attributes: map[string]string{"tier": "gold"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := links.Link(ctx, client, parent, child, "guardian"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.gdpr.EraseWithCascadePlanOnlyForTest(ctx, client, parent, []string{"guardian"}); err != nil {
+		t.Fatal(err)
+	}
+	e.gdpr.Drain()
+
+	// The state an interruption leaves: a child named by a plan, still holding
+	// everything, with nobody coming for it.
+	pending, oldest, err := service.PendingCascades(ctx, e.admin.Pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending != 1 {
+		t.Fatalf("expected 1 pending cascade child, got %d", pending)
+	}
+	if oldest < 0 {
+		t.Fatalf("oldest-pending age must be reportable, got %v", oldest)
+	}
+
+	// Nobody re-issues anything. The sweep finds it.
+	n, err := e.gdpr.RunPendingCascades(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("the worker finished %d cascades, expected 1", n)
+	}
+	e.gdpr.Drain()
+
+	if _, aerr := e.svc.GetAttribute(ctx, client, child, "tier", "support"); aerr == nil {
+		t.Fatal("the child still has its attributes after the worker ran - " +
+			"a person the organisation committed to erasing was not erased")
+	}
+	pending, _, err = service.PendingCascades(ctx, e.admin.Pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("%d cascade children still pending after the worker finished", pending)
+	}
+
+	// A completed cascade must leave a terminal record: without one, the only
+	// evidence is the ABSENCE of pending rows, which is indistinguishable
+	// from a plan that was never written.
+	var completed int
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit WHERE action='dsr.cascade_completed'`).Scan(&completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed == 0 {
+		t.Fatal("a finished cascade wrote no dsr.cascade_completed audit record - " +
+			"there is no positive evidence that every named person is gone")
+	}
+
+	// Idempotent: a second sweep must find nothing and must not re-audit.
+	if n, err := e.gdpr.RunPendingCascades(ctx); err != nil || n != 0 {
+		t.Fatalf("a second sweep finished %d cascades (err %v), expected 0", n, err)
 	}
 }
