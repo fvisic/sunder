@@ -2,6 +2,130 @@
 
 All notable changes to Sunder. Dates are YYYY-MM-DD.
 
+## v0.5.1 - 2026-08-28
+
+A patch release with no API change and no new configuration beyond one knob:
+everything here was found by RUNNING v0.5.0 against 26.9 million contacts,
+not by reading it. Phase 7.4 turned out to be the highest-yield thing in the
+plan - four defects, none of which seven review rounds had caught, and three
+of them in the same sweep.
+
+The headline: **`sunder keys rekey` was unusable at scale.** A full pass over
+26.9M contacts measured **87 hours**; it is now projected at **~5.3 hours**,
+with the remaining cost being actual arithmetic rather than waiting. Since a
+key rotation is how an operator responds to a suspected key compromise, a
+sweep nobody can finish is a capability nobody has.
+
+### The sweep still fetched blobs one person at a time
+Batching the WRITES left the READS untouched, and a measured breakdown showed
+where the remaining 17.6 hours went:
+
+| per person | | |
+|---|---|---|
+| the per-person `SELECT` | 1.65 ms | **70%** |
+| decrypt + tokenize (CPU) | 0.71 ms | 30% |
+
+Two thirds of the sweep was a single-threaded program waiting on a database
+measured accepting 54,000 rows/s while being asked 424 times a second. The
+page's blobs now come back in one `WHERE person_id = ANY($1::uuid[])`,
+projecting 17.6 h down to the ~5.3 h of arithmetic that is actually left.
+
+`TestRekeyFetchesBlobsPerPageNotPerPerson` asserts the fetch count scales
+with PAGES, not people. Its first version counted scans in
+`pg_stat_user_tables` and **passed after per-person fetching was deliberately
+reintroduced** - those statistics are collected asynchronously, so it was
+measuring noise. It now uses a seam and fails with `the sweep fetched blobs
+40 times for 40 persons`. A test that cannot fail is worse than no test,
+because it is claimed as coverage.
+
+Parallelising the remaining CPU work is Phase 7.8, written up with the seven
+things that can corrupt data if it is done carelessly - starting with the
+resume point, which is a single row that means nothing once there are N
+frontiers.
+
+### The rekey sweep restarted from the first person every time
+`lastID` lived in a local variable, so an interrupted sweep paid for its own
+progress again. Measured mid-backfill on 26.9M contacts: 4.1M persons already
+processed cost **2.7 hours** of re-reading before the sweep reached any
+outstanding work - and the cost grows as the backfill advances, so the
+operator forced to interrupt (window closed, database loaded) is punished
+hardest. A 30-minute measurement run of the batched sweep wrote **zero**
+tokens: it spent the whole window walking ground it had already covered.
+
+Migration 0043 adds a single-row `rekey_progress`. Its `scope` column is the
+safety argument: a resume point means "persons below this uuid are done",
+true only for the outstanding set the interrupted run was working through.
+Rotate a key, flip a derived-search flag, or rerun with `-reencrypt-pii`
+after a run without it, and persons *below* the point have work again -
+honouring a stale point would skip them permanently, because the point
+advances past them on every later run. The scope fingerprints every input
+that decides the outstanding set, so a mismatch restarts from the beginning.
+
+### The sweep ran for seven hours in total silence
+No progress output at all: an operator could not tell a working sweep from a
+hung one. It now logs a start line, a progress line every 30 seconds
+(persons, tokens, persons/sec, ETA) and a finish line. Both runbooks stop
+describing `keys rekey` as a command and start describing it as a
+maintenance window, with measured numbers: **~424 persons/sec**, **~17.6 h**
+for a full pass over 26.9M contacts, roughly 40 minutes per million.
+
+### `benchmark/bulkload` had no tests, and the scale numbers rest on it
+The loader claims a bulk-loaded contact "resolves exactly as it would for a
+contact registered through the API". Nothing verified it - and a loader that
+wrote a token under the wrong key version, or an AEAD blob without the
+server's AAD binding, would fail as a silent MISS on data no throughput
+benchmark re-reads. Three tests now assert the claim through the server's own
+lookup and attribute paths, and compare a loaded contact's token kinds, key
+versions, blob key id and algorithm against a registered one. Both failure
+modes were verified by introducing them.
+
+### The rekey sweep wrote one token per statement (found by Phase 7.4)
+With the pagination fixed, the sweep was still measured at **87 hours** for a
+26.9M-contact backfill. The cause was the write shape, not the read: it
+Exec'd once per token, so a person cost **7.2 synchronous round trips** and
+the dataset cost 193.6 million of them.
+
+The database was never the constraint. Measured on the same instance,
+in-server, 1000 rows: 18.4 ms as single-row inserts, 7.0 ms as one multi-row
+insert - about **54,000 rows/s** either way, against the sweep's 605
+queries/s. A 90x gap that is pure round-trip latency.
+
+Tokens now accumulate per batch and land in one `INSERT ... unnest(...)`.
+The per-ROW liveness check moved from `WHERE EXISTS (... erased_at IS NULL)`
+into a join on `persons` inside the same statement - it had to, because
+batching WIDENS the window GDPR-ERASURE-2 lives in: a person read at the top
+of a 500-person batch has their tokens written at the bottom of it.
+`TestBatchedTokenFlushStillRefusesAnErasedPerson` erases someone in exactly
+that window through a test seam, and fails if the join is weakened.
+
+A failed batch is replayed row by row to name the offending person before
+the error is returned: `person_tokens_ident_uq` is not the conflict target,
+so a dedup-invariant violation aborts the statement, and "a batch of 500
+failed" is a worse diagnostic than "this person failed".
+
+`SUNDER_REKEY_BATCH` (default 500, `1`-`10000`) exposes the knob; `1`
+restores the old behaviour and its duration.
+
+### New configuration
+`SUNDER_REKEY_BATCH` (default `500`, range `1`-`10000`): persons per page,
+and how many persons' search tokens go into one `INSERT`. `1` restores the
+pre-0.5.1 per-token behaviour and its 87 hours.
+
+### Also in this release
+- The playground reaches **every** shipped surface (Phase 8): a cascading
+  erasure walkthrough contrasting "erase the guardian" with
+  `cascade:[guardian]` on one page, and an allow-list where each remaining
+  omission names a docs page that must exist - a guard test that immediately
+  caught a pointer at a retention page nobody had written.
+- Two more assignment-style test corruptions fixed, plus a guard that fails
+  the build on `overlay(... placing ...)` in any test.
+
+### Upgrade notes
+Migration `0043` adds a single-row `rekey_progress`. On the 26.9M-contact
+dataset the v0.4 -> v0.5 batch applied in **0.63 s** with the process
+answering `/readyz` **1.5 s** after start; `0043` is smaller than any of
+them. No action required beyond the usual rolling restart.
+
 ## v0.5.0 - 2026-08-27
 
 The second full external review (116 findings across eleven dimension audits)
@@ -193,99 +317,8 @@ fixes generalise an existing guard rather than invent one.
 ### New configuration
 `SUNDER_WORKER_CLAIM_TTL`, `SUNDER_KEYSTORE_ALLOW_MINT`,
 `SUNDER_AUDIT_STALE_UNSEALED`, `SUNDER_KEY_RETIRE_GRACE`,
-`SUNDER_API_CLIENT_IP_HEADER`, `SUNDER_SEALER_HEALTH_ADDR`,
-`SUNDER_REKEY_BATCH`. Booleans now accept `true/false`, `1/0`, `yes/no`,
-`on/off` and REFUSE anything else.
-
-### The sweep still fetched blobs one person at a time
-Batching the WRITES left the READS untouched, and a measured breakdown showed
-where the remaining 17.6 hours went:
-
-| per person | | |
-|---|---|---|
-| the per-person `SELECT` | 1.65 ms | **70%** |
-| decrypt + tokenize (CPU) | 0.71 ms | 30% |
-
-Two thirds of the sweep was a single-threaded program waiting on a database
-measured accepting 54,000 rows/s while being asked 424 times a second. The
-page's blobs now come back in one `WHERE person_id = ANY($1::uuid[])`,
-projecting 17.6 h down to the ~5.3 h of arithmetic that is actually left.
-
-`TestRekeyFetchesBlobsPerPageNotPerPerson` asserts the fetch count scales
-with PAGES, not people. Its first version counted scans in
-`pg_stat_user_tables` and **passed after per-person fetching was deliberately
-reintroduced** - those statistics are collected asynchronously, so it was
-measuring noise. It now uses a seam and fails with `the sweep fetched blobs
-40 times for 40 persons`. A test that cannot fail is worse than no test,
-because it is claimed as coverage.
-
-Parallelising the remaining CPU work is Phase 7.8, written up with the seven
-things that can corrupt data if it is done carelessly - starting with the
-resume point, which is a single row that means nothing once there are N
-frontiers.
-
-### The rekey sweep restarted from the first person every time
-`lastID` lived in a local variable, so an interrupted sweep paid for its own
-progress again. Measured mid-backfill on 26.9M contacts: 4.1M persons already
-processed cost **2.7 hours** of re-reading before the sweep reached any
-outstanding work - and the cost grows as the backfill advances, so the
-operator forced to interrupt (window closed, database loaded) is punished
-hardest. A 30-minute measurement run of the batched sweep wrote **zero**
-tokens: it spent the whole window walking ground it had already covered.
-
-Migration 0043 adds a single-row `rekey_progress`. Its `scope` column is the
-safety argument: a resume point means "persons below this uuid are done",
-true only for the outstanding set the interrupted run was working through.
-Rotate a key, flip a derived-search flag, or rerun with `-reencrypt-pii`
-after a run without it, and persons *below* the point have work again -
-honouring a stale point would skip them permanently, because the point
-advances past them on every later run. The scope fingerprints every input
-that decides the outstanding set, so a mismatch restarts from the beginning.
-
-### The sweep ran for seven hours in total silence
-No progress output at all: an operator could not tell a working sweep from a
-hung one. It now logs a start line, a progress line every 30 seconds
-(persons, tokens, persons/sec, ETA) and a finish line. Both runbooks stop
-describing `keys rekey` as a command and start describing it as a
-maintenance window, with measured numbers: **~424 persons/sec**, **~17.6 h**
-for a full pass over 26.9M contacts, roughly 40 minutes per million.
-
-### `benchmark/bulkload` had no tests, and the scale numbers rest on it
-The loader claims a bulk-loaded contact "resolves exactly as it would for a
-contact registered through the API". Nothing verified it - and a loader that
-wrote a token under the wrong key version, or an AEAD blob without the
-server's AAD binding, would fail as a silent MISS on data no throughput
-benchmark re-reads. Three tests now assert the claim through the server's own
-lookup and attribute paths, and compare a loaded contact's token kinds, key
-versions, blob key id and algorithm against a registered one. Both failure
-modes were verified by introducing them.
-
-### The rekey sweep wrote one token per statement (found by Phase 7.4)
-With the pagination fixed, the sweep was still measured at **87 hours** for a
-26.9M-contact backfill. The cause was the write shape, not the read: it
-Exec'd once per token, so a person cost **7.2 synchronous round trips** and
-the dataset cost 193.6 million of them.
-
-The database was never the constraint. Measured on the same instance,
-in-server, 1000 rows: 18.4 ms as single-row inserts, 7.0 ms as one multi-row
-insert - about **54,000 rows/s** either way, against the sweep's 605
-queries/s. A 90x gap that is pure round-trip latency.
-
-Tokens now accumulate per batch and land in one `INSERT ... unnest(...)`.
-The per-ROW liveness check moved from `WHERE EXISTS (... erased_at IS NULL)`
-into a join on `persons` inside the same statement - it had to, because
-batching WIDENS the window GDPR-ERASURE-2 lives in: a person read at the top
-of a 500-person batch has their tokens written at the bottom of it.
-`TestBatchedTokenFlushStillRefusesAnErasedPerson` erases someone in exactly
-that window through a test seam, and fails if the join is weakened.
-
-A failed batch is replayed row by row to name the offending person before
-the error is returned: `person_tokens_ident_uq` is not the conflict target,
-so a dedup-invariant violation aborts the statement, and "a batch of 500
-failed" is a worse diagnostic than "this person failed".
-
-`SUNDER_REKEY_BATCH` (default 500, `1`-`10000`) exposes the knob; `1`
-restores the old behaviour and its duration.
+`SUNDER_API_CLIENT_IP_HEADER`, `SUNDER_SEALER_HEALTH_ADDR`. Booleans now
+accept `true/false`, `1/0`, `yes/no`, `on/off` and REFUSE anything else.
 
 ### The rekey sweep was unusable at scale (found by Phase 7.4)
 `sunder keys rekey` paginated with `id::text > $1 ORDER BY id::text`. Casting
