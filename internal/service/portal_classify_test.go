@@ -81,8 +81,14 @@ func TestPortalMailAbandonsACorruptPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Flip a ciphertext byte: the AEAD rejects it, and no retry can help.
+	//
+	// XOR rather than assignment. `overlay ... placing '\xff'` SETS the byte,
+	// so when it already held 0xff the payload was left intact, the AEAD
+	// opened it, and the test failed with NO_MAILER instead of FAILED - a
+	// 1-in-256 flake that took a CI leg down once and reproduced in no local
+	// run. Corrupting by XOR is corruption whatever the byte held.
 	if _, err := e.admin.Pool.Exec(ctx,
-		`UPDATE portal_outbox SET payload = overlay(payload placing '\xff'::bytea from 20 for 1)`); err != nil {
+		`UPDATE portal_outbox SET payload = set_byte(payload, 19, get_byte(payload, 19) # 255)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := portal.DeliverPendingMail(ctx); err != nil {
