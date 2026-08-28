@@ -193,8 +193,36 @@ fixes generalise an existing guard rather than invent one.
 ### New configuration
 `SUNDER_WORKER_CLAIM_TTL`, `SUNDER_KEYSTORE_ALLOW_MINT`,
 `SUNDER_AUDIT_STALE_UNSEALED`, `SUNDER_KEY_RETIRE_GRACE`,
-`SUNDER_API_CLIENT_IP_HEADER`, `SUNDER_SEALER_HEALTH_ADDR`. Booleans now
-accept `true/false`, `1/0`, `yes/no`, `on/off` and REFUSE anything else.
+`SUNDER_API_CLIENT_IP_HEADER`, `SUNDER_SEALER_HEALTH_ADDR`,
+`SUNDER_REKEY_BATCH`. Booleans now accept `true/false`, `1/0`, `yes/no`,
+`on/off` and REFUSE anything else.
+
+### The rekey sweep wrote one token per statement (found by Phase 7.4)
+With the pagination fixed, the sweep was still measured at **87 hours** for a
+26.9M-contact backfill. The cause was the write shape, not the read: it
+Exec'd once per token, so a person cost **7.2 synchronous round trips** and
+the dataset cost 193.6 million of them.
+
+The database was never the constraint. Measured on the same instance,
+in-server, 1000 rows: 18.4 ms as single-row inserts, 7.0 ms as one multi-row
+insert - about **54,000 rows/s** either way, against the sweep's 605
+queries/s. A 90x gap that is pure round-trip latency.
+
+Tokens now accumulate per batch and land in one `INSERT ... unnest(...)`.
+The per-ROW liveness check moved from `WHERE EXISTS (... erased_at IS NULL)`
+into a join on `persons` inside the same statement - it had to, because
+batching WIDENS the window GDPR-ERASURE-2 lives in: a person read at the top
+of a 500-person batch has their tokens written at the bottom of it.
+`TestBatchedTokenFlushStillRefusesAnErasedPerson` erases someone in exactly
+that window through a test seam, and fails if the join is weakened.
+
+A failed batch is replayed row by row to name the offending person before
+the error is returned: `person_tokens_ident_uq` is not the conflict target,
+so a dedup-invariant violation aborts the statement, and "a batch of 500
+failed" is a worse diagnostic than "this person failed".
+
+`SUNDER_REKEY_BATCH` (default 500, `1`-`10000`) exposes the knob; `1`
+restores the old behaviour and its duration.
 
 ### The rekey sweep was unusable at scale (found by Phase 7.4)
 `sunder keys rekey` paginated with `id::text > $1 ORDER BY id::text`. Casting

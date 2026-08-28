@@ -786,7 +786,9 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 	case "rekey":
 		fs := flag.NewFlagSet("keys rekey", flag.ContinueOnError)
 		reenc := fs.Bool("reencrypt-pii", true, "also re-encrypt attribute blobs under the newest pii-kek")
-		batch := fs.Int("batch", 500, "persons per page")
+		// The flag overrides the configured default, so an operator can slow
+		// a sweep down on a loaded database without redeploying.
+		batch := fs.Int("batch", cfg.RekeyBatch, "persons per page, and per token INSERT (SUNDER_REKEY_BATCH)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}

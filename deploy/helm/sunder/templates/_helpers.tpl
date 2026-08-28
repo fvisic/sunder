@@ -115,6 +115,10 @@ capabilities: {drop: [ALL]}
 - name: SUNDER_API_CLIENT_IP_HEADER
   value: {{ . | quote }}
 {{- end }}
+{{- with .Values.tunables.rekeyBatch }}
+- name: SUNDER_REKEY_BATCH
+  value: {{ . | quote }}
+{{- end }}
 {{- if .Values.keystore.allowMint }}
 - name: SUNDER_KEYSTORE_ALLOW_MINT
   value: "true"

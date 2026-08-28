@@ -68,6 +68,7 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 	// The uuid zero value is the lower bound; uuid ordering differs from text
 	// ordering, which does not matter to a sweep that must visit every row.
 	lastID := "00000000-0000-0000-0000-000000000000"
+	tokens := newTokenBatch()
 	for {
 		rows, err := c.Pool.Query(ctx,
 			`SELECT id FROM persons WHERE erased_at IS NULL AND id > $1::uuid ORDER BY id LIMIT $2`,
@@ -92,10 +93,14 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 			break
 		}
 		for _, id := range ids {
-			if err := c.rekeyPerson(ctx, id, newestByKind, newestKEK, reencryptPII, &stats); err != nil {
+			if err := c.rekeyPerson(ctx, id, newestByKind, newestKEK, reencryptPII, &stats, tokens); err != nil {
 				return stats, fmt.Errorf("person %s: %w", id, err)
 			}
 			stats.Persons++
+		}
+		// One statement for the whole batch's tokens.
+		if err := c.flushTokens(ctx, tokens, &stats); err != nil {
+			return stats, err
 		}
 		lastID = ids[len(ids)-1]
 	}
@@ -123,7 +128,111 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 	return stats, nil
 }
 
-func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[string]string, newestKEK string, reencryptPII bool, stats *RekeyStats) error {
+// BeforeTokenFlushForTest runs immediately before a token batch is written,
+// nil in production. See flushTokens.
+var BeforeTokenFlushForTest func()
+
+// tokenBatch accumulates the search tokens produced across every person in
+// one sweep batch, so they land in ONE statement instead of one per token.
+//
+// The sweep used to Exec once per token: 7.2 synchronous round trips per
+// person, each waiting for the previous reply. Measured on 26.9M contacts
+// that is 193.6 MILLION round trips and ~87 hours, while the same database
+// accepts 54,000 rows/s in-server - the bottleneck was never PostgreSQL or
+// the decryption, only the latency of asking one row at a time.
+type tokenBatch struct {
+	personIDs []string
+	kinds     []string
+	tokens    []string
+	versions  []string
+	seen      map[string]bool // dedup within the batch, cheaper than a conflict
+}
+
+func newTokenBatch() *tokenBatch { return &tokenBatch{seen: map[string]bool{}} }
+
+func (b *tokenBatch) add(personID, kind, token, version string) {
+	key := personID + "\x00" + kind + "\x00" + token
+	if b.seen[key] {
+		return
+	}
+	b.seen[key] = true
+	b.personIDs = append(b.personIDs, personID)
+	b.kinds = append(b.kinds, kind)
+	b.tokens = append(b.tokens, token)
+	b.versions = append(b.versions, version)
+}
+
+func (b *tokenBatch) len() int { return len(b.personIDs) }
+
+func (b *tokenBatch) reset() {
+	b.personIDs, b.kinds, b.tokens, b.versions = b.personIDs[:0], b.kinds[:0], b.tokens[:0], b.versions[:0]
+	clear(b.seen)
+}
+
+// flushTokens writes the whole batch in one statement.
+//
+// The join onto persons is the per-ROW liveness check the single-row form
+// had as `WHERE EXISTS (... erased_at IS NULL)`. It is load-bearing, not
+// tidiness: the batch snapshot is arbitrarily stale by the time this runs,
+// and an erasure landing in that window used to have its deleted search
+// tokens RE-CREATED here, under the newest key version, permanently - and
+// immediately usable (GDPR-ERASURE-2). Evaluating it per row inside the
+// statement keeps that invariant exactly where it was.
+func (c *Contacts) flushTokens(ctx context.Context, b *tokenBatch, stats *RekeyStats) error {
+	if b.len() == 0 {
+		return nil
+	}
+	if BeforeTokenFlushForTest != nil {
+		// A test seam, not a feature. Batching WIDENS the window between
+		// reading a person and writing their tokens - the very window
+		// GDPR-ERASURE-2 lives in - so a test has to be able to erase
+		// someone inside it deterministically rather than by racing.
+		BeforeTokenFlushForTest()
+	}
+	tag, err := c.Pool.Exec(ctx,
+		`INSERT INTO person_tokens (person_id, kind, token, key_version)
+		 SELECT u.pid, u.kind, u.tok, u.ver
+		   FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[]) AS u(pid, kind, tok, ver)
+		   JOIN persons p ON p.id = u.pid AND p.erased_at IS NULL
+		 ON CONFLICT (person_id, kind, token) DO NOTHING`,
+		b.personIDs, b.kinds, b.tokens, b.versions)
+	if err != nil {
+		// person_tokens_ident_uq (UNIQUE on (kind, token) for email/phone) is
+		// the dedup invariant and is NOT the conflict target above, so a
+		// violation of it aborts the statement - and with it the whole batch.
+		// That is the same outcome the single-row form had (it returned the
+		// error too), but the diagnostic would be worse: "a batch of 500
+		// failed" instead of "this person failed". Replay row by row to name
+		// the offender, then surface the original error.
+		if who := c.findOffendingRow(ctx, b); who != "" {
+			return fmt.Errorf("token batch failed at person %s: %w", who, err)
+		}
+		return err
+	}
+	stats.TokensInserted += tag.RowsAffected()
+	b.reset()
+	return nil
+}
+
+// findOffendingRow re-runs a failed batch one row at a time and reports the
+// first person whose insert fails. Diagnostics only: the caller returns the
+// batch's original error either way.
+func (c *Contacts) findOffendingRow(ctx context.Context, b *tokenBatch) string {
+	for i := range b.personIDs {
+		_, err := c.Pool.Exec(ctx,
+			`INSERT INTO person_tokens (person_id, kind, token, key_version)
+			 SELECT $1,$2,$3,$4
+			  WHERE EXISTS (SELECT 1 FROM persons WHERE id=$1 AND erased_at IS NULL)
+			 ON CONFLICT (person_id, kind, token) DO NOTHING`,
+			b.personIDs[i], b.kinds[i], b.tokens[i], b.versions[i])
+		if err != nil {
+			return b.personIDs[i]
+		}
+	}
+	return ""
+}
+
+func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[string]string, newestKEK string, reencryptPII bool, stats *RekeyStats, batch *tokenBatch) error {
 	rows, err := c.Pool.Query(ctx,
 		`SELECT cid, COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm'), updated_at
 		 FROM cids WHERE person_id=$1`, personID)
@@ -234,6 +343,9 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 		}
 	}
 
+	// Accumulate rather than Exec. The liveness check that used to ride each
+	// INSERT now rides the batch's join onto persons - same invariant, same
+	// place in the statement, one statement per batch instead of per token.
 	insert := func(rowKind string, values map[string]bool,
 		tokFn func(ctx context.Context, version, normalized string) (string, error), version string) error {
 		for v := range values {
@@ -241,23 +353,7 @@ func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[
 			if err != nil {
 				return err
 			}
-			// The liveness of the batch snapshot (rekey.go's person SELECT)
-			// is arbitrarily stale by the time this runs - each person costs
-			// several signer round trips. An erasure landing in that window
-			// used to see its deleted search tokens RE-CREATED here, under
-			// the newest key version, permanently: nothing deletes them
-			// again, and they are immediately usable (GDPR-ERASURE-2). The
-			// EXISTS makes liveness a per-write invariant.
-			tag, err := c.Pool.Exec(ctx,
-				`INSERT INTO person_tokens (person_id, kind, token, key_version)
-				 SELECT $1,$2,$3,$4
-				  WHERE EXISTS (SELECT 1 FROM persons WHERE id=$1 AND erased_at IS NULL)
-				 ON CONFLICT (person_id, kind, token) DO NOTHING`,
-				personID, rowKind, tok, version)
-			if err != nil {
-				return err
-			}
-			stats.TokensInserted += tag.RowsAffected()
+			batch.add(personID, rowKind, tok, version)
 		}
 		return nil
 	}
