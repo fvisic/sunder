@@ -51,16 +51,24 @@ type erasureDecision struct {
 // code - the whole point of the gate is that "this one is fine" has to be
 // written down and defended rather than assumed.
 var notPersonal = map[string]string{
-	"schema_migrations":     "applied migration versions",
-	"keys":                  "key metadata (kind, version, status) - no subject reference",
-	"clients":               "API credentials: the CLIENT organisation, never a data subject",
-	"webhooks":              "per-scope endpoint configuration",
-	"retention_policies":    "per-scope TTL configuration",
-	"trusted_issuers":       "federation issuer public keys and their revocation state - the ISSUING organisation, never a data subject",
-	"audit":                 "the append-only chain: NEVER pruned, it is the tamper evidence. Its cid column is a tombstoned pseudonym, which is the accountability record erasure is proven by",
-	"audit_anchor":          "RFC 3161 timestamps over chain heads - a digest, no subject data",
-	"audit_read_buckets":    "hourly read aggregates keyed by the (tombstoned) pseudonym; append-only by trigger, like `audit`, for the same reason",
-	"unlock_tokens":         "single-use operator intent declarations, keyed by client and purpose",
+	"schema_migrations":  "applied migration versions",
+	"keys":               "key metadata (kind, version, status) - no subject reference",
+	"clients":            "API credentials: the CLIENT organisation, never a data subject",
+	"webhooks":           "per-scope endpoint configuration",
+	"retention_policies": "per-scope TTL configuration",
+	"trusted_issuers":    "federation issuer public keys and their revocation state - the ISSUING organisation, never a data subject",
+	"audit":              "the append-only chain: NEVER pruned, it is the tamper evidence. Its cid column is a tombstoned pseudonym, which is the accountability record erasure is proven by",
+	"audit_anchor":       "RFC 3161 timestamps over chain heads - a digest, no subject data",
+	"audit_read_buckets": "hourly read aggregates keyed by the (tombstoned) pseudonym; append-only by trigger, like `audit`, for the same reason",
+	"unlock_tokens":      "single-use operator intent declarations, keyed by client and purpose",
+	// A single row holding "the sweep has reached this uuid", not a fact
+	// about the person. The uuid itself is NOT disclosed by keeping it:
+	// erasure tombstones a person rather than deleting the row, so
+	// persons.id survives erasure permanently and by design - client-side
+	// CID references must not break. The row is also transient (deleted the
+	// moment a sweep finishes) and there is at most one. Deleting it during
+	// erasure would slow every erasure to protect nothing.
+	"rekey_progress":        "one row recording how far `keys rekey` has paginated; the person id in it is a POSITION, and persons.id already survives erasure as a tombstone",
 	"portal_email_throttle": "a KEYED HMAC of an address plus a send counter - derived from a person's identifier, so it IS personal data, but it is not reachable from a person id or a cid and it self-prunes after 1 day (PrunePortal). Erasure cannot target it; the 1-day window is the argument that it does not need to",
 }
 

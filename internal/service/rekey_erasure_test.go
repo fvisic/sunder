@@ -548,3 +548,137 @@ func countTokens(t *testing.T, e *faultEnv, out *map[string]int) {
 	}
 	*out = m
 }
+
+// TestRekeyResumesFromWhereItStopped: the sweep used to restart from the
+// first person on every run. Mid-backfill on the 26.9M dataset that cost 2.7
+// HOURS of re-reading persons it had already covered, before reaching any
+// outstanding work - and that cost grows as the backfill advances, so the
+// operator who has to interrupt a sweep is punished hardest.
+func TestRekeyResumesFromWhereItStopped(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	const people = 30
+	for i := 0; i < people; i++ {
+		if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email: fmt.Sprintf("resume%d@example.com", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, crypto.KeyHMACEmail); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stop the first run part-way by failing a flush after two batches.
+	batches := 0
+	service.BeforeTokenFlushForTest = func() {
+		batches++
+		if batches == 3 {
+			panic("stop here")
+		}
+	}
+	t.Cleanup(func() { service.BeforeTokenFlushForTest = nil })
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = e.svc.Rekey(ctx, false, 5)
+	}()
+	service.BeforeTokenFlushForTest = nil
+
+	var saved string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT last_person_id::text FROM rekey_progress WHERE id`).Scan(&saved); err != nil {
+		t.Fatalf("an interrupted sweep recorded no resume point: %v", err)
+	}
+
+	// The second run must pick that up rather than starting over.
+	stats, err := e.svc.Rekey(ctx, false, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stats.Resumed {
+		t.Fatal("the second run started from the beginning - the resume point was ignored")
+	}
+	if stats.PersonsSkipped == 0 {
+		t.Fatal("resumed, but reported 0 persons already covered - the operator cannot tell how far along the sweep is")
+	}
+	if stats.Persons >= people {
+		t.Fatalf("the resumed run visited %d persons of %d - it re-read the ones already done",
+			stats.Persons, people)
+	}
+
+	// Finishing clears the point: leaving it would make the NEXT run skip a
+	// person registered below it.
+	var left int
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM rekey_progress`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatal("a completed sweep left its resume point behind")
+	}
+
+	// And every contact still resolves: resuming must not have skipped work.
+	for i := 0; i < people; i++ {
+		if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+			Email: fmt.Sprintf("resume%d@example.com", i)}); err != nil {
+			t.Fatalf("contact %d does not resolve after a resumed sweep: %v", i, err)
+		}
+	}
+}
+
+// TestRekeyIgnoresAResumePointFromDifferentWork is the dangerous half.
+//
+// A resume point means "persons below this uuid are done" - true ONLY for
+// the outstanding set the interrupted run was working through. Rotate a key
+// afterwards and persons below that point have work again; honouring the
+// stale point would skip them permanently, and no rerun would ever revisit
+// them because the point advances past them each time. The scope
+// fingerprint is what prevents it.
+func TestRekeyIgnoresAResumePointFromDifferentWork(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	for i := 0; i < 20; i++ {
+		if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email: fmt.Sprintf("scope%d@example.com", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, crypto.KeyHMACEmail); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plant a resume point that claims almost everything is done, under the
+	// CURRENT scope, then change the work by rotating again.
+	if _, err := e.admin.Pool.Exec(ctx,
+		// uuid has no max(); order and take the last, which is what the
+		// sweep's own pagination would have reached.
+		`INSERT INTO rekey_progress (id, scope, last_person_id, persons_done)
+		 SELECT TRUE, 'stale-scope-from-different-work', id, 19
+		   FROM persons ORDER BY id DESC LIMIT 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, crypto.KeyHMACEmail); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := e.svc.Rekey(ctx, false, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Resumed {
+		t.Fatal("the sweep honoured a resume point recorded for DIFFERENT work - " +
+			"persons below it would never be revisited")
+	}
+	if stats.Persons < 20 {
+		t.Fatalf("the sweep visited %d persons, expected all 20: a stale resume point "+
+			"caused work to be skipped permanently", stats.Persons)
+	}
+	// The tokens for the newest version must exist for every contact.
+	for i := 0; i < 20; i++ {
+		if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+			Email: fmt.Sprintf("scope%d@example.com", i)}); err != nil {
+			t.Fatalf("contact %d lost its tokens to a stale resume point: %v", i, err)
+		}
+	}
+}

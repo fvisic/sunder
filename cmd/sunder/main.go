@@ -806,8 +806,17 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		if err != nil {
 			return err
 		}
-		fmt.Printf("rekey sweep: %d person(s), %d token(s) written, %d blob(s) re-encrypted, %d blob(s) undecryptable\n",
+		if stats.Resumed {
+			// Without this line "500 persons" after a resume reads as a sweep
+			// that has barely started, when it is actually near the end.
+			fmt.Printf("resumed from a previous run's position: %d person(s) were already covered\n",
+				stats.PersonsSkipped)
+		}
+		fmt.Printf("rekey sweep: %d person(s) this run, %d token(s) written, %d blob(s) re-encrypted, %d blob(s) undecryptable\n",
 			stats.Persons, stats.TokensInserted, stats.BlobsReenc, stats.Skipped)
+		if stats.Resumed {
+			fmt.Printf("  %d person(s) covered in total across runs\n", stats.PersonsSkipped+stats.Persons)
+		}
 		if stats.Raced > 0 {
 			// NOT a warning to be ignored: these rows were written by a
 			// concurrent request between this sweep's read and its write, so
