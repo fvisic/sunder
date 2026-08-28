@@ -450,8 +450,12 @@ func TestRekeySkipsUndecryptableRowsAndKeepsGoing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// XOR, never assignment: `overlay ... placing '\xff'` is a no-op when the
+	// byte already holds 0xff, which leaves the ciphertext valid and the test
+	// asserting nothing. Same 1-in-256 flake that took a CI leg down in
+	// TestPortalMailAbandonsACorruptPayload.
 	if _, err := e.admin.Pool.Exec(ctx,
-		`UPDATE value_tokens SET ciphertext = overlay(ciphertext placing '\xff'::bytea from 20 for 1) WHERE token=$1`,
+		`UPDATE value_tokens SET ciphertext = set_byte(ciphertext, 19, get_byte(ciphertext, 19) # 255) WHERE token=$1`,
 		bad); err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +465,7 @@ func TestRekeySkipsUndecryptableRowsAndKeepsGoing(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := e.admin.Pool.Exec(ctx,
-		`UPDATE cid_blob_versions SET blob = overlay(blob placing '\xff'::bytea from 20 for 1)`); err != nil {
+		`UPDATE cid_blob_versions SET blob = set_byte(blob, 19, get_byte(blob, 19) # 255)`); err != nil {
 		t.Fatal(err)
 	}
 	// A record key nothing can unwrap.
