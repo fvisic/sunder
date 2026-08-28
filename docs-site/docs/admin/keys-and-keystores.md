@@ -54,9 +54,58 @@ export SUNDER_VAULT_TOKEN=$(cat /run/secrets/vault-token)
 export SUNDER_VAULT_MOUNT=secret   # KV v2 mount point, default "secret"
 ```
 
-`pkcs11` is accepted by `SUNDER_KEYSTORE` but is a stub today - it returns
-"pkcs11 driver not implemented yet" for every call, pending the first
-compliance-driven demand for HSM-backed material.
+### PKCS#11 / HSM: not available, and the reason is structural
+
+`SUNDER_KEYSTORE=pkcs11` passes config validation and then **the server
+refuses to start**:
+
+```
+keystore bootstrap: keystore: pkcs11 driver not implemented yet
+```
+
+That is deliberate and is the good outcome: the failure lands at startup, so
+a deployment configured this way never serves a single request. Do not plan
+around the value existing.
+
+The reason is worth knowing, because it is not "nobody got round to it".
+
+Sunder's keystore interface asks for **the key bytes**:
+
+```go
+Key(ctx, name) ([]byte, error)
+```
+
+and the engine then does the cryptography itself. **An HSM exists precisely
+so that the key never leaves the hardware.** For a non-extractable key
+(`CKA_EXTRACTABLE=false` - the default, and the only setting worth buying an
+HSM for) the token will simply refuse to hand the bytes over. A driver that
+satisfied this interface would have to export the key, which turns the HSM
+into an expensive file.
+
+Real HSM support therefore means implementing the `Engine` interface - `MAC`,
+`Seal`, `Open`, `Sign`, which map onto `C_Sign`, `C_Encrypt`, `C_Decrypt` and
+run *inside* the token - not the keystore interface. That work also brings a
+cgo dependency, which the current builds deliberately exclude
+(`CGO_ENABLED=0`, distroless runtime image), so it would ship as a separately
+tagged binary.
+
+Two further limits will apply when it does land, and they are properties of
+the standard rather than of Sunder:
+
+- `SUNDER_PII_ALG=xchacha20poly1305` **has no PKCS#11 mechanism at all.**
+- Ed25519 (used for OTI signing) requires **PKCS#11 v3.0**; many deployed
+  HSMs are v2.40.
+
+See [Key Protection](../comparisons/key-protection.md) for what each storage
+choice actually costs an attacker, scenario by scenario.
+
+!!! tip "What to use instead, today"
+    If the worry is "the API process should never hold key material", that is
+    what `SUNDER_SIGNER_SOCKET` already gives you: all cryptography runs in a
+    separate `sunder signer` process, and the API container needs no keystore
+    configuration at all. It is cheaper than an HSM, has no vendor lock-in,
+    and addresses the same concern. An HSM is the right answer when a
+    compliance regime names FIPS 140-2/3 or a qualified seal - not by default.
 
 ### 2. Bootstrap key material
 

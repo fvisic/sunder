@@ -37,6 +37,7 @@ Sunder's extra steps (keyed-HMAC tokens per identifier, a hash-chained audit row
 - **Purpose- and consent-gated field reads.** Every `attributes.read` call requires a `purpose` in the caller's allowed set and is denied if the data subject withdrew consent for that purpose (`consent_denied`, distinct from `purpose_not_allowed`).
 - **Per-client scoping.** A client can only ever reference CIDs in its own scope; a CID from another scope is indistinguishable from a nonexistent one (404), which is what makes cross-system enumeration impossible even with a valid credential.
 - **A supported bulk-import path** (`sunder import`) that computes the same tokens and blobs as the API but skips per-request overhead entirely - see [Bulk Import](../migrations/bulk-import.md).
+- **Key material that does not have to live in the service process.** Databunker takes its master key from an environment variable and keeps it in memory; Sunder supports an external KMS (Vault) and can move all cryptography into a separate signer process, so the API container holds no key bytes at all. Versioned keys, rotation with re-keying, retirement that refuses while data still references a version, and Shamir split-custody recovery have no Databunker equivalent. The scenario-by-scenario comparison - including what each side loses to a memory read, a stolen disk, and root on the host - is on [Key Protection](key-protection.md).
 
 ## The measured head-to-head
 

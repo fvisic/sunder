@@ -227,3 +227,29 @@ func TestBackgroundWorkerTick(t *testing.T) {
 		t.Fatalf("shutdown: %v", err)
 	}
 }
+
+// TestPkcs11RefusesAtStartupNotPerRequest pins the ONLY acceptable behaviour
+// for a keystore driver that does not exist.
+//
+// `SUNDER_KEYSTORE=pkcs11` passes config validation - the value is in the
+// allowed set - so the refusal has to come from somewhere, and WHERE it comes
+// from is the whole point. Failing at startup means a deployment configured
+// this way never serves a request. Failing per request would mean a server
+// that reports healthy, accepts traffic, and errors on every operation - the
+// exact shape of the lost-keystore-volume incident the mint warning exists
+// for.
+//
+// The documentation states this behaviour in three places, so a change here
+// silently makes all three wrong.
+func TestPkcs11RefusesAtStartupNotPerRequest(t *testing.T) {
+	st := testutil.NewDB(t)
+	_, err := New(config.Config{Keystore: "pkcs11", DBURL: "unused"}, st)
+	if err == nil {
+		t.Fatal("the server STARTED with an unimplemented keystore driver - it would " +
+			"report healthy and fail every request instead of refusing to boot")
+	}
+	if !strings.Contains(err.Error(), "pkcs11") {
+		t.Fatalf("the startup error does not name the driver, so an operator cannot "+
+			"tell what to change: %v", err)
+	}
+}

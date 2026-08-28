@@ -72,6 +72,7 @@ nav:
       - Erasure Webhooks: gdpr/erasure-webhooks.md
   - Comparisons:
       - Databunker: comparisons/databunker.md
+      - Key Protection: comparisons/key-protection.md
   - Migrations:
       - From Databunker: migrations/from-databunker.md
       - Bulk Import: migrations/bulk-import.md

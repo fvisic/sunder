@@ -38,7 +38,7 @@ Every subsystem reads its own slice of the environment once; nothing here is rel
 
 | Variable | Default | Description |
 |---|---|---|
-| `SUNDER_KEYSTORE` | `file` | `file`, `vault` or `pkcs11` (stub). |
+| `SUNDER_KEYSTORE` | `file` | `file` or `vault`. **`pkcs11` is NOT IMPLEMENTED**: the value passes validation, but the server then REFUSES TO START - `keystore bootstrap: keystore: pkcs11 driver not implemented yet`. It fails at startup rather than per request, so a misconfigured deployment never serves traffic. Not merely unfinished: the keystore interface asks for the key BYTES, and an HSM exists so the key never leaves the hardware - real support means implementing the ENGINE interface instead. To keep key material out of the API process today, use `SUNDER_SIGNER_SOCKET`. |
 | `SUNDER_KEYSTORE_PATH` | `./keystore` | Key directory for the `file` driver. |
 | `SUNDER_VAULT_ADDR` / `SUNDER_VAULT_TOKEN` | - | Required for the `vault` driver (KV v2). |
 | `SUNDER_VAULT_MOUNT` | `secret` | KV v2 mount point. |
