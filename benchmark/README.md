@@ -3,6 +3,106 @@
 Goal: same machine, same database engine, same load tool, comparable
 operations - and Sunder at least 50% more efficient.
 
+<!-- authoritative:begin - ops/check-sales-deck.sh trusts ONLY what is between these markers -->
+## v0.5.0 server head-to-head (2026-08-29): the authoritative numbers
+
+**Quote these.** Reference server (12 cores, 47 GB, Debian, PostgreSQL 16),
+26,927,777 contacts, both systems in Docker, benchmark client on the same
+host, n=3000 per cell, fresh seed per cell. **Zero errors in all twenty-four
+cells** - the first run of this shape on the v0.5.0 build in which that is
+true, and the reason is below under "What this run had to fix first".
+
+| operation | Sunder | Databunker | delta |
+|---|---:|---:|---:|
+| write c=1  |    73.2 rps |    87.6 rps | **0.8x - Databunker is faster here** |
+| write c=8  |   466.9 rps |   222.7 rps | 2.1x |
+| write c=32 |   625.6 rps |   490.4 rps | 1.3x |
+| write c=64 |   657.9 rps |   406.5 rps | 1.6x |
+| lookup c=1  |   241.4 rps |   220.1 rps | 1.1x |
+| lookup c=8  | 1,260.0 rps |   635.1 rps | 2.0x |
+| lookup c=32 | 2,241.2 rps |   733.7 rps | 3.1x |
+| lookup c=64 | 2,062.2 rps |   537.2 rps | 3.8x |
+| read c=1  |   293.1 rps |   234.3 rps | 1.3x |
+| read c=8  | 1,647.1 rps |   730.0 rps | 2.3x |
+| read c=32 | 2,901.9 rps |   879.1 rps | 3.3x |
+| read c=64 | 3,208.8 rps |   289.4 rps | 11.1x - but see below |
+
+Latency, p50 / p99 in ms:
+
+| operation | Sunder | Databunker |
+|---|---|---|
+| write c=32 | 45.9 / 146.5 | 61.4 / 150.9 |
+| lookup c=32 | 13.4 / 26.9 | 38.7 / 134.7 |
+| lookup c=64 | 25.9 / 128.0 | 109.7 / 328.3 |
+| read c=64 | 19.3 / 30.0 | 168.7 / 898.0 |
+
+### Three things this table says that a sales slide would rather it did not
+
+**Databunker writes faster at c=1** - 87.6 against 73.2 rps. Sunder does more
+per write: an HMAC token per identifier per live key version, phonetic codes
+and a phone suffix when those indexes are on, an AEAD blob, and an audit row.
+Single-client write throughput is the price of that, and it is the honest
+number to show beside the rest.
+
+**The 11.1x on read c=64 is Databunker degrading, not Sunder accelerating.**
+Databunker's reads peak at c=32 (879 rps) and fall to 289 rps at c=64 with a
+p99 of 898 ms. Sunder's climb from 2,902 to 3,209 rps. Quote it as "Databunker
+falls over above 32 concurrent readers", never as "eleven times faster" - the
+second phrasing invites a reader to check it on their own hardware and
+conclude you were selling.
+
+**The shape is the finding, not any single ratio.** Sunder's reads and lookups
+rise to c=32 and hold or keep rising to c=64; Databunker peaks at c=32 and
+declines on every operation. That is a pool-bound path against a
+contention-bound one, and it is what a buyer with growing concurrency should
+care about.
+
+### What this run had to fix first
+
+Two earlier attempts at this table were discarded, and both failures are
+worth recording because each looked like a measurement.
+
+The first reused seeds against an already-populated dataset, so registrations
+collided on existing e-mail addresses and the lookups that followed found
+nothing: 18 rps, 160 errors, 404s on every read cell. Every seed now carries
+the run stamp.
+
+The second was real. Writes ran at 516 rps with zero errors at c=8 and
+collapsed to 18 rps with 150 client timeouts at c=32, while the database sat
+at **zero active queries and zero ungranted locks for ninety seconds**. That
+localised the stall to the server process, and a goroutine dump named it:
+`KeyRing.Newest` held an exclusive mutex and then asked the pool for a
+connection - from inside `registerTx`, which already held one. Once
+concurrency reached the pool size, every connection was held by a goroutine
+queued on that mutex, and the goroutine holding it waited for a connection
+that could never be freed. It resolved only when clients timed out.
+
+After the fix (a background ring refresher, and a read path that structurally
+refuses to query), the same cells measure:
+
+| c | before | after |
+|---|---|---|
+| 8  | 516 rps, 0 errors | 467 rps, 0 errors |
+| 32 | **18 rps, 150 timeouts** | **626 rps, 0 errors** |
+| 64 | **22 rps, 256 timeouts** | **658 rps, 0 errors** |
+
+Nothing in this repository could have found that by reading. It needed
+concurrency at or above the pool size, a write workload, and a rotation - or
+the once-a-second epoch check - landing inside a transaction.
+`TestConcurrentWritesDoNotStallOnTheKeyRing` reproduces it, and
+`TestNoPoolAcquireWhileHoldingATransaction` walks the call graph for the same
+shape anywhere else.
+
+### Reproduce
+
+`~/bench050c.sh` on the reference server. It creates its own credential, uses
+a run-stamped seed per cell, keeps raw output per cell so a parse failure is
+diagnosable rather than reported as a result, and prints which errors it
+counted - the harness used to print only the first five requests by index,
+which is how two 26.9M-row runs were thrown away as "exit status 1".
+
+<!-- authoritative:end -->
+
 ## v0.5.0 re-measurement (2026-08-27, laptop): the second review cost nothing
 
 The remediation for the second external review added roughly a thousand

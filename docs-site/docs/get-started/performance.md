@@ -55,9 +55,46 @@ because the lookup's audit INSERT is now a second statement instead of
 riding an already-held lock's shadow - it disappears into the queueing
 gains from c=4 up.
 
-**Head-to-head vs Databunker**, same laptop, same PostgreSQL 16, same
-harness, both systems interleaved, five rounds plus a clean 5,000-request
-pass, zero errors on both sides:
+<!-- authoritative:begin - ops/check-sales-deck.sh trusts ONLY what is between these markers -->
+## The numbers to quote (v0.5.0, reference server, 26.9M contacts)
+
+Measured 2026-08-29 on the 12-core / 47 GB reference server against
+**26,927,777 contacts**, both systems in Docker on PostgreSQL 16, n=3000 per
+cell, a fresh seed per cell, **zero errors in all twenty-four cells**.
+
+| operation | Sunder | Databunker | delta |
+|---|---:|---:|---:|
+| write c=8 | 466.9 rps | 222.7 rps | 2.1x |
+| write c=32 | 625.6 rps | 490.4 rps | 1.3x |
+| write c=64 | 657.9 rps | 406.5 rps | 1.6x |
+| lookup c=32 | 2,241.2 rps, p99 26.9 ms | 733.7 rps, p99 134.7 ms | 3.1x |
+| lookup c=64 | 2,062.2 rps, p99 128.0 ms | 537.2 rps, p99 328.3 ms | 3.8x |
+| read c=32 | 2,901.9 rps, p99 24.8 ms | 879.1 rps, p99 100.1 ms | 3.3x |
+| read c=64 | 3,208.8 rps, p99 30.0 ms | 289.4 rps, p99 898.0 ms | 11.1x |
+
+Three things worth saying before anyone quotes a ratio:
+
+- **With one client, Databunker writes faster** - 87.6 against Sunder's 73.2
+  rps. Sunder does more per write, and single-client throughput is where that
+  shows.
+- **The 11.1x on read c=64 is Databunker degrading**, not Sunder
+  accelerating: it peaks at c=32 and falls to 289 rps with a p99 of 898 ms,
+  while Sunder rises. Say "Databunker falls over above 32 concurrent
+  readers".
+- **The shape is the point.** Sunder holds or climbs to c=64; Databunker
+  peaks at c=32 and declines on every operation.
+
+The laptop figures below are kept for what they show - that the second
+review's hardening cost no latency - and are **not** the numbers to put in
+front of a buyer: the laptop is faster than the server, and mixing the two
+invites the question of which one applies.
+
+<!-- authoritative:end -->
+
+**Head-to-head vs Databunker** (laptop, pass-4 build, 2026-08-23 - superseded
+by the server table above), same PostgreSQL 16, same harness, both systems
+interleaved, five rounds plus a clean 5,000-request pass, zero errors on both
+sides:
 
 | Operation | Sunder | Databunker | Advantage |
 |---|---|---|---|

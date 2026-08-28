@@ -90,11 +90,29 @@ def close(a, b):
     scale = max(abs(a), abs(b), 1.0)
     return abs(a - b) / scale <= 0.005
 
+AUTH_RE = re.compile(r"<!--\s*authoritative:begin.*?-->(.*?)<!--\s*authoritative:end\s*-->", re.S)
+
+def authoritative(path, text):
+    """Use only the regions a document marks as current.
+
+    These files keep every historical run deliberately - the deltas between
+    them are the record of what changed. But a figure from a SUPERSEDED
+    section is exactly the kind a deck keeps quoting after a re-measurement,
+    and matching against the whole file would bless it as sourced.
+
+    A file with no markers is used whole, so adding a source costs nothing
+    until it starts carrying figures that age."""
+    regions = AUTH_RE.findall(text)
+    if not regions:
+        return text
+    return "\n".join(regions)
+
 corpus_text = ""
 missing_sources = []
 for s in SOURCES:
     try:
-        corpus_text += open(s, encoding="utf-8", errors="replace").read() + "\n"
+        raw = open(s, encoding="utf-8", errors="replace").read()
+        corpus_text += authoritative(s, raw) + "\n"
     except OSError:
         missing_sources.append(s)
 if missing_sources:
@@ -122,6 +140,9 @@ for deck in decks:
     # product: a made-up debt in EUR, a made-up churn score.
     body = re.sub(r"\d[\d.,]*\s*EUR", " ", body)
     body = re.sub(r"rizik odustajanja:\s*[\d.,]+", " ", body)
+    # Sequence numbers in the illustrated audit chain (#8841, #8842, ...)
+    # are part of a drawn example, not a claim about throughput.
+    body = re.sub(r"#\s*\d+", " ", body)
 
     claims = {}
     for m in re.finditer(r"\b(\d[\d.,]*\d)\s*(ms|s|%|x|×|/s|rps|M)?\b", body):
