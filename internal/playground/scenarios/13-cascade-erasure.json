@@ -1,0 +1,133 @@
+{
+  "id": "cascade-erasure",
+  "title": "Erase a guardian and their children, in one request that survives being interrupted",
+  "summary": "A guardian's erasure can carry their linked children with it - but only when the officer asks for it. The interesting part is what happens if the request dies half way: the plan is written down before the first child is touched, so an interrupted cascade is describable and resumable instead of being a silent half-erasure.",
+  "doc": "concepts/sub-accounts.md",
+  "roles": [
+    {
+      "name": "vault",
+      "label": "Family accounts service",
+      "scope": "crm",
+      "actions": ["contacts.register", "attributes.read", "links.manage"],
+      "purposes": ["support"]
+    },
+    {
+      "name": "privacy",
+      "label": "Privacy officer",
+      "scope": "crm",
+      "actions": ["dsr.access", "dsr.erase", "contacts.register"],
+      "purposes": ["support", "admin"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "A guardian",
+      "note": "The person who will make the Article 17 request.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {"email": "{{demo_email}}", "phone": "{{demo_phone}}", "name": "{{demo_name}}"},
+      "expect": 201,
+      "capture": {"parent_cid": "cid"}
+    },
+    {
+      "label": "A child, as their own person",
+      "note": "Separate record, separate pseudonym, separate rights - the link describes the relationship without merging them.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {"email": "child-{{demo_email}}", "name": "Child of {{demo_name}}"},
+      "expect": 201,
+      "capture": {"child_cid": "cid"}
+    },
+    {
+      "label": "Link them as guardian and child",
+      "note": "guardian is one of three named link types. It is what the cascade will follow - and only because the officer names it.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/links",
+      "body": {"parent_cid": "{{parent_cid}}", "child_cid": "{{child_cid}}", "link_type": "guardian"},
+      "expect": 201
+    },
+    {
+      "label": "Erase the guardian WITHOUT asking for a cascade",
+      "note": "The default is deliberately narrow: erasing one person never quietly erases another. A cascade destroys a second person's data, which has to be an explicit instruction, not a side effect.",
+      "actor": "privacy",
+      "method": "POST",
+      "path": "/v1/dsr/erase",
+      "body": {"cid": "{{parent_cid}}"},
+      "expect": 200
+    },
+    {
+      "label": "The child is untouched",
+      "note": "Still readable: the guardian's erasure took the guardian's data and the link, and stopped there.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{child_cid}}/attributes/email?purpose=support",
+      "expect": 200
+    },
+    {
+      "label": "A second family, this time cascaded",
+      "note": "Fresh guardian and child, so the cascade has something to follow.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {"email": "parent2-{{demo_email}}", "name": "{{demo_name}} the second"},
+      "expect": 201,
+      "capture": {"parent2_cid": "cid"}
+    },
+    {
+      "label": "Their child",
+      "note": "Same shape as before.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/contacts",
+      "body": {"email": "child2-{{demo_email}}", "name": "Second child"},
+      "expect": 201,
+      "capture": {"child2_cid": "cid"}
+    },
+    {
+      "label": "Link them",
+      "note": "Both ends in the same scope - a link can never cross a scope boundary.",
+      "actor": "vault",
+      "method": "POST",
+      "path": "/v1/links",
+      "body": {"parent_cid": "{{parent2_cid}}", "child_cid": "{{child2_cid}}", "link_type": "guardian"},
+      "expect": 201
+    },
+    {
+      "label": "Erase the guardian AND their guardian-linked children",
+      "note": "One request names the link types to follow. Before the first child is touched, the cascade writes down its plan - which children, from which erasure - so a request that dies half way leaves a record of what was still owed rather than a mystery.",
+      "actor": "privacy",
+      "method": "POST",
+      "path": "/v1/dsr/erase",
+      "body": {"cid": "{{parent2_cid}}", "cascade": ["guardian"]},
+      "expect": 200,
+      "capture": {"cascade_erasure": "erasure_id"}
+    },
+    {
+      "label": "The guardian is gone",
+      "note": "Tombstoned like any erased person: the pseudonym still resolves so client references do not break, but there is nothing behind it.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{parent2_cid}}/attributes/email?purpose=support",
+      "expect": 404
+    },
+    {
+      "label": "And so is the child the cascade followed",
+      "note": "Erased under the SAME erasure id as the guardian, so the audit trail answers 'why was this person erased' with 'as part of erasure N', not with silence.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{child2_cid}}/attributes/email?purpose=support",
+      "expect": 404
+    },
+    {
+      "label": "The first child - never cascaded - is still here",
+      "note": "The contrast that makes the point: cascading is a decision, and the decision was made for one family and not the other.",
+      "actor": "vault",
+      "method": "GET",
+      "path": "/v1/contacts/{{child_cid}}/attributes/email?purpose=support",
+      "expect": 200
+    }
+  ]
+}

@@ -33,11 +33,15 @@ type fakeSunder struct {
 	shared      map[string]bool     // "<cid>|<attr>" -> authorized by the issuer
 	tokenShares map[string][]string // oti token -> attributes it authorizes
 	bySuffix    map[string]string   // last 8 phone digits -> cid
+	links       []link              // guardian/member/owner edges
 	tokens      map[string]string   // token -> value
 	byValue     map[string]string   // "<cid>|<value>" -> token (unique dedup)
 	shares      map[string]string   // uuid -> "<cid>|<purpose>"
 	revoked     map[string]bool
 }
+
+// link is one person-to-person edge inside a scope.
+type link struct{ parent, child, kind string }
 
 func newFakeSunder() *fakeSunder {
 	return &fakeSunder{
@@ -200,10 +204,28 @@ func (f *fakeSunder) handler() http.Handler {
 		writeJSON(w, 200, map[string]any{"scopes": []map[string]any{{"scope": "crm"}}})
 	})
 	mux.HandleFunc("POST /v1/dsr/erase", func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ CID string }
+		var in struct {
+			CID     string   `json:"cid"`
+			Cascade []string `json:"cascade"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		f.erased[in.CID] = true
-		writeJSON(w, 200, map[string]any{"erasure_id": 41, "scopes": 1, "linked": []any{}})
+		// A cascade follows ONLY the link types the caller named: erasing one
+		// person must never quietly erase another.
+		linked := []any{}
+		for _, l := range f.links {
+			if l.parent != in.CID {
+				continue
+			}
+			for _, kind := range in.Cascade {
+				if kind == l.kind {
+					f.erased[l.child] = true
+					linked = append(linked, map[string]any{"cid": l.child, "link_type": l.kind})
+					break
+				}
+			}
+		}
+		writeJSON(w, 200, map[string]any{"erasure_id": 41, "scopes": 1, "linked": linked})
 	})
 	mux.HandleFunc("GET /v1/admin/audit/verify", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "pending": 0})
@@ -368,6 +390,7 @@ func (f *fakeSunder) handler() http.Handler {
 			writeJSON(w, 400, map[string]string{"error": "validation", "detail": "link_type"})
 			return
 		}
+		f.links = append(f.links, link{parent: in.ParentCID, child: in.ChildCID, kind: in.LinkType})
 		writeJSON(w, 201, map[string]string{"status": "linked"})
 	})
 	mux.HandleFunc("GET /v1/contacts/{cid}/links", func(w http.ResponseWriter, r *http.Request) {
