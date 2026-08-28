@@ -1,0 +1,39 @@
+parameters:
+    level: 5
+    paths:
+        - src
+        - tests
+
+    # Every exception below is a case where PHPStan trusts a docblock further
+    # than the runtime does. A docblock is not enforced: a caller can pass an
+    # associative array to a `@param list<string>` parameter and PHP will not
+    # stop them. Removing the defensive call to satisfy the analyser would
+    # trade a real guarantee for a clean report.
+    ignoreErrors:
+        -
+            # `array_values()` on a parameter the docblock calls a list. The
+            # docblock is a promise from the caller, not a fact - normalising
+            # is what makes the JSON body a JSON ARRAY rather than an object
+            # when someone passes ['a' => 'email'].
+            identifier: arrayValues.list
+            path: src/SunderClient.php
+
+        -
+            # `$http_response_header ?? []`. PHPStan says the variable always
+            # exists; PHP only defines it after a successful HTTP request
+            # through the stream wrapper. On a failed request it is absent,
+            # and reading it unguarded is a warning plus an undefined value -
+            # which is precisely the path this code is on when it checks.
+            identifier: nullCoalesce.variable
+            path: src/SunderClient.php
+
+        -
+            # `isset(self::$proc)` on a typed static holding a resource. The
+            # property is only assigned once the mock server starts; a test
+            # that fails before that would fatal on tearDown without the
+            # check. PHPStan reasons from the type, which says nothing about
+            # whether the assignment has happened yet.
+            identifier: isset.property
+            paths:
+                - tests/SunderApiTest.php
+                - tests/SunderClientTest.php

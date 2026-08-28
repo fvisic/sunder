@@ -4,6 +4,37 @@ All notable changes to Sunder. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+### Phase 7.9: every language now fails on its own warnings
+Two rounds of "a green job printed warnings nobody read" happened in one
+release, both in the .NET SDK. Reading all six afterwards found the reason,
+and it was not that .NET is worse: it was the only one with no policy.
+
+| SDK | before | now |
+|---|---|---|
+| Java | `-Xlint:all -Werror` | unchanged - and it never accumulated one |
+| TypeScript | `strict`, `noUncheckedIndexedAccess` | unchanged |
+| .NET | nothing | `CS1591` + `xUnit2013` as errors |
+| Go | `go vet` | **+ `staticcheck` in CI** |
+| Python | nothing | **+ `ruff` (E,F,W,I,UP,B,SIM,RUF)** |
+| PHP | nothing | **+ `phpstan` level 5** |
+
+Adding them found real things rather than style noise: `staticcheck` found
+**dead code in `internal/service`** (`isUniqueViolation`, unreferenced since
+its call sites inlined the check), a value assigned and never used, and four
+`nil` contexts passed where `context.Background()` was meant. `phpstan`
+found `array_filter($x, 'strlen')` in three files - `strlen` returns `int`,
+not `bool`, which PHP tolerates and the analyser correctly does not.
+
+Fifteen `ruff` findings and three `phpstan` ones were fixed rather than
+suppressed, so each guard starts from zero. The three PHP exceptions that
+remain are written out in `phpstan.neon` with their reasons: each is a case
+where the analyser trusts a docblock further than the runtime does, and
+removing the defensive code to satisfy it would trade a real guarantee for a
+clean report.
+
+Every guard was verified by introducing a violation and watching the build
+fail.
+
 ### Phase 7.2: the crash-safety claims are now tested, and one was wrong
 Every claim-before-side-effect design in the tree was DOCUMENTED as
 crash-safe and none was tested that way. Four kill points now have a test
