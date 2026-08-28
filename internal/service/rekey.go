@@ -103,6 +103,19 @@ func (c *Contacts) saveResumePoint(ctx context.Context, scope, lastID string, do
 		scope, lastID, done)
 }
 
+// livePersonCount is for the progress line's ETA only. An estimate is
+// enough - reltuples avoids a count(*) over 26.9M rows just to print a
+// percentage - and a zero simply omits the ETA rather than failing a sweep.
+func (c *Contacts) livePersonCount(ctx context.Context) (int64, error) {
+	var n int64
+	err := c.Pool.QueryRow(ctx,
+		`SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE relname='persons'`).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // clearResumePoint drops the row once the sweep has reached the end. Leaving
 // it would make the NEXT run of the same scope skip everything - correct
 // only until someone registers a person below the point.
@@ -130,6 +143,22 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 	resumeFrom, alreadyDone := c.loadResumePoint(ctx, scope)
 	stats.Resumed = resumeFrom != rekeyStartID
 	stats.PersonsSkipped = alreadyDone
+
+	// Progress, because this sweep is long. The 26.9M-contact backfill ran
+	// for SEVEN HOURS without emitting a single line: an operator watching it
+	// could not tell a working sweep from a hung one, and the only way to
+	// find out was to query the database behind its back. A sweep that takes
+	// hours has to say so while it takes them.
+	log := c.logger()
+	total, _ := c.livePersonCount(ctx)
+	started := time.Now()
+	if stats.Resumed {
+		log.Info("rekey sweep resuming", "from_person", resumeFrom,
+			"already_covered", alreadyDone, "live_persons", total)
+	} else {
+		log.Info("rekey sweep starting", "live_persons", total, "batch", batch)
+	}
+	lastReport := started
 
 	// Paginate on the uuid ITSELF, never on id::text.
 	//
@@ -166,6 +195,11 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 			return stats, err
 		}
 		if len(ids) == 0 {
+			log.Info("rekey sweep finished",
+				"persons_this_run", stats.Persons,
+				"persons_total", alreadyDone+stats.Persons,
+				"tokens_written", stats.TokensInserted,
+				"took", time.Since(started).Round(time.Second).String())
 			// Reached the end: the resume point has served its purpose, and
 			// keeping it would make the next run of the same scope skip a
 			// person registered below it.
@@ -187,6 +221,26 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 		// before: a resume point ahead of the work it claims would skip
 		// persons permanently, and nothing would ever revisit them.
 		c.saveResumePoint(ctx, scope, lastID, alreadyDone+stats.Persons)
+
+		// One line every 30s, not one per batch: at batch=500 a large sweep
+		// would otherwise produce tens of thousands of lines and bury the
+		// warnings that matter.
+		if time.Since(lastReport) >= 30*time.Second {
+			lastReport = time.Now()
+			covered := alreadyDone + stats.Persons
+			rate := float64(stats.Persons) / time.Since(started).Seconds()
+			attrs := []any{
+				"persons_this_run", stats.Persons,
+				"persons_total", covered,
+				"tokens_written", stats.TokensInserted,
+				"persons_per_sec", int64(rate),
+			}
+			if total > covered && rate > 0 {
+				attrs = append(attrs, "eta",
+					(time.Duration(float64(total-covered)/rate) * time.Second).Round(time.Minute).String())
+			}
+			log.Info("rekey sweep progress", attrs...)
+		}
 	}
 
 	if reencryptPII {

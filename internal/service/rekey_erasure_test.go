@@ -10,9 +10,12 @@ package service_test
 // under the newest key version, permanently.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/fvisic/sunder/internal/crypto"
@@ -681,4 +684,55 @@ func TestRekeyIgnoresAResumePointFromDifferentWork(t *testing.T) {
 			t.Fatalf("contact %d lost its tokens to a stale resume point: %v", i, err)
 		}
 	}
+}
+
+// TestRekeySweepReportsProgress: the 26.9M backfill ran for SEVEN HOURS
+// without emitting a single line. An operator watching it could not
+// distinguish a working sweep from a hung one, and the only way to find out
+// was to query the database behind the sweep's back. A long operation that
+// says nothing is an operational defect, not a cosmetic one.
+func TestRekeySweepReportsProgress(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	var buf syncBuffer
+	e.svc.Log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	for i := 0; i < 5; i++ {
+		if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email: fmt.Sprintf("progress%d@example.com", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.svc.Rekey(ctx, false, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	out := buf.String()
+	// Start and finish must both be there: a sweep that only logs on
+	// completion still leaves the operator blind while it runs, and one that
+	// only logs on start never says it succeeded.
+	for _, want := range []string{"rekey sweep starting", "rekey sweep finished", "live_persons", "took"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the sweep's log is missing %q - an operator cannot tell what it is doing:\n%s", want, out)
+		}
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for a logger writing from any goroutine.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
