@@ -197,6 +197,42 @@ fixes generalise an existing guard rather than invent one.
 `SUNDER_REKEY_BATCH`. Booleans now accept `true/false`, `1/0`, `yes/no`,
 `on/off` and REFUSE anything else.
 
+### The rekey sweep restarted from the first person every time
+`lastID` lived in a local variable, so an interrupted sweep paid for its own
+progress again. Measured mid-backfill on 26.9M contacts: 4.1M persons already
+processed cost **2.7 hours** of re-reading before the sweep reached any
+outstanding work - and the cost grows as the backfill advances, so the
+operator forced to interrupt (window closed, database loaded) is punished
+hardest. A 30-minute measurement run of the batched sweep wrote **zero**
+tokens: it spent the whole window walking ground it had already covered.
+
+Migration 0043 adds a single-row `rekey_progress`. Its `scope` column is the
+safety argument: a resume point means "persons below this uuid are done",
+true only for the outstanding set the interrupted run was working through.
+Rotate a key, flip a derived-search flag, or rerun with `-reencrypt-pii`
+after a run without it, and persons *below* the point have work again -
+honouring a stale point would skip them permanently, because the point
+advances past them on every later run. The scope fingerprints every input
+that decides the outstanding set, so a mismatch restarts from the beginning.
+
+### The sweep ran for seven hours in total silence
+No progress output at all: an operator could not tell a working sweep from a
+hung one. It now logs a start line, a progress line every 30 seconds
+(persons, tokens, persons/sec, ETA) and a finish line. Both runbooks stop
+describing `keys rekey` as a command and start describing it as a
+maintenance window, with measured numbers: **~424 persons/sec**, **~17.6 h**
+for a full pass over 26.9M contacts, roughly 40 minutes per million.
+
+### `benchmark/bulkload` had no tests, and the scale numbers rest on it
+The loader claims a bulk-loaded contact "resolves exactly as it would for a
+contact registered through the API". Nothing verified it - and a loader that
+wrote a token under the wrong key version, or an AEAD blob without the
+server's AAD binding, would fail as a silent MISS on data no throughput
+benchmark re-reads. Three tests now assert the claim through the server's own
+lookup and attribute paths, and compare a loaded contact's token kinds, key
+versions, blob key id and algorithm against a registered one. Both failure
+modes were verified by introducing them.
+
 ### The rekey sweep wrote one token per statement (found by Phase 7.4)
 With the pagination fixed, the sweep was still measured at **87 hours** for a
 26.9M-contact backfill. The cause was the write shape, not the read: it
