@@ -80,7 +80,7 @@ public class SunderClientTests
         Assert.Equal("/v1/contacts/CID-1/scopes", req.PathAndQuery);
         using var doc = JsonDocument.Parse(req.Body!);
         Assert.Equal("billing", doc.RootElement.GetProperty("scope").GetString());
-        Assert.Equal(1, doc.RootElement.EnumerateObject().Count());
+        Assert.Single(doc.RootElement.EnumerateObject());
     }
 
     [Fact]
@@ -93,7 +93,7 @@ public class SunderClientTests
         Assert.Equal("/v1/lookup", req.PathAndQuery);
         using var doc = JsonDocument.Parse(req.Body!);
         Assert.Equal("a@b.c", doc.RootElement.GetProperty("email").GetString());
-        Assert.Equal(1, doc.RootElement.EnumerateObject().Count());
+        Assert.Single(doc.RootElement.EnumerateObject());
     }
 
     [Fact]
@@ -104,7 +104,7 @@ public class SunderClientTests
         Assert.Equal("CID-1", await client.LookupByPhoneAsync("+385911234567"));
         using var doc = JsonDocument.Parse(handler.Requests[0].Body!);
         Assert.Equal("+385911234567", doc.RootElement.GetProperty("phone").GetString());
-        Assert.Equal(1, doc.RootElement.EnumerateObject().Count());
+        Assert.Single(doc.RootElement.EnumerateObject());
     }
 
     [Fact]

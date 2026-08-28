@@ -112,6 +112,13 @@ and how many persons' search tokens go into one `INSERT`. `1` restores the
 pre-0.5.1 per-token behaviour and its 87 hours.
 
 ### Also in this release
+- The .NET test suite's three `xUnit2013` warnings are gone
+  (`Assert.Equal(1, xs.Count())` -> `Assert.Single(xs)`), and `xUnit2013` is
+  now an error in that project. Those warnings had been printed by a GREEN
+  CI job for a whole release - the same way two missing XML doc comments
+  were, and for the same reason: nobody reads the output of a job that
+  passes. The analyzer exists to keep failure MESSAGES useful, which is
+  exactly what a test is for.
 - The playground reaches **every** shipped surface (Phase 8): a cascading
   erasure walkthrough contrasting "erase the guardian" with
   `cascade:[guardian]` on one page, and an allow-list where each remaining

@@ -6,6 +6,13 @@
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
+    <!-- The xunit analyzers exist to keep failure MESSAGES useful:
+         Assert.Equal(1, xs.Count()) reports "Expected: 1, Actual: 3", while
+         Assert.Single(xs) reports which collection had how many and what was
+         in it. Three of these sat in the suite for a whole release because a
+         green job's output is a job nobody reads - the same way two missing
+         XML doc comments did. Errors, not warnings, for the same reason. -->
+    <WarningsAsErrors>$(WarningsAsErrors);xUnit2013</WarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
