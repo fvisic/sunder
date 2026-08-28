@@ -255,6 +255,10 @@ is an API-pod statement about who seals, appended separately. */}}
 - name: SUNDER_AUDIT_LOOKUP_ACTIONS
   value: {{ . | quote }}
 {{- end }}
+{{- with .Values.debugAddr }}
+- name: SUNDER_DEBUG_ADDR
+  value: {{ . | quote }}
+{{- end }}
 {{- with .Values.audit.sealInterval }}
 - name: SUNDER_AUDIT_SEAL_INTERVAL
   value: {{ . | quote }}

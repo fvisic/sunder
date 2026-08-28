@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -28,13 +29,21 @@ type KeyRing struct {
 	// Wired from SUNDER_KEY_RETIRE_GRACE.
 	RetireGrace time.Duration
 
-	mu         sync.Mutex
+	// mu guards the cached ring. It is an RWMutex and NOT held across any
+	// database call - see refresh() for why that distinction is the whole
+	// fix rather than a tidy-up.
+	mu         sync.RWMutex
 	lastForced time.Time
-	live       map[string][]string // kind -> ACTIVE+RETIRING versions, newest first
-	active     map[string]string   // kind -> newest ACTIVE version
-	fetchedAt  time.Time
-	epoch      string
-	epochAt    time.Time
+	// refresherOnce/refreshing record that a background refresher owns the
+	// epoch check for this ring. When it does, the read path never touches
+	// the database at all.
+	refresherOnce sync.Once
+	refreshing    bool
+	live          map[string][]string // kind -> ACTIVE+RETIRING versions, newest first
+	active        map[string]string   // kind -> newest ACTIVE version
+	fetchedAt     time.Time
+	epoch         string
+	epochAt       time.Time
 }
 
 const keyRingTTL = 30 * time.Second
@@ -47,6 +56,10 @@ const keyRingTTL = 30 * time.Second
 // retired AND purged (CONCURRENCY-CORE-4). One tiny aggregate per second per
 // replica converges the fleet in about a second instead of thirty.
 const keyEpochInterval = time.Second
+
+// keyEpochIntervalForTest lets the tests in this package wait a known number
+// of refresher ticks without hard-coding the constant twice.
+const KeyEpochIntervalForTest = keyEpochInterval
 
 // DefaultRetireGracePeriod is how long a version must have been RETIRING
 // before it may be retired. It has to exceed the worst-case ring staleness,
@@ -79,24 +92,6 @@ func (k *KeyRing) currentEpoch(ctx context.Context) (string, error) {
 	return fmt.Sprintf("%d/%s", n, maxUpdated), nil
 }
 
-// staleLocked reports whether the cached ring must be reloaded (mutex held).
-func (k *KeyRing) staleLocked(ctx context.Context) bool {
-	if k.live == nil || time.Since(k.fetchedAt) > keyRingTTL {
-		return true
-	}
-	if time.Since(k.epochAt) < keyEpochInterval {
-		return false
-	}
-	epoch, err := k.currentEpoch(ctx)
-	if err != nil {
-		// The database is unreachable; serving the cached ring is strictly
-		// better than failing every lookup, and the TTL still bounds it.
-		return false
-	}
-	k.epochAt = time.Now()
-	return epoch != k.epoch
-}
-
 // Kinds every deployment must have; EnsureAll bootstraps their material.
 func keyKinds() []string {
 	return []string{crypto.KeyHMACEmail, crypto.KeyHMACPhone, crypto.KeyHMACName,
@@ -112,22 +107,23 @@ func versionNum(v string) int {
 	return n
 }
 
-// refreshLocked reloads the ring from the keys table (mutex held).
 // Ordering is numeric on the version suffix - created_at would tie within
 // one transaction and lexicographic order breaks at v10.
-func (k *KeyRing) refreshLocked(ctx context.Context) error {
+// load reads the ring from the database. It takes no locks: the caller
+// swaps the result in afterwards, so a slow query never blocks a reader.
+func (k *KeyRing) load(ctx context.Context) (map[string][]string, map[string]string, string, error) {
 	live := map[string][]string{}
 	active := map[string]string{}
 	rows, err := k.Pool.Query(ctx,
 		`SELECT kind, key_id, status FROM keys WHERE status IN ('ACTIVE','RETIRING')`)
 	if err != nil {
-		return err
+		return nil, nil, "", err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var kd, id, status string
 		if err := rows.Scan(&kd, &id, &status); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
-			return err
+			return nil, nil, "", err
 		}
 		v := strings.TrimPrefix(id, kd+"/")
 		live[kd] = append(live[kd], v)
@@ -136,18 +132,15 @@ func (k *KeyRing) refreshLocked(ctx context.Context) error {
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, nil, "", err
 	}
 	for kd := range live {
 		sort.Slice(live[kd], func(i, j int) bool {
 			return versionNum(live[kd][i]) > versionNum(live[kd][j])
 		})
 	}
-	k.live, k.active, k.fetchedAt = live, active, time.Now()
-	if epoch, err := k.currentEpoch(ctx); err == nil {
-		k.epoch, k.epochAt = epoch, time.Now()
-	}
-	return nil
+	epoch, _ := k.currentEpoch(ctx)
+	return live, active, epoch, nil
 }
 
 // Invalidate forces the next call to re-read the keys table (used after
@@ -161,25 +154,43 @@ func (k *KeyRing) InvalidateThrottled() {
 		return
 	}
 	k.lastForced = time.Now()
+	if k.refreshing {
+		k.epoch = ""
+		return
+	}
 	k.live = nil
 }
 
+// Invalidate forces the ring to be reloaded.
+//
+// With a background refresher running it does NOT blank the cached ring: the
+// request path must never be sent to the database (see usableLocked), so it
+// marks the epoch dirty instead and the refresher reloads within one tick.
+// Without a refresher - the CLI and the tests, where nothing holds a
+// transaction across the call - it blanks as before, so the next read
+// reloads synchronously and `keys rotate` is immediately visible.
 func (k *KeyRing) Invalidate() {
 	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.refreshing {
+		k.epoch = ""
+		return
+	}
 	k.live = nil
-	k.mu.Unlock()
 }
 
 // Versions returns the live (ACTIVE + RETIRING) versions for kind, newest first.
 func (k *KeyRing) Versions(ctx context.Context, kind string) ([]string, error) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if k.staleLocked(ctx) {
-		if err := k.refreshLocked(ctx); err != nil {
-			return nil, err
-		}
+	if vs, ok := k.cachedVersions(kind); ok && !k.epochCheckDue(ctx) {
+		return vs, nil
 	}
-	vs := k.live[kind]
+	if err := k.errIfRefresherOwned("Versions", kind); err != nil {
+		return nil, err
+	}
+	if err := k.refresh(ctx); err != nil {
+		return nil, err
+	}
+	vs, _ := k.cachedVersions(kind)
 	if len(vs) == 0 {
 		return nil, fmt.Errorf("keyring: no live versions for kind %q", kind)
 	}
@@ -188,18 +199,252 @@ func (k *KeyRing) Versions(ctx context.Context, kind string) ([]string, error) {
 
 // Newest returns the ACTIVE version new material must be written with.
 func (k *KeyRing) Newest(ctx context.Context, kind string) (string, error) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if k.staleLocked(ctx) {
-		if err := k.refreshLocked(ctx); err != nil {
-			return "", err
-		}
+	if v, ok := k.cachedNewest(kind); ok && !k.epochCheckDue(ctx) {
+		return v, nil
 	}
-	v := k.active[kind]
+	if err := k.errIfRefresherOwned("Newest", kind); err != nil {
+		return "", err
+	}
+	if err := k.refresh(ctx); err != nil {
+		return "", err
+	}
+	v, _ := k.cachedNewest(kind)
 	if v == "" {
 		return "", fmt.Errorf("keyring: no ACTIVE version for kind %q", kind)
 	}
 	return v, nil
+}
+
+// cachedVersions and cachedNewest are the read path, and the ONLY thing they
+// do is read memory under a shared lock. They report ok=false when the ring
+// has never been loaded or has aged past its TTL, which is the one case the
+// caller has to go to the database for.
+func (k *KeyRing) cachedVersions(kind string) ([]string, bool) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	if !k.usableLocked() {
+		return nil, false
+	}
+	vs := k.live[kind]
+	return vs, len(vs) > 0
+}
+
+func (k *KeyRing) cachedNewest(kind string) (string, bool) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	if !k.usableLocked() {
+		return "", false
+	}
+	v := k.active[kind]
+	return v, v != ""
+}
+
+// usableLocked decides whether the cached ring may answer WITHOUT a database
+// round trip. Pure arithmetic - no query, deliberately.
+//
+// When a background refresher owns this ring, a loaded ring is ALWAYS usable:
+// not merely fresh-within-TTL, but usable even when it has aged or been
+// invalidated. That is the second half of the deadlock fix and it is not an
+// optimisation.
+//
+// Removing the query from under the mutex was not enough. `keys rotate`
+// calls Invalidate(), and an invalidated ring sent the very next writer to
+// the database - from inside registerTx, holding a transaction, asking the
+// pool for a SECOND connection. With every connection held by a writer in
+// the same position, none can ever be released. A rotation under load was
+// all it took, and the regression test reproduces exactly that.
+//
+// So the request path never queries. The refresher, which holds no
+// transaction and runs on its own connection, is the only thing that
+// reloads. The cost is bounded staleness - at most one keyEpochInterval
+// behind a rotation - which is what the ring already tolerated between epoch
+// checks, and which `keys retire` protects against with a grace period twice
+// the TTL.
+func (k *KeyRing) usableLocked() bool {
+	if k.live == nil {
+		return false
+	}
+	if k.refreshing {
+		return true
+	}
+	return time.Since(k.fetchedAt) <= keyRingTTL
+}
+
+// epochCheckDue answers, for a ring with NO background refresher, whether it
+// is time to re-read the cross-process epoch - and does that read here,
+// holding no lock.
+//
+// A ring the refresher owns always answers false: the refresher does this on
+// its own connection, and the request path must never query (usableLocked
+// explains why). A ring without one - the CLI, `sunder import`, the tests -
+// keeps the inline check, because CONCURRENCY-CORE-4 depends on it: a
+// replica whose process never calls Invalidate must still notice, within
+// about a second, that another process rotated and retired a version, or it
+// mints search tokens under a version the purge has already swept and the
+// person becomes permanently unfindable.
+//
+// That inline query is safe in exactly the callers that have it: none of
+// them holds a database transaction across the call. `serve` does, which is
+// why `serve` starts a refresher.
+func (k *KeyRing) epochCheckDue(ctx context.Context) bool {
+	k.mu.RLock()
+	owned, since, known := k.refreshing, time.Since(k.epochAt), k.epoch
+	k.mu.RUnlock()
+	if owned || since < keyEpochInterval {
+		return false
+	}
+	epoch, err := k.currentEpoch(ctx)
+	if err != nil {
+		// Unreachable database: serving the cached ring beats failing every
+		// call, and keyRingTTL still bounds how long that can last.
+		return false
+	}
+	k.mu.Lock()
+	k.epochAt = time.Now()
+	k.mu.Unlock()
+	return epoch != known
+}
+
+// errIfRefresherOwned makes the no-database property STRUCTURAL rather than
+// a promise.
+//
+// A refresher-owned ring is loaded synchronously before StartRefresher
+// returns, so a cache miss here means something is genuinely wrong - a kind
+// that has no key at all, or a ring whose initial load failed. Falling
+// through to a query would put the request path back where the deadlock was:
+// asking the pool for a connection from inside someone else's transaction.
+// Failing the one request is the correct outcome, and it is loud.
+func (k *KeyRing) errIfRefresherOwned(op, kind string) error {
+	k.mu.RLock()
+	owned, loaded := k.refreshing, k.live != nil
+	k.mu.RUnlock()
+	if !owned {
+		return nil
+	}
+	if !loaded {
+		return fmt.Errorf("keyring: %s(%q) on a ring whose initial load failed - "+
+			"refusing to query from the request path", op, kind)
+	}
+	return fmt.Errorf("keyring: %s(%q) has no live version in the cached ring", op, kind)
+}
+
+// refresh reloads the ring WITHOUT holding the lock across the query.
+//
+// This is the fix for a deadlock that stalled writes for thirty seconds at a
+// time, and both halves of it matter:
+//
+//  1. The old code held an exclusive mutex across a database round trip. With
+//     fuzzy and suffix search enabled, one Register calls Newest a dozen
+//     times (e-mail, phone, name, each phonetic code, the suffix, the PII
+//     KEK), so every writer queued behind whichever one happened to be doing
+//     the once-a-second epoch check.
+//
+//  2. Worse, that query asked the pool for a connection while the CALLER
+//     already held one inside an open transaction (registerTx -> mergeIntoBlob
+//     -> Newest). Once concurrency reached the pool size, every connection was
+//     held by a goroutine waiting for this mutex, and the goroutine holding
+//     the mutex was waiting for a connection that could never be freed. It
+//     resolved only when client timeouts began cancelling requests.
+//
+// Measured on a 26.9M-contact dataset: writes went from 516 rps at c=8 to
+// 18 rps with 150 timeouts at c=32, while the database sat at zero active
+// queries and zero ungranted locks for ninety seconds.
+func (k *KeyRing) refresh(ctx context.Context) error {
+	live, active, epoch, err := k.load(ctx)
+	if err != nil {
+		return err
+	}
+	k.mu.Lock()
+	k.live, k.active, k.fetchedAt = live, active, time.Now()
+	k.epoch, k.epochAt = epoch, time.Now()
+	k.mu.Unlock()
+	return nil
+}
+
+// StartRefresher takes the epoch check off the request path entirely.
+//
+// The server calls this once at startup. From then on a single goroutine
+// re-reads the cross-process epoch every keyEpochInterval on its OWN pool
+// connection - never inside anyone else's transaction - and reloads the ring
+// when it changes. Convergence after a `keys rotate` or `keys retire` in a
+// separate CLI process is unchanged (about a second); what changes is that no
+// request ever waits on it.
+//
+// Calling it twice is a no-op. Not calling it at all is supported and is what
+// the CLI and the tests do: the read path then falls back to loading on
+// demand, which is safe there because nothing holds a transaction open across
+// the call.
+func (k *KeyRing) StartRefresher(ctx context.Context, log *slog.Logger) {
+	k.refresherOnce.Do(func() {
+		if log == nil {
+			log = slog.Default()
+		}
+		if k.Pool == nil {
+			// A ring with no pool cannot refresh. Marking it owned anyway
+			// keeps the read path off the database, which is the property
+			// callers rely on; there is simply nothing to load.
+			k.mu.Lock()
+			k.refreshing = true
+			k.mu.Unlock()
+			return
+		}
+		// Load once, synchronously, BEFORE marking the ring refresher-owned.
+		// A refresher-owned ring never queries from the request path, so it
+		// has to be warm by the time requests arrive. This call happens at
+		// startup with no transaction open, which is exactly the situation
+		// the request path is not in.
+		if err := k.refresh(ctx); err != nil {
+			log.Error("initial key ring load", "err", err.Error())
+		}
+		k.mu.Lock()
+		k.refreshing = true
+		k.mu.Unlock()
+		go k.runRefresher(ctx, log)
+	})
+}
+
+func (k *KeyRing) runRefresher(ctx context.Context, log *slog.Logger) {
+	t := time.NewTicker(keyEpochInterval)
+	defer t.Stop()
+	var warned bool
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		epoch, err := k.currentEpoch(ctx)
+		if err != nil {
+			// The database is unreachable. Serving the cached ring beats
+			// failing every write, and the staleness is bounded by the fact
+			// that `keys retire` refuses while any store still references a
+			// version and then waits out its grace period. Say so once,
+			// loudly, rather than degrading in silence.
+			k.mu.RLock()
+			age := time.Since(k.fetchedAt)
+			k.mu.RUnlock()
+			if age > keyRingTTL && !warned {
+				warned = true
+				log.Error("key ring has not refreshed within its TTL and the database is "+
+					"unreachable - rotations and retirements will not be seen by this replica",
+					"age", age.String(), "err", err.Error())
+			}
+			continue
+		}
+		warned = false
+		k.mu.RLock()
+		unchanged := k.live != nil && epoch == k.epoch && time.Since(k.fetchedAt) <= keyRingTTL
+		k.mu.RUnlock()
+		if unchanged {
+			k.mu.Lock()
+			k.epochAt = time.Now()
+			k.mu.Unlock()
+			continue
+		}
+		if err := k.refresh(ctx); err != nil {
+			log.Error("key ring refresh", "err", err.Error())
+		}
+	}
 }
 
 // EnsureAll creates keystore material for every live version of every kind.
@@ -512,4 +757,13 @@ func (k *KeyRing) RetireWithForce(ctx context.Context, kind, version string, for
 	}
 	k.Invalidate()
 	return nil
+}
+
+// RefresherRunningForTest reports whether a background refresher owns this
+// ring. It exists so the API package can assert that `serve` starts one -
+// the condition the pool-inversion guard's single exemption rests on.
+func (k *KeyRing) RefresherRunningForTest() bool {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return k.refreshing
 }

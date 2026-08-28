@@ -239,3 +239,9 @@ resources:
 startupProbe:
   periodSeconds: 10
   failureThreshold: 60   # 10 minutes
+
+# A pprof listener for diagnosing a stall. EMPTY in production: the endpoint
+# has no authentication and exposes stack traces, heap contents and the
+# command line. Set it to a pod-local address (e.g. "127.0.0.1:6060") and
+# reach it with `kubectl port-forward`, never through a Service.
+debugAddr: ""        # SUNDER_DEBUG_ADDR

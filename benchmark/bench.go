@@ -35,6 +35,13 @@ import (
 type result struct {
 	lat time.Duration
 	err bool
+	// msg is the error text. Without it the harness could count failures but
+	// never name one: it printed only the first five requests by INDEX, so a
+	// cell whose first five succeeded reported "exit status 1" and nothing
+	// else. Two 26.9M-row server runs were thrown away to that blindness
+	// before anyone noticed the errors were e-mail collisions from a reused
+	// seed - a diagnosis that took one line of output to make.
+	msg string
 }
 
 func main() {
@@ -107,10 +114,11 @@ func main() {
 				}
 				t0 := time.Now()
 				err := doOne(client, *target, *base, *cred, *op, *seed, *purpose, i, *keyspace, handles)
-				results[i] = result{lat: time.Since(t0), err: err != nil}
-				if err != nil && i < 5 {
-					fmt.Fprintf(os.Stderr, "req %d: %v\n", i, err)
+				r := result{lat: time.Since(t0), err: err != nil}
+				if err != nil {
+					r.msg = err.Error()
 				}
+				results[i] = r
 			}
 		}()
 	}
@@ -119,9 +127,20 @@ func main() {
 
 	lats := make([]time.Duration, 0, *n)
 	errs := 0
-	for _, r := range results {
+	// Distinct failure messages, with counts and the first index that hit
+	// each. A benchmark that reports a number of errors without saying what
+	// they were is not reproducible - the reader cannot tell a saturated
+	// server from a bad fixture, and those call for opposite conclusions.
+	failures := map[string]int{}
+	firstAt := map[string]int{}
+	for i, r := range results {
 		if r.err {
 			errs++
+			key := truncate(r.msg, 160)
+			if _, seen := failures[key]; !seen {
+				firstAt[key] = i
+			}
+			failures[key]++
 			continue
 		}
 		lats = append(lats, r.lat)
@@ -134,15 +153,28 @@ func main() {
 		i := int(p * float64(len(lats)-1))
 		return lats[i]
 	}
+	kinds := make([]map[string]any, 0, len(failures))
+	for msg, n := range failures {
+		kinds = append(kinds, map[string]any{"count": n, "first_index": firstAt[msg], "error": msg})
+	}
+	sort.Slice(kinds, func(i, j int) bool {
+		return kinds[i]["count"].(int) > kinds[j]["count"].(int)
+	})
+	for _, k := range kinds {
+		fmt.Fprintf(os.Stderr, "%d x (first at request %d): %s\n",
+			k["count"], k["first_index"], k["error"])
+	}
+
 	out := map[string]any{
 		"target": *target, "op": *op, "n": *n, "concurrency": *c,
-		"errors":  errs,
-		"wall_s":  fmt.Sprintf("%.2f", wall.Seconds()),
-		"rps":     fmt.Sprintf("%.1f", float64(len(lats))/wall.Seconds()),
-		"p50_ms":  fmt.Sprintf("%.2f", pct(0.50).Seconds()*1000),
-		"p95_ms":  fmt.Sprintf("%.2f", pct(0.95).Seconds()*1000),
-		"p99_ms":  fmt.Sprintf("%.2f", pct(0.99).Seconds()*1000),
-		"mean_ms": fmt.Sprintf("%.2f", mean(lats).Seconds()*1000),
+		"errors":      errs,
+		"error_kinds": kinds,
+		"wall_s":      fmt.Sprintf("%.2f", wall.Seconds()),
+		"rps":         fmt.Sprintf("%.1f", float64(len(lats))/wall.Seconds()),
+		"p50_ms":      fmt.Sprintf("%.2f", pct(0.50).Seconds()*1000),
+		"p95_ms":      fmt.Sprintf("%.2f", pct(0.95).Seconds()*1000),
+		"p99_ms":      fmt.Sprintf("%.2f", pct(0.99).Seconds()*1000),
+		"mean_ms":     fmt.Sprintf("%.2f", mean(lats).Seconds()*1000),
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -281,4 +313,13 @@ func callInto(client *http.Client, method, url string, headers map[string]string
 		return json.Unmarshal(raw, into)
 	}
 	return nil
+}
+
+// truncate keeps an error message readable in a table without losing the
+// part that identifies it.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

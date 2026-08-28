@@ -21,6 +21,7 @@ import (
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/crypto"
+	"github.com/fvisic/sunder/internal/debugsrv"
 	"github.com/fvisic/sunder/internal/metrics"
 	"github.com/fvisic/sunder/internal/ratelimit"
 	"github.com/fvisic/sunder/internal/service"
@@ -361,6 +362,16 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Run(ctx context.Context) error {
 	if err := s.startAuditSealing(ctx); err != nil {
 		return err
+	}
+	if err := debugsrv.Start(ctx, s.Cfg.DebugAddr, s.Log); err != nil {
+		return err
+	}
+	// Takes the key ring's epoch check off the request path. Without it the
+	// check runs inline, under a lock, while the caller holds a database
+	// transaction - which deadlocked writes for thirty seconds at a time
+	// once concurrency reached the pool size (see KeyRing.refresh).
+	if s.Contacts != nil && s.Contacts.Ring != nil {
+		s.Contacts.Ring.StartRefresher(ctx, s.Log)
 	}
 	srv := &http.Server{
 		Addr:              s.Cfg.Listen,
