@@ -136,6 +136,32 @@ entire file vault gone.
   is stateless. Rehearse the restore quarterly - an unrehearsed runbook is
   a wish, not a plan.
 
+## When a process is killed mid-operation
+
+Sunder's write paths commit BEFORE their side effects, deliberately: that
+ordering is what stops two replicas doing the same thing twice. The cost is
+that a process killed in the window between the commit and the side effect
+leaves work owned by nobody. Each such window has a documented recovery, and
+each recovery has a test that kills the operation at exactly that point
+(PLAN 7.2).
+
+| What was killed | What it leaves behind | What recovers it | If it does not |
+|---|---|---|---|
+| Delivery worker, after claiming events, before the POST | rows in `erasure_events` with `status='SENDING'` | the reaper, after `SUNDER_WORKER_CLAIM_TTL` (default 10m); runs at the top of every sweep, from `retention run`, and on demand via `sunder dsr requeue` | `sunder dsr requeue -all`, but ONLY with no worker running - it returns every SENDING row regardless of age |
+| Delivery worker, after a successful POST, before recording it | the same, plus a receiver that has already acted | the same reaper; the event is delivered AGAIN | nothing to do - delivery is at-least-once by design, and receivers dedup on `(scope, cid, erasure_id)` |
+| Erasure, before its transaction commits | **nothing** - the blob wipe, token deletion, tombstone and queued events are one transaction | PostgreSQL rolls it back; re-issue the erase | nothing to clean up; a half-erased person cannot occur |
+| Cascading erasure, part-way through its children | `erasure_cascade` rows still `PENDING` | the background sweep finishes them without being asked; `sunder dsr cascade-status` lists them | re-issue the identical erase call for the parent's cid - it resumes |
+| Key generation, after the rename, before the lock is released | a valid key beside an orphaned `.lock` file | the next `Ensure` removes locks older than 30s and does NOT re-mint | delete the `.lock` file by hand; **never** delete the key |
+
+Two rules follow from that table, and both are worth stating plainly:
+
+- **A crash never produces a half-erased person.** Everything an erasure
+  does is in one transaction. If it did not commit, nothing happened.
+- **A crash CAN produce a duplicate webhook delivery.** That is the trade
+  made for never producing a lost one. A receiver that is not idempotent on
+  `(scope, cid, erasure_id)` will double-process, and that is a bug in the
+  receiver - the API documentation says so at the erasure endpoint.
+
 ## Security notes
 
 - **Erased persons stay erased, on purpose.** `dsr.erase` deletes tokens
