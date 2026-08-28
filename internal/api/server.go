@@ -146,7 +146,8 @@ func New(cfg config.Config, st *store.Store) (*Server, error) {
 		pii.Alg = cfg.PIIAlg
 		s.Contacts = &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: pii, Ring: ring,
 			FuzzyName: cfg.SearchFuzzyName, PhoneSuffix: cfg.SearchPhoneSuffix,
-			VersionsKeep: cfg.VersionsKeep}
+			SplitLookupActions: cfg.AuditLookupActions == "split",
+			VersionsKeep:       cfg.VersionsKeep}
 		s.OTI = &service.OTI{Pool: st.Pool, Eng: eng, Ring: ring, Contacts: s.Contacts, TTL: cfg.OTITTL}
 		s.GDPR = &service.GDPR{Pool: st.Pool, Contacts: s.Contacts,
 			HTTPTimeout: cfg.WebhookTimeout, MaxAttempts: cfg.WebhookMaxAttempts,

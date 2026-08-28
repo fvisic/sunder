@@ -41,6 +41,11 @@ type Contacts struct {
 	// them on later backfills existing contacts via `sunder keys rekey`.
 	FuzzyName   bool
 	PhoneSuffix bool
+	// SplitLookupActions records a lookup under lookup / lookup.fuzzy /
+	// lookup.suffix instead of the single `lookup` action
+	// (SUNDER_AUDIT_LOOKUP_ACTIONS=split). Off by default because it
+	// multiplies read-bucket rows; docs/CONFIG.md carries the measurement.
+	SplitLookupActions bool
 	// VersionsKeep > 0 keeps that many prior blob versions per cid (F6);
 	// 0 = off. Set from SUNDER_VERSIONS_KEEP.
 	VersionsKeep int

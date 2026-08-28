@@ -251,6 +251,10 @@ is an API-pod statement about who seals, appended separately. */}}
 - name: SUNDER_AUDIT_READS
   value: {{ . | quote }}
 {{- end }}
+{{- with .Values.audit.lookupActions }}
+- name: SUNDER_AUDIT_LOOKUP_ACTIONS
+  value: {{ . | quote }}
+{{- end }}
 {{- with .Values.audit.sealInterval }}
 - name: SUNDER_AUDIT_SEAL_INTERVAL
   value: {{ . | quote }}

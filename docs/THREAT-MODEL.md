@@ -190,6 +190,43 @@ click - the access log is itself personal data about employees).
 Deployments that want per-event evidence for reads set
 `SUNDER_AUDIT_READS=chained`.
 
+### What bucketing costs the auditor, and what compensates for it
+
+Bucketing drops the per-event `Detail` before the hour is sealed. For a
+lookup, `Detail` is where `matched`, `ambiguous` and `by` lived, so a sealed
+hour says "this client searched for this cid 40 times" and cannot say how
+many of those searches found nothing. **Miss ratio is exactly the signal that
+distinguishes ordinary use from enumeration**, and bucketing aggregates it
+away.
+
+Two controls compensate, and neither lives in the audit table:
+
+- **The miss detector** (`internal/api/lookup.go`): every miss increments a
+  per-client sliding-window counter and the `sunder_lookup_misses_total`
+  metric, and crossing 100 misses in 10 minutes logs `possible enumeration
+  attack` once per window per client. It is fed from lookup AND from the
+  attribute read, because probing cids one at a time against the read
+  endpoint is the same attack (AUTHZ-1). This is a real-time control on a
+  metric and a log line - it is NOT in the hash chain, and an attacker who
+  owns the process owns it. It detects the patient outsider, not the
+  insider.
+- **The action itself**, which survives bucketing when
+  `SUNDER_AUDIT_LOOKUP_ACTIONS=split` is set. The three lookup forms have
+  different enumeration profiles - an exact e-mail either exists or does
+  not, whereas an 8-digit phone suffix is a guessable space - and splitting
+  puts that distinction in the one field the sealed hour keeps. It does not
+  restore the miss count; it restores the ability to say "this client spent
+  its hour probing partial identifiers", which is the question an auditor
+  asks before asking about misses.
+
+**Residual risk:** a client that stays under 100 misses per 10 minutes and
+uses only exact identifiers is, in a bucketed deployment, indistinguishable
+in the sealed trail from a client doing ordinary work. That is the accepted
+cost of aggregation, and it is why the detector's threshold is a
+deployment-visible constant rather than a hidden one, and why
+`SUNDER_AUDIT_READS=chained` remains available for deployments whose
+regulator wants per-event evidence.
+
 The optional `user_id` attribution (body field on lookup, header on GET)
 is CLIENT-ASSERTED and unverifiable by design: it improves the Article 15
 answer from "which system" to "which operator the system claims", and a

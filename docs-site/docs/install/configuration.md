@@ -124,6 +124,7 @@ Also required: the org's mailer endpoint registered under the reserved scope `_p
 | Variable | Default | Range | Description |
 |---|---|---|---|
 | `SUNDER_AUDIT_READS` | `bucketed` | `bucketed` \| `chained` | `bucketed`: reads UPSERT into hourly buckets keyed `(client_id, user_id, cid, action, hour)`; a closer turns each finished hour into ONE chained row carrying a digest over the hour's buckets. Cuts audit growth by the repeat-access factor. `chained`: every read is its own chained row - per-event tamper evidence, more storage. |
+| `SUNDER_AUDIT_LOOKUP_ACTIONS` | `single` | `single` \| `split` | `single`: every lookup records as the one action `lookup`. `split`: the trail separates `lookup` (exact identifier), `lookup.fuzzy` (a phonetic name match participated) and `lookup.suffix` (partial phone-suffix search). Useful under bucketed reads, where the per-event detail is dropped and the action is all the auditor sees. Costs at most 3.00x the read-bucket rows (measured worst case); consumers filtering `action = 'lookup'` must move to the `lookup.*` prefix first. |
 
 Tamper evidence for reads under `bucketed` holds at hour granularity (an open bucket of the current hour can be altered by a DBA-level attacker without breaking a digest); mutations - register, erase, consent, OTI - are always chained per event in both modes.
 
