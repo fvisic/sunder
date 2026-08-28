@@ -2,5 +2,5 @@ apiVersion: v2
 name: sunder
 description: Per-organization identity decoupling layer (scoped pseudonyms, one-time identifiers, anchored audit)
 type: application
-version: 0.5.0
-appVersion: "0.5.0"
+version: 0.5.1
+appVersion: "0.5.1"

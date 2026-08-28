@@ -41,8 +41,8 @@ kubectl create secret generic sunder-vault \
 ```yaml
 # values-prod.yaml
 image:
-  tag: v0.5.0
-  opsTag: v0.5.0-ops
+  tag: v0.5.1
+  opsTag: v0.5.1-ops
 replicaCount: 3
 database:
   existingSecret: sunder-db
