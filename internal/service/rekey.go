@@ -12,8 +12,11 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
+	"sort"
 	"time"
 
 	"github.com/fvisic/sunder/internal/audit"
@@ -32,11 +35,79 @@ type RekeyStats struct {
 	RecordKeysRewrapped  int64 // F5 per-person record keys re-wrapped (M5)
 	VersionsRewrapped    int64 // F6 attribute-version blobs re-encrypted (S5)
 	OutboxRewrapped      int64 // portal_outbox payloads re-sealed under the newest KEK (GAP-1)
+	// Resumed reports that this run picked up a previous run's resume point
+	// instead of starting from the first person, and PersonsSkipped is how
+	// many that previous run had already covered. The operator needs both:
+	// "persons: 500" after a resume means something very different from
+	// "persons: 500" on a fresh sweep, and silently reporting the smaller
+	// number would read as a sweep that had barely started.
+	Resumed        bool
+	PersonsSkipped int64
 	// Raced counts blobs a concurrent writer touched between this sweep's
 	// read and its write. They were NOT converted and a rerun is required -
 	// distinct from Skipped, which means "could not be decrypted at all"
 	// (TOKENS-LOOKUP-2).
 	Raced int64
+}
+
+// rekeyScope fingerprints what a sweep is doing, so a resume point can only
+// be honoured by a sweep doing the SAME work.
+//
+// This is the whole safety argument for resuming. The resume point says
+// "persons below this uuid are done" - true only for the outstanding set the
+// interrupted run was working through. Rotate a key, flip
+// SUNDER_SEARCH_FUZZY_NAME, or rerun with -reencrypt-pii after a run
+// without it, and persons BELOW the resume point now have work again.
+// Fingerprinting every input that decides the outstanding set turns that
+// from a rule someone has to remember into a string comparison.
+func rekeyScope(newest map[string]string, newestKEK string, reencryptPII, fuzzyName, phoneSuffix bool) string {
+	kinds := make([]string, 0, len(newest))
+	for k := range newest {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds) // map order is not a fingerprint
+	h := sha256.New()
+	for _, k := range kinds {
+		fmt.Fprintf(h, "%s=%s;", k, newest[k])
+	}
+	fmt.Fprintf(h, "kek=%s;pii=%t;fuzzy=%t;suffix=%t", newestKEK, reencryptPII, fuzzyName, phoneSuffix)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+const rekeyStartID = "00000000-0000-0000-0000-000000000000"
+
+// loadResumePoint returns where to start, and how many persons a previous
+// run had already covered. A scope mismatch, or no row at all, starts over.
+func (c *Contacts) loadResumePoint(ctx context.Context, scope string) (string, int64) {
+	var last string
+	var done int64
+	err := c.Pool.QueryRow(ctx,
+		`SELECT last_person_id::text, persons_done FROM rekey_progress WHERE id AND scope=$1`,
+		scope).Scan(&last, &done)
+	if err != nil || last == "" {
+		return rekeyStartID, 0
+	}
+	return last, done
+}
+
+// saveResumePoint records the page boundary. Best-effort by design: losing
+// it costs re-reading, never correctness, so a failure here must not abort a
+// sweep that is otherwise making progress.
+func (c *Contacts) saveResumePoint(ctx context.Context, scope, lastID string, done int64) {
+	_, _ = c.Pool.Exec(ctx,
+		`INSERT INTO rekey_progress (id, scope, last_person_id, persons_done, updated_at)
+		 VALUES (TRUE, $1, $2::uuid, $3, now())
+		 ON CONFLICT (id) DO UPDATE SET scope=EXCLUDED.scope,
+		   last_person_id=EXCLUDED.last_person_id,
+		   persons_done=EXCLUDED.persons_done, updated_at=now()`,
+		scope, lastID, done)
+}
+
+// clearResumePoint drops the row once the sweep has reached the end. Leaving
+// it would make the NEXT run of the same scope skip everything - correct
+// only until someone registers a person below the point.
+func (c *Contacts) clearResumePoint(ctx context.Context) {
+	_, _ = c.Pool.Exec(ctx, `DELETE FROM rekey_progress WHERE id`)
 }
 
 // Rekey sweeps all non-erased persons in id order.
@@ -55,6 +126,11 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 		return stats, err
 	}
 
+	scope := rekeyScope(newestByKind, newestKEK, reencryptPII, c.FuzzyName, c.PhoneSuffix)
+	resumeFrom, alreadyDone := c.loadResumePoint(ctx, scope)
+	stats.Resumed = resumeFrom != rekeyStartID
+	stats.PersonsSkipped = alreadyDone
+
 	// Paginate on the uuid ITSELF, never on id::text.
 	//
 	// `id::text > $1 ORDER BY id::text` is not sargable: the cast makes
@@ -67,7 +143,7 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 	//
 	// The uuid zero value is the lower bound; uuid ordering differs from text
 	// ordering, which does not matter to a sweep that must visit every row.
-	lastID := "00000000-0000-0000-0000-000000000000"
+	lastID := resumeFrom
 	tokens := newTokenBatch()
 	for {
 		rows, err := c.Pool.Query(ctx,
@@ -90,6 +166,10 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 			return stats, err
 		}
 		if len(ids) == 0 {
+			// Reached the end: the resume point has served its purpose, and
+			// keeping it would make the next run of the same scope skip a
+			// person registered below it.
+			c.clearResumePoint(ctx)
 			break
 		}
 		for _, id := range ids {
@@ -103,6 +183,10 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 			return stats, err
 		}
 		lastID = ids[len(ids)-1]
+		// Record the page boundary AFTER its tokens are committed, never
+		// before: a resume point ahead of the work it claims would skip
+		// persons permanently, and nothing would ever revisit them.
+		c.saveResumePoint(ctx, scope, lastID, alreadyDone+stats.Persons)
 	}
 
 	if reencryptPII {
