@@ -303,6 +303,12 @@ jobs:
       - name: Every feature reaches every artifact
         run: ./ops/check-artifact-coverage.sh
 
+      # sales/ is gitignored, so this is a no-op here by design - it exists so
+      # the same command works locally and at release time, where the deck IS
+      # present. Running it in CI keeps the script itself from bit-rotting.
+      - name: Sales deck figures trace to a measurement
+        run: ./ops/check-sales-deck.sh
+
       - name: Refuse retracted claims
         run: |
           set -e

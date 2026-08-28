@@ -21,14 +21,27 @@ checklist is what you run until they exist.
 ## Run the automated guards first
 
 ```sh
-./ops/check-config-docs.sh                      # every SUNDER_* is in a reference table
+./ops/check-config-docs.sh          # every SUNDER_* is in a reference table
+./ops/check-artifact-coverage.sh    # helm reachability, Postman coverage, SDK
+                                    # parity, the CONFIG.md<->docs-site mirror,
+                                    # test-corruption style, demo scripts in CI
+./ops/check-sales-deck.sh           # local only: figures in sales/ trace to a
+                                    # measurement in the repo (skips if absent)
+
 go test ./internal/api/ -run TestEveryRouteIsDocumented -count=1
 go test ./internal/api/ -run TestOpenAPI -count=1        # field-level drift
+go test ./internal/audit/ -count=1                # the closed audit action set
 cd docs-site && mkdocs build --strict            # dangling links, bad mermaid
 helm template deploy/helm/sunder >/dev/null      # chart still renders
 helm lint deploy/helm/sunder
 python3 -c "import yaml,json; yaml.safe_load(open('api/openapi.yaml')); json.load(open('api/sunder.postman_collection.json'))"
 ```
+
+Each guard prints its counts AND its exemptions. Read the exemptions: an
+exemption is a decision someone wrote down, and the guard is only as honest
+as that list. Two of them were found lying within a day of being written -
+one exempted a call site that had moved, the other described a mechanism
+that no longer ran.
 
 Green there means only that the guards that exist are satisfied. The table
 below is the part no guard covers yet.
@@ -61,7 +74,8 @@ file - not by remembering.
 | `deploy/helm/sunder/values.yaml` | settable, with a comment explaining the trade-off on Kubernetes specifically |
 | `deploy/helm/sunder/templates/_helpers.tpl` | actually rendered into the pod env |
 | `CHANGELOG.md` | listed under "New configuration" |
-| Tests | one asserting the default, one asserting an out-of-range value is refused |
+| Tests | one asserting the default, one asserting an out-of-range value is refused - a typo must fail at STARTUP, never fall back to the default silently |
+| The measured cost | if the knob has a price (rows, latency, storage), a test that MEASURES it and pins the number the docs quote. `TestSplitLookupActionsBucketMultiplier` is the shape: it asserts exact counts, not "under the ceiling", so the figure in three documents cannot drift away from the test cited as its source |
 
 Helm is the row that was missed. Verify it by rendering, not by reading:
 
@@ -74,6 +88,26 @@ helm template deploy/helm/sunder --set <path>=<value> | grep -A1 SUNDER_<NAME>
 `cmd/sunder/main.go` -> `docs/CONFIG.md` or the relevant runbook -> a test in
 `cmd/sunder/*_test.go` -> the operations page in `docs-site` if an operator
 would ever run it.
+
+### A new audit action
+
+`action` is a CLOSED SET. Register it in `internal/audit/actions.go` with a
+one-line meaning that tells a reader what its PRESENCE in the trail signifies.
+The AST guard in `internal/audit/scan_test.go` will fail the build otherwise -
+and it sees through helpers that take the action as a parameter, which the
+first regexp version did not (four actions, three of them privileged operator
+acts, were unregistered for months behind `auditOperator` and `terminal`).
+
+If the action is produced by a shape the scanner does not understand, the
+build fails asking you to teach the scanner. Do that; do not add an unchecked
+exemption.
+
+### A new demo script
+
+`demo/*.sh` -> a step in the `e2e-demo` CI job with whatever credentials it
+needs. The `demos` check refuses any script no job runs. `escalation.sh` sat
+broken (403 at step 2) while `docs/API.md` pointed readers at it, because
+nothing executed it.
 
 ### A new metric
 
@@ -163,3 +197,32 @@ in the PR description.
 - [ ] Deliberate omissions are written down where a reader looks.
 - [ ] `CHANGELOG.md` describes the change in terms of what an operator or
       integrator can now do, not in terms of which files moved.
+
+## The artifact outside the repo: `sales/`
+
+The pitch deck under `sales/` is **gitignored**, so no CI job can guard it -
+and it is the one artifact a customer actually reads. It quotes ten latency
+figures, throughput comparisons, a dataset size and a coverage number, drawn
+from four different sources (`benchmark/README.md`,
+`docs-site/docs/get-started/performance.md`, `docs/WHITEPAPER.md`,
+`docs-site/docs/comparisons/databunker.md`).
+
+Anything that moves a measured number moves the deck. In particular: a
+benchmark re-run, a coverage change, a new comparison row.
+
+```sh
+./ops/check-sales-deck.sh    # exits 0 when sales/ is absent
+```
+
+It parses both number conventions (the deck is Croatian - `1.569` is one
+thousand five hundred sixty-nine, `5,62` is five point six two - the sources
+are English) and flags any figure matching no measurement in the repo. It
+found three on its first run: a "10,6 ms median search under full load" that
+exists nowhere (it had been matching only as a substring of `110.6 rps`, a
+different quantity entirely), a "28.000/s bulk import" with no source, and a
+"1,4x at 8 clients" write claim drawn from the one measurement
+`benchmark/README.md` explicitly calls run-to-run noise.
+
+It cannot tell whether a number is used in the RIGHT context - only a human
+can say whether a p99 got labelled a median. Read its output; do not just
+check the exit code.

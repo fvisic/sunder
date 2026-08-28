@@ -60,6 +60,8 @@ go test -count=1 -timeout=25m -covermode=atomic \
   -coverprofile=cover.out -coverpkg=./internal/...,./cmd/... ./...
 ./ops/coverage-gate.sh cover.out 90.0
 ./ops/check-config-docs.sh
+./ops/check-artifact-coverage.sh
+./ops/check-sales-deck.sh
 (cd docs-site && mkdocs build --strict)
 helm template deploy/helm/sunder >/dev/null && helm lint deploy/helm/sunder
 python3 -c "import yaml,json;yaml.safe_load(open('api/openapi.yaml'));json.load(open('api/sunder.postman_collection.json'))"
@@ -79,11 +81,20 @@ Every SDK suite, and say which ones you could not run:
 End-to-end on a clean stack - `down -v` matters, because the bugs that hide
 here are cold-boot bugs:
 
+The demo scripts and the playground use DIFFERENT stacks, and each demo
+needs its own credentials. **Do not run `for s in demo/*.sh`** - each script
+needs a different credential set, they overwrite each other's variables, and
+`lib.sh` is a sourced helper with no main. That loop reports seven failures
+on a perfectly healthy tree. The exact commands are in the `verify-local`
+skill; follow it rather than improvising.
+
 ```sh
+# playground: the OVERLAY stack
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.playground.yml down -v
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.playground.yml up --build -d --wait
-python3 ops/playground_e2e.py
-for s in demo/*.sh; do bash "$s" || echo "FAILED: $s"; done
+python3 ops/playground_e2e.py        # expect: every walkthrough passed
+
+# demos: the PLAIN stack, with the credential groups from `verify-local`
 ```
 
 ## 5. CI must actually run
@@ -144,6 +155,30 @@ repository **variable** enables it and a **secret** authenticates it, so
 nothing publishes until both exist. Go needs nothing (the module resolves
 from the repo tag); Packagist needs the repo submitted once; Maven Central
 is manual until Sonatype onboarding for `io.sunderid` is done.
+
+## Update the sales deck
+
+`sales/` is gitignored, so nothing in CI will remind you. If this release
+moved a measured number - a benchmark re-run, a coverage change, a new
+comparison row - the deck is now stale, and it is the artifact a customer
+reads. `./ops/check-sales-deck.sh` reports figures that match no measurement
+in the repo; read its output rather than its exit code, because it cannot
+tell a p99 labelled as a median from a correct one.
+
+## When GitHub Actions is unavailable
+
+It happens - every job failing in under 15 seconds with an empty `steps`
+array is the platform, not the change:
+
+```sh
+gh api repos/fvisic/sunder/actions/runs/<id>/jobs \
+  --jq '[.jobs[]|select(.steps|length>0)]|length'   # 0 = nothing ever started
+```
+
+Run the whole gauntlet locally (the `verify-local` skill), and **say in the
+PR body and the release notes exactly what was verified locally and what was
+not**. Then re-run the release workflow once Actions recovers and check the
+assets landed - that is the step whose absence published an empty v0.4.0.
 
 ## What blocks a tag
 
