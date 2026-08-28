@@ -217,6 +217,18 @@ jobs:
           done
       - name: Run feature demo F9 (Shamir, CLI)
         run: SUNDER_EXEC='docker compose -f deploy/docker-compose.yml exec -T sunder /sunder' bash demo/f9-shamir-recovery.sh
+      # escalation.sh needs its own pair of credentials (a notifier scope),
+      # which is why it was never added here - and it then sat broken,
+      # returning 403 at step 2, while docs/API.md pointed readers at it.
+      # Every shipped demo script runs in CI now, and the `demos` check in
+      # ops/check-artifact-coverage.sh fails the build if a new one is added
+      # without a job that executes it.
+      - name: Create escalation demo clients
+        run: |
+          echo "SUNDER_CRED_CRM=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id crm-esc -name CRM -scope crm -actions contacts.register,oti.issue,attributes.read -purposes escalation_notify -rate 1000 | tail -1)" >> "$GITHUB_ENV"
+          echo "SUNDER_CRED_NOTIFIER=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id notifier -name Notifier -scope notifier -actions oti.verify,attributes.read,consent.manage -purposes escalation_notify -rate 1000 | tail -1)" >> "$GITHUB_ENV"
+      - name: Run delayed-flow demo (escalation)
+        run: bash demo/escalation.sh
       - name: Verify audit chain
         run: docker compose -f deploy/docker-compose.yml exec sunder /sunder verify-audit
 
