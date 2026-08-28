@@ -287,6 +287,34 @@ func TestVersioningConfig(t *testing.T) {
 	}
 }
 
+// TestRekeyBatchConfig pins the knob that decides whether a key rotation is
+// performable at all. `1` is deliberately ALLOWED - it restores the old
+// one-token-per-statement behaviour, which an operator might want on a
+// database too loaded to take a batch - so the test asserts it is accepted
+// rather than rejected, and that 0 is not.
+func TestRekeyBatchConfig(t *testing.T) {
+	t.Setenv("SUNDER_DB_URL", "postgres://localhost/sunder")
+	c, err := FromEnv()
+	if err != nil || c.RekeyBatch != 500 {
+		t.Fatalf("default rekey batch: %d %v", c.RekeyBatch, err)
+	}
+	t.Setenv("SUNDER_REKEY_BATCH", "2000")
+	if c, err = FromEnv(); err != nil || c.RekeyBatch != 2000 {
+		t.Fatalf("rekey batch 2000: %d %v", c.RekeyBatch, err)
+	}
+	// The degenerate-but-legitimate setting: one person per page.
+	t.Setenv("SUNDER_REKEY_BATCH", "1")
+	if c, err = FromEnv(); err != nil || c.RekeyBatch != 1 {
+		t.Fatalf("rekey batch 1 must be accepted: %d %v", c.RekeyBatch, err)
+	}
+	for _, bad := range []string{"0", "-5", "10001", "500.5", "lots"} {
+		t.Setenv("SUNDER_REKEY_BATCH", bad)
+		if _, err := FromEnv(); err == nil {
+			t.Fatalf("SUNDER_REKEY_BATCH=%q must be rejected at startup, not silently coerced", bad)
+		}
+	}
+}
+
 func TestFileVaultConfigValidation(t *testing.T) {
 	t.Setenv("SUNDER_DB_URL", "postgres://localhost/sunder")
 	// Invalid storage kind.

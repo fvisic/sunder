@@ -11,6 +11,7 @@ package service_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -391,4 +392,159 @@ func TestRekeyPaginationUsesThePrimaryKeyIndex(t *testing.T) {
 		t.Fatalf("the sweep visited %d persons, fewer than the 300 just inserted - "+
 			"uuid ordering must still cover the whole table", before.Persons)
 	}
+}
+
+// TestBatchedTokenFlushStillRefusesAnErasedPerson is GDPR-ERASURE-2 re-asked
+// of the batched write path.
+//
+// The sweep now accumulates every token in a batch and writes them in one
+// statement. That is 90x faster - and it WIDENS the window the original
+// finding lived in: a person read at the top of a 500-person batch has their
+// tokens written at the bottom of it, so an erasure landing between the two
+// has more room, not less. If the liveness check had moved from per-row to
+// per-batch during that change, deleted search tokens would come back under
+// the newest key version, permanently, and be immediately usable.
+//
+// The seam erases the person after their tokens are in the batch and before
+// the batch is written, which is exactly that window, deterministically.
+func TestBatchedTokenFlushStillRefusesAnErasedPerson(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	cid, err := e.svc.Register(ctx, e.crm, service.RegisterInput{Email: "batched@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var personID string
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT person_id::text FROM cids WHERE cid=$1`, cid).Scan(&personID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rotate so the sweep has real work: it will mint tokens under v2.
+	if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, crypto.KeyHMACEmail); err != nil {
+		t.Fatal(err)
+	}
+
+	// Erase inside the window: the person is already in the batch, the batch
+	// has not been written yet.
+	fired := false
+	service.BeforeTokenFlushForTest = func() {
+		if fired {
+			return
+		}
+		fired = true
+		if _, err := e.admin.Pool.Exec(ctx,
+			`DELETE FROM person_tokens WHERE person_id=$1`, personID); err != nil {
+			t.Error(err)
+		}
+		if _, err := e.admin.Pool.Exec(ctx,
+			`UPDATE persons SET erased_at=now() WHERE id=$1`, personID); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { service.BeforeTokenFlushForTest = nil })
+
+	if _, err := e.svc.Rekey(ctx, false, 100); err != nil {
+		t.Fatal(err)
+	}
+	if !fired {
+		t.Fatal("the seam never ran - the sweep wrote no batch, so this proves nothing")
+	}
+
+	var revived int
+	if err := e.admin.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM person_tokens WHERE person_id=$1`, personID).Scan(&revived); err != nil {
+		t.Fatal(err)
+	}
+	if revived != 0 {
+		t.Fatalf("the batched flush re-created %d search token(s) for an erased person - "+
+			"they are immediately usable and nothing will ever delete them again "+
+			"(GDPR-ERASURE-2)", revived)
+	}
+}
+
+// TestBatchedFlushWritesEveryTokenItAccumulated is the other half: the fast
+// path must not silently drop rows. A join that filtered too much would look
+// exactly like success.
+func TestBatchedFlushWritesEveryTokenItAccumulated(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	const people = 25
+	ids := make([]string, 0, people)
+	for i := 0; i < people; i++ {
+		cid, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email: fmt.Sprintf("bulk%d@example.com", i),
+			Phone: fmt.Sprintf("+3859100000%02d", i),
+			Name:  fmt.Sprintf("Person Number%d", i),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, cid)
+	}
+
+	before := map[string]int{}
+	countTokens(t, e, &before)
+
+	// Rotate every identifier kind, then sweep: each person must gain tokens
+	// under the new versions, through the batched path.
+	for _, kind := range []string{crypto.KeyHMACEmail, crypto.KeyHMACPhone, crypto.KeyHMACName} {
+		if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, kind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := e.svc.Rekey(ctx, false, 10) // batch smaller than the population
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Persons < people {
+		t.Fatalf("the sweep visited %d persons, expected at least %d", stats.Persons, people)
+	}
+	if stats.TokensInserted == 0 {
+		t.Fatal("a rotation across all three kinds inserted no tokens - the batch was dropped")
+	}
+
+	after := map[string]int{}
+	countTokens(t, e, &after)
+	for kind, n := range after {
+		if n <= before[kind] {
+			t.Fatalf("kind %q did not gain tokens after a rotation (%d -> %d)", kind, before[kind], n)
+		}
+	}
+	// And every registered contact still resolves - the point of the tokens.
+	for i, cid := range ids {
+		got, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+			Email: fmt.Sprintf("bulk%d@example.com", i)})
+		if err != nil {
+			t.Fatalf("contact %d no longer resolves after the batched sweep: %v", i, err)
+		}
+		if got != cid {
+			t.Fatalf("contact %d resolved to %q, want %q", i, got, cid)
+		}
+	}
+}
+
+func countTokens(t *testing.T, e *faultEnv, out *map[string]int) {
+	t.Helper()
+	rows, err := e.admin.Pool.Query(context.Background(),
+		`SELECT kind, count(*) FROM person_tokens GROUP BY kind`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	m := map[string]int{}
+	for rows.Next() {
+		var k string
+		var n int
+		if err := rows.Scan(&k, &n); err != nil {
+			t.Fatal(err)
+		}
+		m[k] = n
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	*out = m
 }
