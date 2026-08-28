@@ -197,6 +197,33 @@ fixes generalise an existing guard rather than invent one.
 `SUNDER_REKEY_BATCH`. Booleans now accept `true/false`, `1/0`, `yes/no`,
 `on/off` and REFUSE anything else.
 
+### The sweep still fetched blobs one person at a time
+Batching the WRITES left the READS untouched, and a measured breakdown showed
+where the remaining 17.6 hours went:
+
+| per person | | |
+|---|---|---|
+| the per-person `SELECT` | 1.65 ms | **70%** |
+| decrypt + tokenize (CPU) | 0.71 ms | 30% |
+
+Two thirds of the sweep was a single-threaded program waiting on a database
+measured accepting 54,000 rows/s while being asked 424 times a second. The
+page's blobs now come back in one `WHERE person_id = ANY($1::uuid[])`,
+projecting 17.6 h down to the ~5.3 h of arithmetic that is actually left.
+
+`TestRekeyFetchesBlobsPerPageNotPerPerson` asserts the fetch count scales
+with PAGES, not people. Its first version counted scans in
+`pg_stat_user_tables` and **passed after per-person fetching was deliberately
+reintroduced** - those statistics are collected asynchronously, so it was
+measuring noise. It now uses a seam and fails with `the sweep fetched blobs
+40 times for 40 persons`. A test that cannot fail is worse than no test,
+because it is claimed as coverage.
+
+Parallelising the remaining CPU work is Phase 7.8, written up with the seven
+things that can corrupt data if it is done carelessly - starting with the
+resume point, which is a single row that means nothing once there are N
+frontiers.
+
 ### The rekey sweep restarted from the first person every time
 `lastID` lived in a local variable, so an interrupted sweep paid for its own
 progress again. Measured mid-backfill on 26.9M contacts: 4.1M persons already

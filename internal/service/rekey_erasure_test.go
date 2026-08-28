@@ -736,3 +736,66 @@ func (b *syncBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// TestRekeyFetchesBlobsPerPageNotPerPerson pins the read shape.
+//
+// The per-person SELECT was 70% of the sweep's wall clock - 1.65 ms of
+// waiting against 0.71 ms of decryption and tokenization, so 26.9M persons
+// spent 12.3 hours doing nothing while a database measured at 54,000 rows/s
+// sat idle.
+//
+// The seam is not laziness: the first version of this test counted scans in
+// pg_stat_user_tables, and PASSED after per-person fetching was deliberately
+// reintroduced - those statistics are collected asynchronously, so the
+// assertion was measuring noise. A test that cannot fail is worse than no
+// test, because it is claimed as coverage.
+func TestRekeyFetchesBlobsPerPageNotPerPerson(t *testing.T) {
+	e := newFaultEnv(t)
+	ctx := context.Background()
+
+	const people = 40
+	for i := 0; i < people; i++ {
+		if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
+			Email: fmt.Sprintf("perpage%d@example.com", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.svc.Ring.Rotate(ctx, e.oti.Eng, crypto.KeyHMACEmail); err != nil {
+		t.Fatal(err)
+	}
+
+	var fetches int
+	var sizes []int
+	service.OnBlobFetchForTest = func(n int) {
+		fetches++
+		sizes = append(sizes, n)
+	}
+	t.Cleanup(func() { service.OnBlobFetchForTest = nil })
+
+	const batch = 10
+	if _, err := e.svc.Rekey(ctx, false, batch); err != nil {
+		t.Fatal(err)
+	}
+
+	// One fetch per page: 40 persons in pages of 10 is 4 pages (the final
+	// empty page ends the loop before fetching).
+	if fetches > people/batch+1 {
+		t.Fatalf("the sweep fetched blobs %d times for %d persons in pages of %d - "+
+			"that is per-PERSON fetching, which measured 70%% of the sweep's wall clock",
+			fetches, people, batch)
+	}
+	for i, n := range sizes {
+		if n == 1 && people > 1 {
+			t.Fatalf("fetch %d covered a single person: the page fetch degenerated "+
+				"into the per-person form it replaced", i)
+		}
+	}
+
+	// And it must still be correct: every contact resolves.
+	for i := 0; i < people; i++ {
+		if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+			Email: fmt.Sprintf("perpage%d@example.com", i)}); err != nil {
+			t.Fatalf("contact %d lost its tokens to the batched fetch: %v", i, err)
+		}
+	}
+}

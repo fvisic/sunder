@@ -50,6 +50,61 @@ type RekeyStats struct {
 	Raced int64
 }
 
+// blobRow is one scope's encrypted attribute blob for one person.
+type blobRow struct {
+	personID  string
+	cid       string
+	blob      []byte
+	keyID     string
+	alg       string
+	updatedAt time.Time
+}
+
+// blobsForBatch fetches every blob for a whole page of persons in ONE query.
+//
+// This used to be one SELECT per person, and that single round trip was 70%
+// of the sweep's wall clock: measured at 1.65 ms against 0.71 ms of actual
+// decryption and tokenization, so 26.9M persons spent 12.3 hours waiting on
+// a database that was measured accepting 54,000 rows/s. The work was never
+// the problem; asking for it one person at a time was.
+//
+// Same shape as the token flush that preceded it - unnest the page, let
+// PostgreSQL do one index scan over the set - and the same reason.
+func (c *Contacts) blobsForBatch(ctx context.Context, personIDs []string) (map[string][]blobRow, error) {
+	if OnBlobFetchForTest != nil {
+		// A test seam, not a feature. Whether this is called once per PAGE
+		// or once per PERSON is the difference between 5 hours and 17, and
+		// it cannot be observed from the outside: pg_stat_user_tables
+		// updates asynchronously, so a statistics-based assertion passes
+		// with per-person fetching too - which it did, before this existed.
+		OnBlobFetchForTest(len(personIDs))
+	}
+	rows, err := c.Pool.Query(ctx,
+		`SELECT person_id::text, cid, COALESCE(pii_encrypted,''::bytea),
+		        COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm'), updated_at
+		   FROM cids WHERE person_id = ANY($1::uuid[])`, personIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][]blobRow, len(personIDs))
+	for rows.Next() {
+		var b blobRow
+		if err := rows.Scan(&b.personID, &b.cid, &b.blob, &b.keyID, &b.alg, &b.updatedAt); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
+			return nil, err
+		}
+		out[b.personID] = append(out[b.personID], b)
+	}
+	// No marker here: the fault tests reach this branch through a denied
+	// table, so it IS covered - and the gate refuses a defensive marker on a
+	// covered block precisely so the exclusion list cannot rot into a pile
+	// of stale excuses.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // rekeyScope fingerprints what a sweep is doing, so a resume point can only
 // be honoured by a sweep doing the SAME work.
 //
@@ -206,8 +261,13 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 			c.clearResumePoint(ctx)
 			break
 		}
+		// One query for the whole page's blobs, not one per person.
+		blobs, err := c.blobsForBatch(ctx, ids)
+		if err != nil {
+			return stats, err
+		}
 		for _, id := range ids {
-			if err := c.rekeyPerson(ctx, id, newestByKind, newestKEK, reencryptPII, &stats, tokens); err != nil {
+			if err := c.rekeyPerson(ctx, id, blobs[id], newestByKind, newestKEK, reencryptPII, &stats, tokens); err != nil {
 				return stats, fmt.Errorf("person %s: %w", id, err)
 			}
 			stats.Persons++
@@ -269,6 +329,10 @@ func (c *Contacts) Rekey(ctx context.Context, reencryptPII bool, batch int) (Rek
 // BeforeTokenFlushForTest runs immediately before a token batch is written,
 // nil in production. See flushTokens.
 var BeforeTokenFlushForTest func()
+
+// OnBlobFetchForTest reports how many persons each blob fetch covered, nil
+// in production. See blobsForBatch.
+var OnBlobFetchForTest func(persons int)
 
 // tokenBatch accumulates the search tokens produced across every person in
 // one sweep batch, so they land in ONE statement instead of one per token.
@@ -370,34 +434,10 @@ func (c *Contacts) findOffendingRow(ctx context.Context, b *tokenBatch) string {
 	return ""
 }
 
-func (c *Contacts) rekeyPerson(ctx context.Context, personID string, newest map[string]string, newestKEK string, reencryptPII bool, stats *RekeyStats, batch *tokenBatch) error {
-	rows, err := c.Pool.Query(ctx,
-		`SELECT cid, COALESCE(pii_encrypted,''::bytea), COALESCE(pii_key_id,'v1'), COALESCE(pii_alg,'aes256gcm'), updated_at
-		 FROM cids WHERE person_id=$1`, personID)
-	if err != nil {
-		return err
-	}
-	type blobRow struct {
-		cid       string
-		blob      []byte
-		keyID     string
-		alg       string
-		updatedAt time.Time
-	}
-	var blobs []blobRow
-	for rows.Next() {
-		var b blobRow
-		if err := rows.Scan(&b.cid, &b.blob, &b.keyID, &b.alg, &b.updatedAt); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
-			rows.Close()
-			return err
-		}
-		blobs = append(blobs, b)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
-		return err
-	}
-
+// rekeyPerson processes one person from a page whose blobs were already
+// fetched in bulk by blobsForBatch. It issues no query of its own on the
+// read path - that per-person SELECT was 70% of the sweep's wall clock.
+func (c *Contacts) rekeyPerson(ctx context.Context, personID string, blobs []blobRow, newest map[string]string, newestKEK string, reencryptPII bool, stats *RekeyStats, batch *tokenBatch) error {
 	// Collect identifiers across every scope's blob (values are stored
 	// normalized at registration time).
 	emails := map[string]bool{}
