@@ -296,6 +296,12 @@ jobs:
       - name: Config reference covers every variable
         run: ./ops/check-config-docs.sh
 
+      # VERSION exists so "which build is this?" is one command on a machine
+      # with no git and no toolchain. A version file nobody checks drifts, and
+      # a drifted one answers confidently and wrongly.
+      - name: VERSION, the tag, the SDK manifests and the CHANGELOG agree
+        run: ./ops/check-versions.sh
+
       # The same shape, extended to the artifacts that had NO guard: the Helm
       # chart, the Postman collection, SDK parity across all six languages,
       # and the docs-site mirror of the config reference. v0.5.0 shipped with

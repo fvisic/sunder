@@ -34,12 +34,15 @@ Every one of these fails the build in CI's `guards` job or the test matrix.
 | Erasure completeness | a person-linked table has no explicit erasure decision | `TestErasureInvariantSweep` |
 | Coverage | below 90%, or defensive exclusions over 1% of statements | `ops/coverage-gate.sh` |
 | Docs build | a dead link or broken diagram | `mkdocs build --strict` |
+| **Version agreement** | `VERSION` disagrees with the newest tag, the six SDK manifests disagree with each other, or the CHANGELOG has no section for this version | `ops/check-versions.sh` |
+| Pool inversion | a function holding a `pgx.Tx` can reach a pool acquisition - the shape that deadlocked writes | `TestNoPoolAcquireWhileHoldingATransaction` |
 
 Run the lot locally:
 
 ```sh
 ./ops/check-config-docs.sh
 ./ops/check-artifact-coverage.sh
+./ops/check-versions.sh
 ./ops/check-sales-deck.sh            # local only; exits 0 if sales/ is absent
 go test ./... -count=1
 (cd docs-site && mkdocs build --strict)
@@ -96,6 +99,23 @@ Add a step to the `e2e-demo` job with the credentials it needs. The `demos`
 check refuses any script no job runs. `demo/escalation.sh` sat broken - a 403
 at step 2 - while `docs/API.md` pointed readers at it, because nothing ran it.
 
+### A release
+
+| # | Artifact | Guarded? |
+|---|---|---|
+| 1 | `VERSION` at the repo root - the answer to "which build is this?" on a box with no git and no toolchain | yes |
+| 2 | the git tag, matching `VERSION` | yes |
+| 3 | the six SDK manifests, agreeing with each other (they version independently of the server - `RELEASING.md`) | yes |
+| 4 | `CHANGELOG.md`, with a section describing what an operator can now do | yes (presence), no (content) |
+| 5 | `docs-site/docs/dev/sdks-and-api.md` - the Maven snippet is the one place a version hides in prose | no |
+| 6 | the release page actually carrying its assets - v0.4.0 shipped with **zero** | no; the `release` skill's step 7 |
+| 7 | **the sales deck** - see below | partly |
+
+`VERSION` exists because that question had no cheap answer. A benchmark ran
+for an afternoon against a server checkout that turned out to be an old
+snapshot missing both features under test, and nothing on the machine said
+so.
+
 ### A new CLI command, flag or metric
 
 CLI: `cmd/sunder/main.go` -> `docs/CONFIG.md` or the runbook -> a test in
@@ -110,6 +130,23 @@ A benchmark re-run, a coverage change, a new comparison row touches:
 `benchmark/README.md`, `docs-site/docs/get-started/performance.md`,
 `docs/WHITEPAPER.md`, `docs-site/docs/comparisons/databunker.md` - **and the
 sales deck**, which is the only one a customer reads.
+
+Those files keep their historical runs on purpose: the deltas between them
+are the record of what changed. So the current figures are fenced with
+
+```html
+<!-- authoritative:begin - ops/check-sales-deck.sh trusts ONLY what is between these markers -->
+...
+<!-- authoritative:end -->
+```
+
+and the deck checker reads only what is inside. Without that fence a figure
+from a superseded run still "matches a source", which is precisely the
+mistake a deck makes after a re-measurement - and it did: the fence is what
+revealed that the deck's entire comparison table was v0.4-era.
+
+**Move the fence when you add a newer run.** A fence left around last
+quarter's numbers is worse than none.
 
 ## The artifact outside the repo
 
