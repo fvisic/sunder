@@ -82,6 +82,50 @@ already decrypted and inserts the missing token rows
 (`ON CONFLICT DO NOTHING`), so this is the single command for both "finish
 a key rotation" and "backfill a newly enabled search feature."
 
+### How long it actually takes
+
+"Run `sunder keys rekey`" is one line to type and, on a large dataset, a
+**maintenance window to plan**. These numbers are measured, not estimated -
+26,872,537 contacts, 34 GB, 12-core server, PostgreSQL 16 tuned per
+[Postgres Sizing](../install/postgres-sizing.md):
+
+| Operation | Measured |
+|---|---|
+| Sweep throughput | **~424 persons/sec** |
+| Full pass over 26.9M persons | **~17.6 hours** |
+| Backfilling `phone_suffix` + `name_phonetic` from scratch | the same pass; ~140M token rows |
+| Applying the v0.4 → v0.5 migrations on that dataset | 0.63 s |
+| Restart-to-`/readyz` after those migrations | 1.5 s |
+
+Scale it linearly: roughly **40 minutes per million contacts**. Under a
+million, it is a coffee break. Over ten, it is an overnight job.
+
+Two things follow, and both matter more than the number:
+
+- **Do not start a full sweep in business hours on a large dataset.** It
+  holds pool connections for its duration and competes with live traffic.
+- **The sweep reports progress every 30 seconds** and resumes where it
+  stopped, so interrupting it is safe and cheap:
+
+```
+INFO rekey sweep starting live_persons=26872537 batch=500
+INFO rekey sweep progress persons_this_run=254000 persons_total=254000 tokens_written=1270000 persons_per_sec=424 eta=17h20m0s
+^C
+$ sunder keys rekey            # later, in the next window
+INFO rekey sweep resuming from_person=3f2a... already_covered=254000
+```
+
+A resume point is only honoured for **identical work**: rotate another key,
+flip a derived-search flag, or rerun with `-reencrypt-pii` after a run
+without it, and the sweep correctly starts from the beginning, because
+persons before the old resume point now have work again.
+
+`SUNDER_REKEY_BATCH` (default 500) sets how many persons a page covers and
+how many persons' tokens go into one `INSERT`. Lower it to be gentler on a
+loaded database; `1` restores per-token writes, which on this dataset
+measured **87 hours** instead of 17.6 - the difference is round-trip
+latency, not database throughput.
+
 ### 3. Verify, then retire the old version
 
 ```sh

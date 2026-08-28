@@ -48,6 +48,33 @@ Supported algorithms: `aes256gcm` (default), `xchacha20poly1305`.
    `person_record_keys` and `portal_outbox`. It is idempotent and
    resumable - rerun until `blob(s) re-encrypted` reports `0`.
 
+   **Budget the time before you start.** Measured on 26,872,537 contacts
+   (34 GB, 12-core server, tuned PostgreSQL 16): **~424 persons/sec**, so a
+   full pass is **~17.6 hours**, roughly 40 minutes per million contacts.
+   Under a million this is a coffee break; over ten it is an overnight job
+   and belongs in a maintenance window - the sweep holds pool connections
+   for its duration and competes with live traffic.
+
+   It prints progress every 30 seconds and records a resume point after each
+   page, so interrupting it costs nothing but the current page:
+
+   ```
+   INFO rekey sweep progress persons_total=254000 persons_per_sec=424 eta=17h20m0s
+   ^C
+   $ sunder keys rekey     # in the next window
+   INFO rekey sweep resuming from_person=3f2a... already_covered=254000
+   ```
+
+   A resume point is honoured only for **identical work**. Rotating another
+   key, flipping a derived-search flag, or rerunning with `-reencrypt-pii`
+   after a run without it all invalidate it, because persons before the
+   point now have work again - the sweep then correctly starts over.
+
+   `SUNDER_REKEY_BATCH` (default 500) trades memory and database pressure
+   against speed. `1` restores the pre-0.5.1 per-token writes, which on the
+   same dataset measured **87 hours** rather than 17.6: the difference was
+   round-trip latency, never database throughput.
+
    A row the sweep found modified by a concurrent request between its read
    and its write is reported separately as `blob(s) were modified
    concurrently and NOT converted`. That is not a warning to skim past: those

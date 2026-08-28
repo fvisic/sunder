@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -45,6 +46,17 @@ type Contacts struct {
 	VersionsKeep int
 	// WrittenBy labels version rows with the operating client id; set per
 	// call is impractical, so mergeIntoBlob passes the client through.
+
+	// Log receives the rekey sweep's progress. Optional: nil falls back to
+	// slog.Default(), the same shape GDPR uses.
+	Log *slog.Logger
+}
+
+func (c *Contacts) logger() *slog.Logger {
+	if c.Log != nil {
+		return c.Log
+	}
+	return slog.Default()
 }
 
 // mintDerived tokenizes pre-derived values (phonetic codes, suffixes)
