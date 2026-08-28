@@ -111,6 +111,14 @@ func TestSplitLookupActionsSeparatesTheThreeForms(t *testing.T) {
 	if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{PhoneSuffix: "911234567"}); err != nil {
 		t.Fatal(err)
 	}
+	// Partial identifier AND a phonetic name - the widest search the API
+	// offers. Lookup refuses email/phone beside a suffix but accepts a
+	// name, so this is a real request, and recording it as an ordinary
+	// suffix probe would hide the fuzzy half from the auditor.
+	if _, err := e.svc.Lookup(ctx, e.crm, service.LookupInput{
+		PhoneSuffix: "911234567", Name: "Ana Anic"}); err != nil {
+		t.Fatalf("suffix + fuzzy name must be a legal request: %v", err)
+	}
 
 	got := readActions(t, e)
 	for _, want := range []struct {
@@ -120,6 +128,7 @@ func TestSplitLookupActionsSeparatesTheThreeForms(t *testing.T) {
 		{audit.ActionLookup, 1},
 		{audit.ActionLookupFuzzy, 1},
 		{audit.ActionLookupSuffix, 1},
+		{audit.ActionLookupSuffixFuzzy, 1},
 	} {
 		if got[want.action] != want.n {
 			t.Errorf("want %d x %q, got %d (all: %v)", want.n, want.action, got[want.action], got)
@@ -211,18 +220,36 @@ func TestSplitLookupActionsAreAllRegistered(t *testing.T) {
 }
 
 // TestSplitLookupActionsBucketMultiplier is the MEASUREMENT the split was
-// gated on, not a pass/fail of taste.
+// gated on, and it PINS the number the documentation quotes.
 //
 // Read events aggregate into buckets keyed
-// (client_id, user_id, cid, action, hour). Splitting one action into three
+// (client_id, user_id, cid, action, hour). Splitting one action into four
 // can only multiply rows where a single (client, user, cid, hour) key
 // previously held searches of more than one form - and the worst case is
-// exactly the miss bucket, because every miss shares cid = ”.
+// exactly the miss bucket, because every miss shares cid = "".
 //
-// The test builds that worst case deliberately and reports the ratio, so the
-// number in docs/CONFIG.md comes from a run rather than from arithmetic on a
-// whiteboard.
+// Asserting only "ratio <= ceiling" would let the real worst case drift to
+// 1.5x while docs/CONFIG.md, audit-chain.md and API.md all kept quoting the
+// old figure with a green test. The counts here are deterministic for this
+// fixture, so they are asserted exactly; change them only together with the
+// three documents.
 func TestSplitLookupActionsBucketMultiplier(t *testing.T) {
+	const (
+		wantSingle = 2 // one hit bucket + one miss bucket, one action
+		wantSplit  = 8 // the same two, once per lookup form
+	)
+
+	// hours reports how many distinct bucket hours the traffic landed in.
+	// A run straddling an hour boundary doubles rows for reasons that have
+	// nothing to do with the split, and would fail the assertion below.
+	hours := func(e *faultEnv) int {
+		var n int
+		if err := e.admin.Pool.QueryRow(context.Background(),
+			`SELECT count(DISTINCT bucket_start) FROM audit_read_buckets`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
 	count := func(e *faultEnv) int {
 		var n int
 		if err := e.admin.Pool.QueryRow(context.Background(),
@@ -232,8 +259,8 @@ func TestSplitLookupActionsBucketMultiplier(t *testing.T) {
 		return n
 	}
 	// The same traffic against both postures: one client, one user, a hit
-	// and a miss in each of the three forms. This is the shape that costs
-	// the most - a client using every form within one hour.
+	// and a miss in each form. This is the shape that costs the most - a
+	// client using every form within one hour.
 	traffic := func(e *faultEnv) {
 		ctx := context.Background()
 		if _, err := e.svc.Register(ctx, e.crm, service.RegisterInput{
@@ -248,6 +275,8 @@ func TestSplitLookupActionsBucketMultiplier(t *testing.T) {
 				Email: "mult@example.com", Name: "Ana Anic", UserID: "agent-1"})
 			_, _ = e.svc.Lookup(ctx, e.crm, service.LookupInput{
 				PhoneSuffix: "915559999", UserID: "agent-1"})
+			_, _ = e.svc.Lookup(ctx, e.crm, service.LookupInput{
+				PhoneSuffix: "915559999", Name: "Ana Anic", UserID: "agent-1"})
 			// Misses: cid is empty, so ALL of them share one key per action.
 			_, _ = e.svc.Lookup(ctx, e.crm, service.LookupInput{
 				Email: fmt.Sprintf("miss-%d@example.com", i), UserID: "agent-1"})
@@ -255,36 +284,45 @@ func TestSplitLookupActionsBucketMultiplier(t *testing.T) {
 				Email: fmt.Sprintf("miss-%d@example.com", i), Name: "Ana Anic", UserID: "agent-1"})
 			_, _ = e.svc.Lookup(ctx, e.crm, service.LookupInput{
 				PhoneSuffix: fmt.Sprintf("91555%04d", 1000+i), UserID: "agent-1"})
+			_, _ = e.svc.Lookup(ctx, e.crm, service.LookupInput{
+				PhoneSuffix: fmt.Sprintf("91555%04d", 1000+i), Name: "Ana Anic", UserID: "agent-1"})
 		}
 	}
 
 	single := searchEnv(t)
 	traffic(single)
-	before := count(single)
+	before, beforeHours := count(single), hours(single)
 
 	split := splitEnv(t)
 	traffic(split)
-	after := count(split)
+	after, afterHours := count(split), hours(split)
 
 	if before == 0 {
 		t.Fatal("no read buckets were written - the measurement is vacuous " +
 			"(is SUNDER_AUDIT_READS set to chained in this environment?)")
 	}
-	ratio := float64(after) / float64(before)
-	t.Logf("read-bucket rows for identical worst-case traffic: single=%d split=%d ratio=%.2fx",
-		before, after, ratio)
-
-	// The bound is arithmetic, not aspiration: three actions cannot produce
-	// more than three rows where one produced one. A ratio above it means
-	// the split is generating actions outside the closed set.
-	if ratio > 3.0 {
-		t.Fatalf("bucket rows grew %.2fx, above the 3x ceiling the three-action split "+
-			"can arithmetically cause - something is writing an unplanned action", ratio)
+	if beforeHours != 1 || afterHours != 1 {
+		t.Skipf("the run straddled an hour boundary (%d and %d distinct hours), which "+
+			"doubles rows for reasons unrelated to the split", beforeHours, afterHours)
 	}
-	// And it must actually cost something on this traffic, or the test is
-	// measuring a split that did not happen.
-	if after <= before {
-		t.Fatalf("split produced %d rows against single's %d - the worst-case traffic "+
-			"should separate; the measurement is not exercising the feature", after, before)
+
+	t.Logf("read-bucket rows for identical worst-case traffic: single=%d split=%d ratio=%.2fx",
+		before, after, float64(after)/float64(before))
+
+	if before != wantSingle || after != wantSplit {
+		t.Fatalf("worst-case bucket rows are single=%d split=%d (%.2fx), but the "+
+			"documentation quotes %d and %d (%.2fx).\n"+
+			"If this change is intended, update docs/CONFIG.md, "+
+			"docs-site/docs/admin/audit-chain.md and docs/API.md in the same commit - "+
+			"all three cite this test as the source of that number.",
+			before, after, float64(after)/float64(before),
+			wantSingle, wantSplit, float64(wantSplit)/float64(wantSingle))
+	}
+	// And the ceiling is arithmetic: four actions cannot produce more than
+	// four rows where one produced one.
+	if ratio := float64(after) / float64(before); ratio > float64(len(audit.LookupActions)) {
+		t.Fatalf("bucket rows grew %.2fx, above the %dx ceiling the %d-action split can "+
+			"arithmetically cause - something is writing an unplanned action",
+			ratio, len(audit.LookupActions), len(audit.LookupActions))
 	}
 }

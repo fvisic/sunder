@@ -190,53 +190,50 @@ click - the access log is itself personal data about employees).
 Deployments that want per-event evidence for reads set
 `SUNDER_AUDIT_READS=chained`.
 
-### What bucketing costs the auditor, and what compensates for it
+### What bucketing costs the auditor, and what it does not
 
 Bucketing drops the per-event `Detail` before the hour is sealed. For a
-lookup, `Detail` is where `matched`, `ambiguous` and `by` lived, so a sealed
-hour says "this client searched for this cid 40 times" and cannot say how
-many of those searches found nothing. **Miss ratio is exactly the signal that
-distinguishes ordinary use from enumeration**, and bucketing aggregates it
-away.
+lookup that removes `by` (which identifier kind was used) and `ambiguous`,
+and it removes the ordering and timing of individual searches inside the
+hour.
 
-Two controls compensate, and neither lives in the audit table:
+**It does not remove the miss count.** A miss returns no cid, so the bucket
+key `(client_id, user_id, cid, action, hour)` puts every miss for that client
+and operator into the single `cid = ''` bucket, whose `count` is exactly the
+number of searches that found nothing; hits bucket separately, one per cid.
+A sealed hour therefore still answers "this operator searched 7 times and
+found nothing" - which is the signal that separates ordinary use from
+enumeration. An earlier draft of this section claimed otherwise. It was
+wrong, and the correction matters in this direction: the trail is stronger
+than that draft admitted, not weaker.
 
+What genuinely weakens under aggregation is attribution of *shape*: without
+`by`, a sealed hour could not distinguish a client resolving exact e-mail
+addresses from one probing 8-digit phone suffixes, because both recorded as
+`lookup`. Two controls address that:
+
+- **The action itself**, when `SUNDER_AUDIT_LOOKUP_ACTIONS=split` is set.
+  The four forms - exact, phonetic, partial, and partial-plus-phonetic -
+  have different enumeration profiles: an exact e-mail either exists or does
+  not, whereas an 8-digit suffix is a guessable space and a phonetic name is
+  a deliberately many-to-one reduction. The action is the one field the
+  sealed hour keeps, so that is where the distinction has to live.
 - **The miss detector** (`internal/api/lookup.go`): every miss increments a
   per-client sliding-window counter and the `sunder_lookup_misses_total`
   metric, and crossing 100 misses in 10 minutes logs `possible enumeration
   attack` once per window per client. It is fed from lookup AND from the
   attribute read, because probing cids one at a time against the read
-  endpoint is the same attack (AUTHZ-1). This is a real-time control on a
-  metric and a log line - it is NOT in the hash chain, and an attacker who
-  owns the process owns it. It detects the patient outsider, not the
-  insider.
-- **The action itself**, which survives bucketing when
-  `SUNDER_AUDIT_LOOKUP_ACTIONS=split` is set. The three lookup forms have
-  different enumeration profiles - an exact e-mail either exists or does
-  not, whereas an 8-digit phone suffix is a guessable space - and splitting
-  puts that distinction in the one field the sealed hour keeps. It does not
-  restore the miss count; it restores the ability to say "this client spent
-  its hour probing partial identifiers", which is the question an auditor
-  asks before asking about misses.
+  endpoint is the same attack (AUTHZ-1). This is real-time, on a metric and
+  a log line - it is **not** in the hash chain, and an attacker who owns the
+  process owns it. It shortens the time to notice; the bucket counts are
+  what survive tampering.
 
-**Residual risk:** a client that stays under 100 misses per 10 minutes and
-uses only exact identifiers is, in a bucketed deployment, indistinguishable
-in the sealed trail from a client doing ordinary work. That is the accepted
-cost of aggregation, and it is why the detector's threshold is a
-deployment-visible constant rather than a hidden one, and why
-`SUNDER_AUDIT_READS=chained` remains available for deployments whose
-regulator wants per-event evidence.
-
-The optional `user_id` attribution (body field on lookup, header on GET)
-is CLIENT-ASSERTED and unverifiable by design: it improves the Article 15
-answer from "which system" to "which operator the system claims", and a
-lying client system was always capable of lying in its own logs too. It
-is an opaque bounded ID, not a name. Since migration 0033 it IS part of
-the chain hash (versioned canonical tuple, hash_v=2), so a database
-attacker editing WHO did something trips verification - with one honest
-limit: rows sealed BEFORE 0033 keep the v1 tuple, a sealed chain cannot
-retroactively cover a new field, and on those rows only the append-only
-trigger pins `user_id`.
+**Residual risk:** within one sealed hour, a client's searches cannot be
+ordered or timed, and without the split all forms look alike. A patient
+attacker pacing under 100 misses per 10 minutes is caught by the bucket
+counts only if someone reads them - which is an alerting and process
+question, not a cryptographic one. `SUNDER_AUDIT_READS=chained` remains
+available for deployments whose regulator wants per-event evidence.
 
 ## Phase 3 features: the privacy line (F1, F2, F4, F5, F6, F8)
 

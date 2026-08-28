@@ -164,7 +164,11 @@ suffix - records as `lookup`. Setting
 SUNDER_AUDIT_LOOKUP_ACTIONS=split
 ```
 
-separates them into `lookup`, `lookup.fuzzy` and `lookup.suffix`.
+separates them into `lookup` (exact identifier), `lookup.fuzzy` (widened by
+phonetic name codes), `lookup.suffix` (partial phone-suffix search) and
+`lookup.suffix.fuzzy` - a suffix search narrowed by a phonetic name, which is
+the widest search the API offers. suffix and fuzzy are independent wideners,
+not alternatives.
 
 It is worth doing under bucketed reads, where the per-event detail carrying
 `by` is dropped before the hour is sealed - the action is then the only field
@@ -182,5 +186,5 @@ Two things to know before enabling:
 - **It costs bucket rows.** Buckets key on
   `(client_id, user_id, cid, action, hour)`. The worst case is one client
   using all three forms within one hour, whose misses all share the empty
-  cid: measured at **3.00x** the rows (2 becomes 6). A deployment whose
+  cid: measured at **4.00x** the rows (2 becomes 8). A deployment whose
   clients use a single form sees no increase at all.

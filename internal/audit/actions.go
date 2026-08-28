@@ -45,18 +45,19 @@ var Families = []ActionFamily{
 var Actions = map[string]string{
 	// Reads. These are the high-volume ones, and the reason read events
 	// are bucketed hourly by default (SUNDER_AUDIT_READS).
-	"lookup":             "identifier resolved to a scope pseudonym (hit or miss)",
-	"lookup.fuzzy":       "lookup where a phonetic name match participated in narrowing",
-	"lookup.suffix":      "lookup by phone suffix - a partial identifier, single-hit only",
-	"attributes.read":    "one attribute decrypted and returned",
-	"attributes.history": "prior versions of an attribute listed",
-	"files.read":         "an encrypted file was fetched",
-	"files.list":         "a contact's files were listed",
-	"versions.list":      "blob version metadata listed",
-	"links.list":         "a contact's cross-scope links were listed",
-	"tokens.read":        "a value token was detokenized",
-	"tokens.bulk_read":   "a batch of value tokens was detokenized",
-	"shares.fetch":       "a share link was redeemed",
+	"lookup":              "exact identifier resolved to a scope pseudonym (hit or miss)",
+	"lookup.fuzzy":        "lookup widened by phonetic name codes - a match was possible, not necessarily found",
+	"lookup.suffix":       "lookup by phone suffix - a partial identifier, single-hit only",
+	"lookup.suffix.fuzzy": "phone suffix AND phonetic name together - the widest search this API offers",
+	"attributes.read":     "one attribute decrypted and returned",
+	"attributes.history":  "prior versions of an attribute listed",
+	"files.read":          "an encrypted file was fetched",
+	"files.list":          "a contact's files were listed",
+	"versions.list":       "blob version metadata listed",
+	"links.list":          "a contact's cross-scope links were listed",
+	"tokens.read":         "a value token was detokenized",
+	"tokens.bulk_read":    "a batch of value tokens was detokenized",
+	"shares.fetch":        "a share link was redeemed",
 
 	// Writes against contact data.
 	"contacts.register":        "a contact entered the vault (or an existing one was matched)",
@@ -111,6 +112,16 @@ var Actions = map[string]string{
 	"admin.unlock":         "an unlock token was minted for a restricted operation",
 	"admin.unlock.use":     "an unlock token was spent",
 	"retention.run":        "the retention sweep ran",
+	// These four reach the trail through a helper that takes the action as
+	// a parameter (auditOperator, terminal), which is why the first version
+	// of the guard - a regexp over `Action: "..."` - did not see them. Three
+	// are privileged operator acts, the exact category this registry claims
+	// to cover, and they were unregistered while the docs promised a closed
+	// set. The AST scanner in scan_test.go is what found them.
+	"client.create":       "an API client and its credential were created",
+	"webhook.set":         "the erasure-notification webhook endpoint was changed",
+	"retention.set":       "a retention policy was created or changed",
+	"dsr.erase.delivered": "an erasure notification was accepted by the subscriber",
 
 	// The audit trail's own record of aggregating reads.
 	"audit.reads_hourly": "one hour of read buckets was sealed and chained",
@@ -145,12 +156,23 @@ func IsKnownAction(a string) bool {
 // client that resolves exact identifiers from one probing suffixes. The
 // action is the only field that survives bucketing, which is why the
 // distinction belongs there and not in Detail.
+// The four forms are the cross product of two independent wideners, not a
+// three-way choice. The first cut of this treated suffix and fuzzy as
+// mutually exclusive, on the reasoning that a suffix lookup cannot carry a
+// name - but Lookup only refuses email/phone alongside a suffix, and a NAME
+// narrows a suffix search perfectly happily. So `phone_suffix + name` under
+// SUNDER_SEARCH_FUZZY_NAME is a real request, it is the widest search the
+// API offers, and recording it as a plain `lookup.suffix` hid the fuzzy half
+// from exactly the auditor the split exists to inform.
 const (
-	ActionLookup       = "lookup"
-	ActionLookupFuzzy  = "lookup.fuzzy"
-	ActionLookupSuffix = "lookup.suffix"
+	ActionLookup            = "lookup"
+	ActionLookupFuzzy       = "lookup.fuzzy"
+	ActionLookupSuffix      = "lookup.suffix"
+	ActionLookupSuffixFuzzy = "lookup.suffix.fuzzy"
 )
 
 // LookupActions is the closed lookup.* set, for consumers that want every
 // search regardless of form ("show me everything this client searched").
-var LookupActions = []string{ActionLookup, ActionLookupFuzzy, ActionLookupSuffix}
+var LookupActions = []string{
+	ActionLookup, ActionLookupFuzzy, ActionLookupSuffix, ActionLookupSuffixFuzzy,
+}

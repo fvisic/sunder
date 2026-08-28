@@ -267,24 +267,28 @@ func (c *Contacts) Lookup(ctx context.Context, client *auth.Client, in LookupInp
 // the split costs read-bucket rows: buckets key on
 // (client_id, user_id, cid, action, hour), so a client that resolves exact
 // identifiers AND probes suffixes in the same hour now occupies two rows
-// where it occupied one. The multiplier is bounded by three and is measured
-// in TestSplitLookupActionsBucketMultiplier.
+// where it occupied one. The multiplier is bounded by the number of forms
+// and is measured in TestSplitLookupActionsBucketMultiplier.
 //
-// With =split the three forms separate, and they are worth separating: an
-// exact e-mail lookup, a phonetic name match and an 8-digit suffix probe
-// have visibly different enumeration profiles, and under bucketed reads the
+// With =split the forms separate, and they are worth separating: an exact
+// e-mail lookup, a phonetic name match and an 8-digit suffix probe have
+// visibly different enumeration profiles, and under bucketed reads the
 // Detail that used to carry `by` is dropped before the hour is sealed. The
 // action is the only field that reaches the auditor.
 //
-// The precedence - suffix over fuzzy - is not arbitrary: a suffix lookup
-// cannot be combined with a name (Lookup refuses email/phone alongside it,
-// and a name alone is not a key), so the two are in fact disjoint. The
-// ordering is defensive, not a tie-break.
+// suffix and fuzzy are INDEPENDENT wideners, not alternatives. Lookup
+// refuses email/phone alongside a suffix but accepts a name, so
+// `phone_suffix + name` with phonetic search on is a real request - and the
+// widest one the API offers. An earlier version of this function treated the
+// two as mutually exclusive and let suffix win, which recorded that widest
+// form as an ordinary suffix probe and hid the fuzzy half from the auditor.
 func (c *Contacts) lookupAction(suffix, fuzzy bool) string {
 	if !c.SplitLookupActions {
 		return audit.ActionLookup
 	}
 	switch {
+	case suffix && fuzzy:
+		return audit.ActionLookupSuffixFuzzy
 	case suffix:
 		return audit.ActionLookupSuffix
 	case fuzzy:

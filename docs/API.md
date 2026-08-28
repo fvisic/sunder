@@ -350,12 +350,13 @@ evidence only for the open hour's contents, not per-event tamper evidence -
 docs/THREAT-MODEL.md states the trade precisely.
 
 Lookups record as the single action `lookup` by default. Setting
-`SUNDER_AUDIT_LOOKUP_ACTIONS=split` separates them into `lookup`,
-`lookup.fuzzy` (a phonetic name match participated) and `lookup.suffix`
-(partial phone-suffix search) - worth doing under bucketed reads, where the
-per-event detail is dropped and the action is the only field that reaches the
-auditor. Consumers must then match the `lookup.*` prefix rather than the bare
-string; the cost is at most 3x the read-bucket rows, measured.
+`SUNDER_AUDIT_LOOKUP_ACTIONS=split` separates them into `lookup` (exact
+identifier), `lookup.fuzzy` (widened by phonetic name codes), `lookup.suffix`
+(partial phone-suffix search) and `lookup.suffix.fuzzy` (both wideners at
+once - the widest search this API offers) - worth doing under bucketed reads,
+where the per-event detail is dropped and the action is the only field that
+reaches the auditor. Consumers must then match the `lookup.*` prefix rather
+than the bare string; the cost is at most 4x the read-bucket rows, measured.
 See docs/ARCHITECTURE.md, docs/CONFIG.md and docs/THREAT-MODEL.md.
 
 ## Operational notes
