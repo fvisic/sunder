@@ -103,6 +103,51 @@ which is how two 26.9M-row runs were thrown away as "exit status 1".
 
 <!-- authoritative:end -->
 
+## Import ingest, measured honestly at last (2026-08-29)
+
+`sunder import` had never been measured, and the sales deck quoted 28,000/s
+for it anyway - a figure that turned out to be `benchmark/bulkload` (a COPY
+fixture that skips deduplication) at its best point, described as a different
+tool. The real numbers, and what moved them:
+
+| condition | rate |
+|---|---|
+| empty database, untuned Docker Postgres | 3,006 rows/s |
+| **10M contacts, tuned host, index fits in cache, `ORDER BY` (shipped)** | **467 rows/s** |
+| same, pre-fix (file-order inserts) | 310 rows/s, varying 310-464 across runs |
+| 26.9M contacts on a deliberately saturated 47 GB host | 117 rows/s |
+
+The saturated-host figure is real and is NOT a production number: that
+dataset exists to surface problems (31 GB of token indexes against 12 GB of
+shared_buffers), and nobody serves 30M contacts on 47 GB. Size the host so
+`person_tokens` and its indexes fit in memory and the middle rows are what
+you get.
+
+**What was tried, with verdicts** (10M dataset, 200k rows per run, one run
+at a time - two earlier attempts ran concurrently and quietly invalidated
+each other):
+
+- **`ORDER BY <token>` on the batch INSERTs: 1.51x, shipped.** A keyed HMAC
+  is uniformly distributed, so file-order inserts touch a random B-tree page
+  per row; sorting the staged batch makes them arrive in index order. One
+  clause per statement. It also removes the variance: file-order throughput
+  swung 310-464 rows/s across runs, sorted runs measured 446/447/467.
+- **Dropping `person_tokens_search_idx` for the load, rebuilding after:
+  does not pay below ~725k rows.** With ORDER BY in place the load barely
+  speeds up (478 vs 467 rows/s) and the rebuild is a 36.5s fixed cost. Safe
+  to do - the index is deliberately non-unique, so no invariant rests on it -
+  but not worth automating at current gains.
+- **Dedup is not the cost.** Re-importing an already-imported file (every
+  row a duplicate, zero inserts) runs at 6,455 rows/s against 3,006 for the
+  full path on the same empty-ish database: the probe is cheap, the index
+  inserts are the work.
+
+The remaining 40x gap to bulkload's 20,274 rows/s on the same 10M dataset is
+therefore NOT insert locality and NOT deduplication. The untested suspects
+are the per-row crypto pipeline (HMAC per identifier, phonetic codes, AEAD
+blob - single-threaded) and per-batch transaction overhead; measuring those
+is Phase 11.3.
+
 ## v0.5.0 re-measurement (2026-08-27, laptop): the second review cost nothing
 
 The remediation for the second external review added roughly a thousand

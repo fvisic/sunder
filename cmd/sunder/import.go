@@ -419,14 +419,38 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 	if _, err := tx.Exec(ctx, `INSERT INTO persons (id) SELECT pid FROM import_stage`); err != nil {
 		return 0, 0, err
 	}
+	// ORDER BY the token, not the person.
+	//
+	// A token is a keyed HMAC, so its value is uniformly distributed and
+	// carries no relationship to the order rows arrive in. Inserting in file
+	// order therefore touches a random B-tree page per row, which is exactly
+	// what benchmark/README.md names as the reason COPY ingest falls from
+	// 28,319 rows/s at 1M to ~2,700 past 25M: "HMAC output is uniformly
+	// random and index inserts have no locality".
+	//
+	// Sorting the batch first makes the inserts arrive in index order, so a
+	// page fetched for one row serves its neighbours. The sort itself is
+	// free at this scale - the rows are already in a temp table, and the
+	// batch is thousands, not millions - and the bigger -batch is, the more
+	// locality it buys.
+	//
+	// Measured on a 10M-contact dataset whose person_tokens (12 GB) fits in
+	// shared_buffers (12 GB), 200k rows, same file, same host, nothing else
+	// running: file order 310 rows/s, sorted 467 rows/s - 1.51x. Just as
+	// telling, file-order throughput varied 310-464 rows/s across three runs
+	// (it is at the mercy of cache state) while sorted runs measured 446,
+	// 447 and 467. Dropping the non-unique search index on top of this
+	// bought only 478 rows/s before a 36.5s rebuild - ORDER BY had already
+	// repaired the locality the drop was for.
 	for _, ident := range []struct{ kind, col, ver string }{
 		{"email", "email_tok", emailV}, {"phone", "phone_tok", phoneV},
 		{"name", "name_tok", nameV}, {"phone_suffix", "suffix_tok", phoneV},
 	} {
 		if _, err := tx.Exec(ctx, fmt.Sprintf(`
 			INSERT INTO person_tokens (person_id, kind, token, key_version)
-			SELECT pid, '%s', %s, $1 FROM import_stage WHERE %s IS NOT NULL`,
-			ident.kind, ident.col, ident.col), ident.ver); err != nil {
+			SELECT pid, '%s', %s, $1 FROM import_stage WHERE %s IS NOT NULL
+			 ORDER BY %s`,
+			ident.kind, ident.col, ident.col, ident.col), ident.ver); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -434,6 +458,7 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 		INSERT INTO person_tokens (person_id, kind, token, key_version)
 		SELECT p.pid, 'name_phonetic', p.tok, $1
 		  FROM import_stage_ph p JOIN import_stage s ON s.pid = p.pid
+		 ORDER BY p.tok
 		ON CONFLICT DO NOTHING`, nameV); err != nil {
 		return 0, 0, err
 	}
