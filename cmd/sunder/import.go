@@ -448,12 +448,30 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 	// bulk tool's. The match spans every live key version via import_match, so
 	// a contact whose stored token is under a retiring version (mid-rotation,
 	// before the rekey sweep catches up) is still recognised (H13).
+	// The literal kind IN ('email','phone') is LOAD-BEARING, not decoration.
+	//
+	// person_tokens_ident_uq is a PARTIAL unique index (WHERE kind IN
+	// ('email','phone')), and the planner may use a partial index only when
+	// the query PROVES its predicate. A join condition pt.kind = m.kind
+	// proves nothing - m.kind could be anything as far as the planner knows,
+	// even though this code only ever stages those two kinds - so without
+	// the literal, the only workable plan was a SEQUENTIAL SCAN of all of
+	// person_tokens, hash-joined against the batch. Measured on a 10.6M
+	// dataset (36.4M token rows): 26.2s per 5,000-row batch, 600k buffers -
+	// 64% of the entire import's wall time went into this one statement.
+	// With the literal predicate the same probe runs in 0.54s and 40k
+	// buffers, all index hits: 49x.
+	//
+	// -timing is what found it; the per-batch rows/s line never could.
 	tag, err := tx.Exec(ctx, `
 		DELETE FROM import_stage s
 		 WHERE EXISTS (
 			SELECT 1 FROM import_match m
-			  JOIN person_tokens pt ON pt.kind = m.kind AND pt.token = m.tok
-			 WHERE m.pid = s.pid)`)
+			 WHERE m.pid = s.pid
+			   AND EXISTS (
+				SELECT 1 FROM person_tokens pt
+				 WHERE pt.kind IN ('email','phone')
+				   AND pt.kind = m.kind AND pt.token = m.tok))`)
 	if err != nil {
 		return 0, 0, err
 	}
