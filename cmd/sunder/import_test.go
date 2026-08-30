@@ -6,13 +6,16 @@ import (
 	"path/filepath"
 	"testing"
 
+	"fmt"
 	"github.com/fvisic/sunder/internal/api"
 	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/service"
+	"github.com/fvisic/sunder/internal/store"
 	"github.com/fvisic/sunder/internal/testutil"
+	"strings"
 )
 
 // TestImportCmd drives the supported bulk path end to end: import, verify
@@ -505,5 +508,111 @@ func TestImportDedupsAcrossKeyRotation(t *testing.T) {
 	}
 	if persons != 2 {
 		t.Fatalf("mid-rotation re-import must dedup by RETIRING-version tokens too: want 2 persons (1 existing + 1 new), got %d", persons)
+	}
+}
+
+// TestParallelImportMatchesSerialResult pins the property that made the
+// worker fan-out safe to ship: -parallel changes the SPEED of an import and
+// nothing else. Same file, one run serial and one with eight workers over
+// two-row batches (maximum interleaving), into two fresh databases - the
+// resulting persons, token shapes and duplicate accounting must be
+// identical. The file deliberately repeats an identifier with DIFFERENT
+// payloads: first-wins is the semantic that raced when dedup lived in the
+// workers, and this is the test that failed until it moved to the reader.
+func TestParallelImportMatchesSerialResult(t *testing.T) {
+	ctx := context.Background()
+	var lines []string
+	for i := 0; i < 60; i++ {
+		lines = append(lines,
+			fmt.Sprintf(`{"email":"p%d@example.com","name":"Prva Verzija %d"}`, i, i))
+	}
+	// The SAME identifiers again, later in the file, without names: with
+	// first-wins these must all be dropped as in-file duplicates, so every
+	// person keeps a name token. An arbitrary-winner regression loses some.
+	for i := 0; i < 60; i++ {
+		lines = append(lines, fmt.Sprintf(`{"email":"p%d@example.com"}`, i))
+	}
+	f := filepath.Join(t.TempDir(), "same.jsonl")
+	if err := os.WriteFile(f, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	shape := func(st *store.Store, args []string) (persons, nameTokens int64) {
+		cfg := testCfg(t)
+		if err := importCmd(ctx, cfg, st, args); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Pool.QueryRow(ctx, `SELECT
+			(SELECT count(*) FROM persons),
+			(SELECT count(*) FROM person_tokens WHERE kind='name')`,
+		).Scan(&persons, &nameTokens); err != nil {
+			t.Fatal(err)
+		}
+		return persons, nameTokens
+	}
+
+	serialP, serialN := shape(testutil.NewDB(t),
+		[]string{"-file", f, "-scope", "crm", "-parallel", "1"})
+	parP, parN := shape(testutil.NewDB(t),
+		[]string{"-file", f, "-scope", "crm", "-parallel", "8", "-batch", "2"})
+
+	if serialP != 60 || serialN != 60 {
+		t.Fatalf("serial run: want 60 persons with 60 name tokens, got %d/%d", serialP, serialN)
+	}
+	if parP != serialP || parN != serialN {
+		t.Fatalf("-parallel changed the RESULT, not just the speed: serial %d persons/%d name "+
+			"tokens, parallel %d/%d. First-wins dedup has raced back into the workers.",
+			serialP, serialN, parP, parN)
+	}
+}
+
+// TestConcurrentImportsConvergeOnUniqueIdentifiers is the cross-process
+// race: two imports running at once, workers and all, carrying the SAME
+// identifiers. The dedup invariant is enforced by person_tokens_ident_uq
+// plus the 23505 retry in importBatch - scheduling never guarantees it. One
+// person per identifier must come out, with no error surfaced to either
+// operator, exactly as a concurrent API registration is absorbed.
+func TestConcurrentImportsConvergeOnUniqueIdentifiers(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+
+	const n = 120
+	var lines []string
+	for i := 0; i < n; i++ {
+		lines = append(lines, fmt.Sprintf(`{"email":"race%d@example.com","name":"Race %d"}`, i, i))
+	}
+	dir := t.TempDir()
+	fA := filepath.Join(dir, "a.jsonl")
+	fB := filepath.Join(dir, "b.jsonl")
+	for _, f := range []string{fA, fB} {
+		if err := os.WriteFile(f, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	errs := make(chan error, 2)
+	for _, f := range []string{fA, fB} {
+		go func(f string) {
+			errs <- importCmd(ctx, cfg, st, []string{
+				"-file", f, "-scope", "crm", "-parallel", "4", "-batch", "10"})
+		}(f)
+	}
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("a concurrent import surfaced an error the retry should have absorbed: %v", err)
+		}
+	}
+
+	var persons, emailToks int64
+	if err := st.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM persons),
+		(SELECT count(*) FROM person_tokens WHERE kind='email')`,
+	).Scan(&persons, &emailToks); err != nil {
+		t.Fatal(err)
+	}
+	if persons != n || emailToks != n {
+		t.Fatalf("two concurrent imports of the same %d identifiers produced %d persons and "+
+			"%d email tokens - the unique-index-plus-retry path is not converging", n, persons, emailToks)
 	}
 }

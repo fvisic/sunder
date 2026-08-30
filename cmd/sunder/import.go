@@ -28,6 +28,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -73,6 +75,7 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 	scope := fs.String("scope", "", "scope the contacts belong to")
 	batch := fs.Int("batch", 5000, "rows per transaction")
 	timing := fs.Bool("timing", false, "report wall time split between the crypto/read half and the database half")
+	parallel := fs.Int("parallel", 4, "concurrent import workers, each staging and committing its own batches (1 = the pre-v0.5.2 serial behaviour)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -81,6 +84,9 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 	}
 	if *batch < 1 {
 		return fmt.Errorf("-batch must be positive")
+	}
+	if *parallel < 1 || *parallel > 64 {
+		return fmt.Errorf("-parallel must be 1-64")
 	}
 	if err := st.Migrate(ctx); err != nil {
 		return err
@@ -135,49 +141,221 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 1<<20), 1<<20) // generous line limit: attribute maps can be wide
 
+	// The import is a fan-out of the exact pipeline that used to run
+	// serially: a reader splits the file into chunks of -batch lines, and
+	// each worker takes a chunk through parse -> crypto -> stage -> dedup ->
+	// insert -> commit on its own connection. Nothing about a single batch
+	// changed - the parallelism is BETWEEN batches.
+	//
+	// Why this shape: with one connection the import measured 1,005 rows/s
+	// on an 11M-contact dataset while bulkload's eight workers measured
+	// 20,274 - and per connection the two are within 2x of each other. The
+	// gap was never crypto (4%), locality (ORDER BY, shipped), nor the dedup
+	// probe (fixed, 49x): it was one connection doing everything.
+	//
+	// What holds it correct under concurrency:
+	//   - The dedup invariant (an email or phone names exactly one person)
+	//     is enforced by person_tokens_ident_uq, not by scheduling. Two
+	//     workers carrying the same identifier race; the loser's INSERT
+	//     hits 23505, importBatch retries, and the retry's probe sees the
+	//     winner's committed row and skips - the same mechanism that already
+	//     reconciled a concurrent API registration.
+	//   - In-file duplicates WITHIN a chunk are caught by the per-chunk maps
+	//     exactly as before; across chunks they resolve to "skipped as
+	//     existing" via that same unique-index path. The counts move between
+	//     those two buckets relative to a serial run; their sum does not.
+	//   - Workers never touch the KeyRing: every key version is resolved
+	//     once, up front, before the first worker starts. (The pool-
+	//     inversion guard's CLI exemption depends on that.)
+	//   - Each worker holds at most ONE pool connection (its transaction);
+	//     there is no nested acquire, so a pool smaller than -parallel just
+	//     caps the effective parallelism, it cannot deadlock.
+
+	// parsedLine is what the reader hands a worker: already decoded,
+	// validated, NORMALIZED and past the in-file dedup. Parsing and
+	// normalization are pure and cheap, so keeping them in the (single)
+	// reader costs little - and it is what keeps two semantics exactly as
+	// they were when the import was serial: errors abort at a deterministic
+	// line, and when a file repeats an identifier the FIRST occurrence wins.
+	// Deduping in the workers instead made the winner a race: whichever
+	// chunk committed first kept its version of the contact.
+	type parsedLine struct {
+		n       int
+		email   string // normalized, "" if absent
+		phone   string // normalized, "" if absent
+		rawName string
+		attrs   map[string]string
+	}
+	type chunk struct {
+		lines []parsedLine
+	}
 	var (
 		lineNo                   int
-		rows                     []importRow
-		inserted, skipped, dupes int64
+		inserted, skipped, dupes atomic.Int64
 		start                    = time.Now()
-		// The two halves of the pipeline, timed separately when -timing is
-		// set. The import strictly alternates: tokenize and encrypt a batch
-		// on one core while the database sits idle, then flush it in one
-		// transaction while the CPU sits idle. Which half dominates decides
-		// whether pipelining (overlap the halves, ceiling 2x) or fanning the
-		// crypto across cores is the lever worth building - guessing wrong
-		// builds the wrong thing, which is why this flag exists.
-		cryptoTime, dbTime time.Duration
-		sinceFlush         = time.Now()
-		tm                 = &importTimings{}
+		cryptoNS, dbNS           atomic.Int64
+		tm                       importTimings
+		tmMu                     sync.Mutex
+		printMu                  sync.Mutex
 	)
-	// In-batch identifier dedup, PER IDENTIFIER: two lines sharing an
-	// email but differing in phone are still the same person under the
-	// dedup invariant, and pair-keyed dedup would let both into the batch
-	// only to die on the unique index with an opaque error.
-	seenEmail, seenPhone := map[string]bool{}, map[string]bool{}
 
-	flush := func() error {
+	buildRow := func(ln parsedLine) (importRow, error) {
+		attrs := ln.attrs
+		row := importRow{keyID: kekV, alg: pii.Algorithm()}
+		if ln.email != "" {
+			t, err := tok.EmailToken(ctx, emailV, ln.email)
+			if err != nil {
+				return importRow{}, err
+			}
+			row.emailTok, attrs["email"] = t, ln.email
+			for _, ver := range emailVers {
+				mt, err := tok.EmailToken(ctx, ver, ln.email)
+				if err != nil {
+					return importRow{}, err
+				}
+				row.emailMatch = append(row.emailMatch, mt)
+			}
+		}
+		if ln.phone != "" {
+			t, err := tok.PhoneToken(ctx, phoneV, ln.phone)
+			if err != nil {
+				return importRow{}, err
+			}
+			row.phoneTok, attrs["phone"] = t, ln.phone
+			for _, ver := range phoneVers {
+				mt, err := tok.PhoneToken(ctx, ver, ln.phone)
+				if err != nil {
+					return importRow{}, err
+				}
+				row.phoneMatch = append(row.phoneMatch, mt)
+			}
+		}
+		if ln.rawName != "" {
+			norm, err := crypto.NormalizeName(ln.rawName)
+			if err != nil {
+				return importRow{}, fmt.Errorf("line %d: name: %v", ln.n, err)
+			}
+			t, err := tok.NameToken(ctx, nameV, norm)
+			if err != nil {
+				return importRow{}, err
+			}
+			row.nameTok, attrs["name"] = t, ln.rawName
+			if cfg.SearchFuzzyName {
+				for _, code := range crypto.PhoneticNameCodes(norm) {
+					pt, err := tok.NamePhoneticToken(ctx, nameV, code)
+					if err != nil {
+						return importRow{}, err
+					}
+					row.phoneticToks = append(row.phoneticToks, pt)
+				}
+			}
+		}
+		if cfg.SearchPhoneSuffix && row.phoneTok != nil {
+			st2, err := tok.PhoneSuffixToken(ctx, phoneV, crypto.PhoneSuffix(ln.phone))
+			if err != nil {
+				return importRow{}, err
+			}
+			row.suffixTok = st2
+		}
+		var err error
+		if row.pid, err = newUUIDStr(); err != nil {
+			return importRow{}, err
+		}
+		if row.cid, err = crypto.NewCID(); err != nil {
+			return importRow{}, err
+		}
+		if row.blob, err = pii.Encrypt(ctx, row.cid, kekV, attrs); err != nil {
+			return importRow{}, err
+		}
+		return row, nil
+	}
+
+	work := func(c chunk) error {
+		t0 := time.Now()
+		rows := make([]importRow, 0, len(c.lines))
+		for _, ln := range c.lines {
+			row, err := buildRow(ln)
+			if err != nil {
+				return err
+			}
+			rows = append(rows, row)
+		}
+		cryptoNS.Add(int64(time.Since(t0)))
 		if len(rows) == 0 {
 			return nil
 		}
-		cryptoTime += time.Since(sinceFlush)
+
+		var wtm importTimings
 		dbStart := time.Now()
-		ins, skip, err := importBatch(ctx, st, *scope, emailV, phoneV, nameV, rows, tm)
-		dbTime += time.Since(dbStart)
-		sinceFlush = time.Now()
+		ins, skip, err := importBatch(ctx, st, *scope, emailV, phoneV, nameV, rows, &wtm)
+		dbNS.Add(int64(time.Since(dbStart)))
 		if err != nil {
 			return err
 		}
-		inserted += ins
-		skipped += skip
-		rows = rows[:0]
-		seenEmail, seenPhone = map[string]bool{}, map[string]bool{}
+		tmMu.Lock()
+		tm.copy_ += wtm.copy_
+		tm.match += wtm.match
+		tm.insert += wtm.insert
+		tm.commit += wtm.commit
+		tmMu.Unlock()
+		curIns := inserted.Add(ins)
+		curSkip := skipped.Add(skip)
+		curDup := dupes.Load()
+		printMu.Lock()
 		fmt.Printf("  line %d: %d imported, %d skipped as existing, %d in-file duplicates (%.0f rows/s)\n",
-			lineNo, inserted, skipped, dupes, float64(inserted+skipped+dupes)/time.Since(start).Seconds())
+			c.lines[len(c.lines)-1].n, curIns, curSkip, curDup,
+			float64(curIns+curSkip+curDup)/time.Since(start).Seconds())
+		printMu.Unlock()
 		return nil
 	}
 
+	// Reader + workers. The first error cancels everything; batches already
+	// committed stay (whole batches or nothing, a re-run skips what landed),
+	// exactly as a mid-file abort behaved when the import was serial.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	chunks := make(chan chunk, *parallel)
+	errCh := make(chan error, *parallel)
+	var wg sync.WaitGroup
+	for w := 0; w < *parallel; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for c := range chunks {
+				if err := work(c); err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					cancel()
+					return
+				}
+			}
+		}()
+	}
+
+	var pending []parsedLine
+	flushChunk := func() bool {
+		if len(pending) == 0 {
+			return true
+		}
+		c := chunk{lines: pending}
+		pending = nil
+		select {
+		case chunks <- c:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	// In-file duplicates, GLOBAL and first-wins: an email or phone names
+	// exactly one person, and when a file repeats one, the first occurrence
+	// is the record that lands - deterministically, regardless of -parallel.
+	// (The maps hold normalized identifiers, not tokens, so this costs no
+	// crypto; at ~60 bytes per identifier a 10M-row file needs ~1.2 GB,
+	// which a host doing a 10M-row import has.)
+	seenEmail, seenPhone := map[string]bool{}, map[string]bool{}
+	var scanErr error
 	for sc.Scan() {
 		lineNo++
 		raw := strings.TrimSpace(sc.Text())
@@ -190,130 +368,90 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 		dec := json.NewDecoder(strings.NewReader(raw))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&l); err != nil {
-			return fmt.Errorf("line %d: %v", lineNo, err)
+			scanErr = fmt.Errorf("line %d: %v", lineNo, err)
+			break
 		}
 		if l.Email == "" && l.Phone == "" {
-			return fmt.Errorf("line %d: at least one of email or phone is required", lineNo)
+			scanErr = fmt.Errorf("line %d: at least one of email or phone is required", lineNo)
+			break
 		}
+		badAttr := ""
 		for k := range l.Attributes {
 			if importReservedAttr.MatchString(k) {
-				return fmt.Errorf("line %d: %q is a reserved attribute name", lineNo, k)
+				scanErr = fmt.Errorf("line %d: %q is a reserved attribute name", lineNo, k)
+				badAttr = k
+				break
 			}
 			if strings.ContainsRune(k, '@') {
-				return fmt.Errorf("line %d: attribute names must not contain '@' (reserved for external claims)", lineNo)
+				scanErr = fmt.Errorf("line %d: attribute names must not contain '@' (reserved for external claims)", lineNo)
+				badAttr = k
+				break
 			}
 		}
-
-		attrs := map[string]string{}
-		for k, v := range l.Attributes {
-			attrs[k] = v
+		if badAttr != "" {
+			break
 		}
-		row := importRow{keyID: kekV, alg: pii.Algorithm()}
+		ln := parsedLine{n: lineNo, rawName: l.Name, attrs: map[string]string{}}
+		for k, v := range l.Attributes {
+			ln.attrs[k] = v
+		}
 		if l.Email != "" {
 			norm, err := crypto.NormalizeEmail(l.Email)
 			if err != nil {
-				return fmt.Errorf("line %d: email: %v", lineNo, err)
+				scanErr = fmt.Errorf("line %d: email: %v", lineNo, err)
+				break
 			}
-			t, err := tok.EmailToken(ctx, emailV, norm)
-			if err != nil {
-				return err
-			}
-			row.emailTok, attrs["email"] = t, norm
-			for _, ver := range emailVers {
-				mt, err := tok.EmailToken(ctx, ver, norm)
-				if err != nil {
-					return err
-				}
-				row.emailMatch = append(row.emailMatch, mt)
-			}
+			ln.email = norm
 		}
 		if l.Phone != "" {
 			norm, err := crypto.NormalizePhone(l.Phone)
 			if err != nil {
-				return fmt.Errorf("line %d: phone: %v", lineNo, err)
+				scanErr = fmt.Errorf("line %d: phone: %v", lineNo, err)
+				break
 			}
-			t, err := tok.PhoneToken(ctx, phoneV, norm)
-			if err != nil {
-				return err
-			}
-			row.phoneTok, attrs["phone"] = t, norm
-			for _, ver := range phoneVers {
-				mt, err := tok.PhoneToken(ctx, ver, norm)
-				if err != nil {
-					return err
-				}
-				row.phoneMatch = append(row.phoneMatch, mt)
-			}
+			ln.phone = norm
 		}
-		if l.Name != "" {
-			norm, err := crypto.NormalizeName(l.Name)
-			if err != nil {
-				return fmt.Errorf("line %d: name: %v", lineNo, err)
-			}
-			t, err := tok.NameToken(ctx, nameV, norm)
-			if err != nil {
-				return err
-			}
-			row.nameTok, attrs["name"] = t, l.Name
-			if cfg.SearchFuzzyName {
-				for _, code := range crypto.PhoneticNameCodes(norm) {
-					pt, err := tok.NamePhoneticToken(ctx, nameV, code)
-					if err != nil {
-						return err
-					}
-					row.phoneticToks = append(row.phoneticToks, pt)
-				}
-			}
-		}
-		if cfg.SearchPhoneSuffix && row.phoneTok != nil {
-			st2, err := tok.PhoneSuffixToken(ctx, phoneV, crypto.PhoneSuffix(attrs["phone"]))
-			if err != nil {
-				return err
-			}
-			row.suffixTok = st2
-		}
-
-		// In-file duplicates: EITHER identifier repeating within the batch
-		// marks the line a duplicate (an email or phone identifies exactly
-		// one person), before the unique index would kill the whole batch.
-		et, _ := row.emailTok.(string)
-		pt, _ := row.phoneTok.(string)
-		if (et != "" && seenEmail[et]) || (pt != "" && seenPhone[pt]) {
-			dupes++
+		if (ln.email != "" && seenEmail[ln.email]) || (ln.phone != "" && seenPhone[ln.phone]) {
+			dupes.Add(1)
 			continue
 		}
-		if et != "" {
-			seenEmail[et] = true
+		if ln.email != "" {
+			seenEmail[ln.email] = true
 		}
-		if pt != "" {
-			seenPhone[pt] = true
+		if ln.phone != "" {
+			seenPhone[ln.phone] = true
 		}
-
-		if row.pid, err = newUUIDStr(); err != nil {
-			return err
-		}
-		if row.cid, err = crypto.NewCID(); err != nil {
-			return err
-		}
-		if row.blob, err = pii.Encrypt(ctx, row.cid, kekV, attrs); err != nil {
-			return err
-		}
-		rows = append(rows, row)
-		if len(rows) >= *batch {
-			if err := flush(); err != nil {
-				return err
+		pending = append(pending, ln)
+		if len(pending) >= *batch {
+			if !flushChunk() {
+				break
 			}
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return err
+	if scanErr == nil {
+		scanErr = sc.Err()
 	}
-	if err := flush(); err != nil {
-		return err
+	if scanErr == nil {
+		flushChunk()
 	}
+	close(chunks)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return err
+	default:
+	}
+	if scanErr != nil {
+		return scanErr
+	}
+
+	cryptoTime := time.Duration(cryptoNS.Load())
+	dbTime := time.Duration(dbNS.Load())
 	fmt.Printf("import done: %d imported, %d skipped as existing, %d in-file duplicates, %d lines, %s\n",
-		inserted, skipped, dupes, lineNo, time.Since(start).Truncate(time.Millisecond))
+		inserted.Load(), skipped.Load(), dupes.Load(), lineNo, time.Since(start).Truncate(time.Millisecond))
 	if *timing {
+		// With -parallel these are SUMS across workers (worker-seconds, not
+		// wall time); the split between the halves is what they are for.
 		total := cryptoTime + dbTime
 		fmt.Printf("timing: crypto+read %s (%.0f%%), database %s (%.0f%%)\n",
 			cryptoTime.Truncate(time.Millisecond), 100*cryptoTime.Seconds()/total.Seconds(),
@@ -327,10 +465,10 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 	// them - the second scope silently gets nothing. Import is per-scope by
 	// -scope; if you meant to load two scopes, run it once per scope with
 	// per-scope files. Say so loudly whenever duplicates were dropped.
-	if dupes > 0 {
+	if d := dupes.Load(); d > 0 {
 		fmt.Printf("NOTE: %d rows were dropped as in-file duplicates (same email or phone appearing twice). "+
 			"Dedup is scope-blind and this run loaded ONLY scope %q - to load another scope, run import again "+
-			"with its own -scope and a file of that scope's records.\n", dupes, *scope)
+			"with its own -scope and a file of that scope's records.\n", d, *scope)
 	}
 	return nil
 }
@@ -358,11 +496,15 @@ func importBatch(ctx context.Context, st *store.Store, scope, emailV, phoneV, na
 		if err == nil {
 			return inserted, skipped, nil
 		}
-		// A concurrent writer (another import, or live API registrations)
-		// can win the unique-index race after our EXISTS check; on retry
-		// the check sees their committed row and skips ours.
+		// A concurrent writer (another import worker, another import
+		// process, or live API registrations) can win the unique-index race
+		// after our EXISTS check; on retry the check sees their committed
+		// row and skips ours. With -parallel workers a single batch can lose
+		// that race against DIFFERENT rows on successive attempts, so one
+		// retry is not enough; three bounds it (each retry converts at least
+		// one conflicting identifier into a visible committed row).
 		var pgErr *pgconn.PgError
-		if attempt == 0 && errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if attempt < 3 && errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			continue
 		}
 		return 0, 0, err
