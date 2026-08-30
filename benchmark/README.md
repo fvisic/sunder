@@ -113,12 +113,22 @@ for it anyway - a figure that turned out to be `benchmark/bulkload` (a COPY
 fixture that skips deduplication) at its best point, described as a different
 tool. The real numbers, and what moved them:
 
+<!-- authoritative:begin - ops/check-sales-deck.sh trusts ONLY what is between these markers -->
 | condition | rate |
 |---|---|
-| empty database, untuned Docker Postgres | 3,006 rows/s |
-| **11M contacts, tuned host, full dedup, after the partial-index fix (shipped)** | **1,005 rows/s** |
-| same, with `person_tokens_search_idx` dropped for the load and rebuilt after | 1,430 rows/s (pays above ~130k rows) |
+| **offline mode (`-offline -parallel 12`): empty vault, 1M rows, INCLUDING the index rebuilds** | **11,235 rows/s** (load alone 13,127; rebuilds 4s + 7s; ident_uq re-proven UNIQUE) |
+| online, `-parallel 12`, into 11.4M existing contacts, full dedup | 4,630 rows/s |
+| online, `-parallel 8` | 3,067 rows/s |
+| online, serial (`-parallel 1`), after the dedup-probe fix | 1,005 rows/s |
+| empty database, untuned Docker Postgres, serial | 3,006 rows/s |
 | 10M contacts, before the dedup-probe fix, `ORDER BY` only | 273-467 rows/s |
+| serial, `search_idx` dropped and rebuilt | 1,430 rows/s - but at `-parallel 12` this stops paying (4,164 vs 4,630): contention moves, the drop buys nothing |
+
+At 100M rows that ladder reads: ~4 days before this work, ~6 hours online,
+**~2.5 hours offline** on this hardware class - with the standing caveat from
+the saturated-host measurement: size RAM so the token indexes fit, or the
+rates above do not transfer.
+<!-- authoritative:end -->
 | same, pre-fix (file-order inserts) | 310 rows/s, varying 310-464 across runs |
 | 26.9M contacts on a deliberately saturated 47 GB host | 117 rows/s |
 
@@ -128,9 +138,17 @@ shared_buffers), and nobody serves 30M contacts on 47 GB. Size the host so
 `person_tokens` and its indexes fit in memory and the middle rows are what
 you get.
 
-**What was tried, with verdicts** (10M dataset, 200k rows per run, one run
-at a time - two earlier attempts ran concurrently and quietly invalidated
-each other):
+**Offline mode** (`-offline`) is the initial-migration answer: it refuses
+unless the vault is EMPTY, drops the secondary token indexes for the load
+(uniqueness is guaranteed by the empty start plus the reader's global
+first-wins in-file dedup), skips the existing-person probe, and rebuilds both
+indexes over settled data at the end - `ident_uq` as UNIQUE, so the dedup
+invariant is re-proven by the rebuild, not assumed. The system is not
+serving during it, which for a first migration is the point.
+
+**What was tried, with verdicts** (10-11M dataset, 200k rows per run, one
+run at a time - two earlier attempts ran concurrently and quietly
+invalidated each other):
 
 - **`ORDER BY <token>` on the batch INSERTs: 1.51x, shipped.** A keyed HMAC
   is uniformly distributed, so file-order inserts touch a random B-tree page
