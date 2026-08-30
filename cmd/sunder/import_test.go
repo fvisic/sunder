@@ -160,7 +160,7 @@ func TestImportBatchRetryOnUniqueRace(t *testing.T) {
 		{pid: "6f000000-0000-4000-8000-000000000002", cid: "CID-AAAAAAAAAAAAAAAAAAAAAAAAA2",
 			emailTok: "tok-same", blob: []byte("b"), keyID: "v1", alg: "aes256gcm"},
 	}
-	if _, _, err := importBatch(ctx, st, "crm", "v1", "v1", "v1", rows); err == nil {
+	if _, _, err := importBatch(ctx, st, "crm", "v1", "v1", "v1", rows, &importTimings{}); err == nil {
 		t.Fatal("a persistent unique conflict must surface after the retry")
 	}
 	// The failed batch imported nothing (whole-batch transactionality).
@@ -177,7 +177,7 @@ func TestImportBatchSurfacesCopyErrors(t *testing.T) {
 	st := testutil.NewDB(t)
 	ctx := context.Background()
 	rows := []importRow{{pid: "not-a-uuid", cid: "CID-X", emailTok: "t", blob: []byte("b"), keyID: "v1", alg: "aes256gcm"}}
-	if _, _, err := importBatch(ctx, st, "crm", "v1", "v1", "v1", rows); err == nil {
+	if _, _, err := importBatch(ctx, st, "crm", "v1", "v1", "v1", rows, &importTimings{}); err == nil {
 		t.Fatal("a malformed staged row must surface, not vanish")
 	}
 }

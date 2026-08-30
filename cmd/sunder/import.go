@@ -72,6 +72,7 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 	file := fs.String("file", "", "JSON Lines file to import ('-' for stdin)")
 	scope := fs.String("scope", "", "scope the contacts belong to")
 	batch := fs.Int("batch", 5000, "rows per transaction")
+	timing := fs.Bool("timing", false, "report wall time split between the crypto/read half and the database half")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -139,6 +140,16 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 		rows                     []importRow
 		inserted, skipped, dupes int64
 		start                    = time.Now()
+		// The two halves of the pipeline, timed separately when -timing is
+		// set. The import strictly alternates: tokenize and encrypt a batch
+		// on one core while the database sits idle, then flush it in one
+		// transaction while the CPU sits idle. Which half dominates decides
+		// whether pipelining (overlap the halves, ceiling 2x) or fanning the
+		// crypto across cores is the lever worth building - guessing wrong
+		// builds the wrong thing, which is why this flag exists.
+		cryptoTime, dbTime time.Duration
+		sinceFlush         = time.Now()
+		tm                 = &importTimings{}
 	)
 	// In-batch identifier dedup, PER IDENTIFIER: two lines sharing an
 	// email but differing in phone are still the same person under the
@@ -150,7 +161,11 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 		if len(rows) == 0 {
 			return nil
 		}
-		ins, skip, err := importBatch(ctx, st, *scope, emailV, phoneV, nameV, rows)
+		cryptoTime += time.Since(sinceFlush)
+		dbStart := time.Now()
+		ins, skip, err := importBatch(ctx, st, *scope, emailV, phoneV, nameV, rows, tm)
+		dbTime += time.Since(dbStart)
+		sinceFlush = time.Now()
 		if err != nil {
 			return err
 		}
@@ -298,6 +313,15 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 	}
 	fmt.Printf("import done: %d imported, %d skipped as existing, %d in-file duplicates, %d lines, %s\n",
 		inserted, skipped, dupes, lineNo, time.Since(start).Truncate(time.Millisecond))
+	if *timing {
+		total := cryptoTime + dbTime
+		fmt.Printf("timing: crypto+read %s (%.0f%%), database %s (%.0f%%)\n",
+			cryptoTime.Truncate(time.Millisecond), 100*cryptoTime.Seconds()/total.Seconds(),
+			dbTime.Truncate(time.Millisecond), 100*dbTime.Seconds()/total.Seconds())
+		fmt.Printf("timing: db = copy %s + dedup-match %s + inserts %s + commit %s\n",
+			tm.copy_.Truncate(time.Millisecond), tm.match.Truncate(time.Millisecond),
+			tm.insert.Truncate(time.Millisecond), tm.commit.Truncate(time.Millisecond))
+	}
 	// L12: in-file dedup is scope-BLIND (one email = one person, globally),
 	// so a single file carrying the SAME identifiers for two scopes collapses
 	// them - the second scope silently gets nothing. Import is per-scope by
@@ -316,9 +340,21 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 // the stage, everything else inserts, and the batch is audited as ONE
 // chained record. All in one transaction - a crash imports whole batches
 // or nothing, and a re-run skips what landed.
-func importBatch(ctx context.Context, st *store.Store, scope, emailV, phoneV, nameV string, rows []importRow) (inserted, skipped int64, err error) {
+// importTimings decomposes where a batch's wall time goes. Always collected
+// (four time.Now() calls per batch), printed only under -timing. The
+// per-batch progress log gives cumulative rows/s and nothing else; when the
+// question is "which phase is the bottleneck", cumulative throughput is
+// exactly the number that cannot answer it.
+type importTimings struct {
+	copy_  time.Duration // temp-table creation + the three CopyFroms + ANALYZE
+	match  time.Duration // the dedup DELETE against person_tokens
+	insert time.Duration // the INSERTs into persons / person_tokens / cids + audit
+	commit time.Duration // tx.Commit - WAL flush lives here
+}
+
+func importBatch(ctx context.Context, st *store.Store, scope, emailV, phoneV, nameV string, rows []importRow, tm *importTimings) (inserted, skipped int64, err error) {
 	for attempt := 0; ; attempt++ {
-		inserted, skipped, err = importBatchTx(ctx, st, scope, emailV, phoneV, nameV, rows)
+		inserted, skipped, err = importBatchTx(ctx, st, scope, emailV, phoneV, nameV, rows, tm)
 		if err == nil {
 			return inserted, skipped, nil
 		}
@@ -333,7 +369,13 @@ func importBatch(ctx context.Context, st *store.Store, scope, emailV, phoneV, na
 	}
 }
 
-func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, nameV string, rows []importRow) (int64, int64, error) {
+func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, nameV string, rows []importRow, tm *importTimings) (int64, int64, error) {
+	// stage attributes the time since the previous mark to one phase.
+	mark := time.Now()
+	stage := func(d *time.Duration) {
+		*d += time.Since(mark)
+		mark = time.Now()
+	}
 	tx, err := st.Pool.Begin(ctx)
 	if err != nil {
 		return 0, 0, err
@@ -398,6 +440,7 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 			return 0, 0, err
 		}
 	}
+	stage(&tm.copy_)
 
 	// The dedup invariant: an email or phone identifies exactly one person.
 	// Existing identifiers mean an existing person - skip, never merge:
@@ -415,6 +458,7 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 		return 0, 0, err
 	}
 	skipped := tag.RowsAffected()
+	stage(&tm.match)
 
 	if _, err := tx.Exec(ctx, `INSERT INTO persons (id) SELECT pid FROM import_stage`); err != nil {
 		return 0, 0, err
@@ -477,7 +521,10 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 	}); err != nil {
 		return 0, 0, err
 	}
-	return inserted, skipped, tx.Commit(ctx)
+	stage(&tm.insert)
+	err = tx.Commit(ctx)
+	stage(&tm.commit)
+	return inserted, skipped, err
 }
 
 // newUUIDStr mirrors the server's own stdlib-only UUIDv4 generator.
