@@ -76,6 +76,7 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 	batch := fs.Int("batch", 5000, "rows per transaction")
 	timing := fs.Bool("timing", false, "report wall time split between the crypto/read half and the database half")
 	parallel := fs.Int("parallel", 4, "concurrent import workers, each staging and committing its own batches (1 = the pre-v0.5.2 serial behaviour)")
+	offline := fs.Bool("offline", false, "initial-migration mode: REFUSES unless the vault is empty, drops person_tokens' secondary indexes for the load and rebuilds them at the end (the unique rebuild re-proves the dedup invariant). The system is NOT serving during this.")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -90,6 +91,61 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 	}
 	if err := st.Migrate(ctx); err != nil {
 		return err
+	}
+
+	// Offline mode exists for the customer this tool was built for: one with
+	// tens of millions of records and an EMPTY vault. Import speed decides
+	// whether they adopt the system at all, and during an initial migration
+	// there is no system to keep serving. What it changes:
+	//
+	//   - Refuses unless `persons` is empty. Uniqueness below is guaranteed
+	//     by "the vault starts empty + the reader's global first-wins dedup";
+	//     a non-empty vault would need the index the mode removes.
+	//   - Drops ident_uq and search_idx for the load (the PRIMARY KEY
+	//     stays), so every insert maintains one index instead of three.
+	//   - Skips the existing-person probe: with an empty start it can match
+	//     nothing, and without ident_uq it would seq-scan.
+	//   - Rebuilds both indexes at the end, over settled data - and rebuilds
+	//     ident_uq as UNIQUE, so the dedup invariant is not assumed but
+	//     RE-PROVEN: a violation fails the rebuild loudly instead of hiding.
+	//     The rebuild runs even when the import fails partway.
+	if *offline {
+		var any bool
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM persons)`).Scan(&any); err != nil {
+			return err
+		}
+		if any {
+			return fmt.Errorf("-offline is for an initial migration into an EMPTY vault: persons is not empty, " +
+				"and without its unique index a load into existing data could breed duplicate persons. " +
+				"Run without -offline (deduplicating, slower), or reset the vault first")
+		}
+		for _, idx := range []string{"person_tokens_ident_uq", "person_tokens_search_idx"} {
+			if _, err := st.Pool.Exec(ctx, `DROP INDEX IF EXISTS `+idx); err != nil {
+				return err
+			}
+		}
+		fmt.Println("offline mode: vault is empty, secondary token indexes dropped for the load")
+		defer func() {
+			// context.Background(): the rebuild must run even when ctx was
+			// cancelled by a failed worker - leaving the vault without its
+			// unique index is worse than a slow exit.
+			rctx := context.Background()
+			for _, ddl := range []string{
+				`CREATE UNIQUE INDEX person_tokens_ident_uq ON person_tokens (kind, token)
+				    WHERE kind IN ('email','phone')`,
+				`CREATE INDEX person_tokens_search_idx ON person_tokens (kind, token)
+				    WHERE kind IN ('name','name_phonetic','phone_suffix')`,
+			} {
+				t0 := time.Now()
+				if _, rerr := st.Pool.Exec(rctx, ddl); rerr != nil {
+					fmt.Fprintf(os.Stderr, "offline mode: INDEX REBUILD FAILED: %v\n"+
+						"The vault is NOT safe to serve until this succeeds - rerun the CREATE INDEX by hand.\n", rerr)
+					return
+				}
+				fmt.Printf("offline mode: index rebuilt in %s\n", time.Since(t0).Truncate(time.Second))
+			}
+		}()
 	}
 
 	var in io.Reader = os.Stdin
@@ -140,6 +196,13 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 1<<20), 1<<20) // generous line limit: attribute maps can be wide
+
+	// Offline mode skips the match tokens too: they exist to find EXISTING
+	// persons across live key versions (H13), and an empty vault has none.
+	emailVersMatch, phoneVersMatch := emailVers, phoneVers
+	if *offline {
+		emailVersMatch, phoneVersMatch = nil, nil
+	}
 
 	// The import is a fan-out of the exact pipeline that used to run
 	// serially: a reader splits the file into chunks of -batch lines, and
@@ -208,7 +271,7 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 				return importRow{}, err
 			}
 			row.emailTok, attrs["email"] = t, ln.email
-			for _, ver := range emailVers {
+			for _, ver := range emailVersMatch {
 				mt, err := tok.EmailToken(ctx, ver, ln.email)
 				if err != nil {
 					return importRow{}, err
@@ -222,7 +285,7 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 				return importRow{}, err
 			}
 			row.phoneTok, attrs["phone"] = t, ln.phone
-			for _, ver := range phoneVers {
+			for _, ver := range phoneVersMatch {
 				mt, err := tok.PhoneToken(ctx, ver, ln.phone)
 				if err != nil {
 					return importRow{}, err

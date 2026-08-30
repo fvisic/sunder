@@ -616,3 +616,94 @@ func TestConcurrentImportsConvergeOnUniqueIdentifiers(t *testing.T) {
 			"%d email tokens - the unique-index-plus-retry path is not converging", n, persons, emailToks)
 	}
 }
+
+// TestOfflineImportRefusesANonEmptyVault. Offline mode's uniqueness argument
+// is "the vault starts empty + the reader dedups the file"; on a non-empty
+// vault that argument is void and running anyway could breed duplicate
+// persons with the unique index down. Refusal is the feature.
+func TestOfflineImportRefusesANonEmptyVault(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+
+	f := filepath.Join(t.TempDir(), "one.jsonl")
+	if err := os.WriteFile(f, []byte(`{"email":"a@example.com"}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+	err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm", "-offline"})
+	if err == nil || !strings.Contains(err.Error(), "EMPTY vault") {
+		t.Fatalf("offline import into a non-empty vault must refuse, got: %v", err)
+	}
+	// And the refusal must not have dropped anything.
+	var n int
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM pg_indexes WHERE indexname IN ('person_tokens_ident_uq','person_tokens_search_idx')`,
+	).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("the refused offline run left %d of 2 secondary indexes standing", n)
+	}
+}
+
+// TestOfflineImportRebuildsAndReprovesUniqueness: the full offline pass.
+// After it, both secondary indexes must exist again, ident_uq must be UNIQUE
+// (the rebuild is what re-proves the dedup invariant), the in-file duplicate
+// must have lost to its first occurrence, and the loaded contacts must carry
+// the same token shapes as an online import.
+func TestOfflineImportRebuildsAndReprovesUniqueness(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+
+	f := filepath.Join(t.TempDir(), "off.jsonl")
+	if err := os.WriteFile(f, []byte(`{"email":"ana@example.com","name":"Ana Anic"}
+{"phone":"+385 91 111 2222"}
+{"email":"ana@example.com","name":"Uzurpator"}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{
+		"-file", f, "-scope", "crm", "-offline", "-parallel", "4", "-batch", "1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var persons, dup int64
+	if err := st.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM persons),
+		(SELECT count(*) FROM person_tokens WHERE kind='email')`,
+	).Scan(&persons, &dup); err != nil {
+		t.Fatal(err)
+	}
+	if persons != 2 || dup != 1 {
+		t.Fatalf("want 2 persons / 1 email token, got %d/%d", persons, dup)
+	}
+
+	var uniq bool
+	err := st.Pool.QueryRow(ctx, `SELECT indisunique FROM pg_index i
+		 JOIN pg_class c ON c.oid = i.indexrelid
+		WHERE c.relname = 'person_tokens_ident_uq'`).Scan(&uniq)
+	if err != nil {
+		t.Fatalf("ident_uq was not rebuilt: %v", err)
+	}
+	if !uniq {
+		t.Fatal("the rebuilt ident_uq is not UNIQUE - the dedup invariant is unproven and unenforced")
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT true FROM pg_indexes
+		WHERE indexname = 'person_tokens_search_idx'`).Scan(&uniq); err != nil {
+		t.Fatalf("search_idx was not rebuilt: %v", err)
+	}
+	// The duplicate's payload must be the FIRST occurrence's.
+	var nameToks int64
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM person_tokens WHERE kind='name'`).Scan(&nameToks); err != nil {
+		t.Fatal(err)
+	}
+	if nameToks != 1 {
+		t.Fatalf("want exactly the first occurrence's name token, got %d name tokens", nameToks)
+	}
+}
