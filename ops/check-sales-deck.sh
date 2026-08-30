@@ -144,18 +144,21 @@ for deck in decks:
     # are part of a drawn example, not a claim about throughput.
     body = re.sub(r"#\s*\d+", " ", body)
 
-    claims = {}
+    # A token is BACKED when any one of its locale readings matches a source:
+    # the deck writes 13,75 and the source writes 13.75, and the spurious
+    # third reading (1375) must not turn a correct figure into an alarm. One
+    # reading per token has to match; a token where none does is the finding.
+    tokens = {}
     for m in re.finditer(r"\b(\d[\d.,]*\d)\s*(ms|s|%|x|×|/s|rps|M)?\b", body):
         tok = m.group(1)
-        for v in _interpretations(tok):
-            if structural(v):
-                continue
-            claims.setdefault(round(v, 4), tok)
+        vals = [v for v in _interpretations(tok) if not structural(v)]
+        if vals:
+            tokens.setdefault(tok, vals)
 
     unbacked = []
-    for v, tok in sorted(claims.items()):
-        if not any(close(v, sv) for sv in source_values):
-            unbacked.append(f"{tok} (read as {v:g})")
+    for tok, vals in sorted(tokens.items()):
+        if not any(close(v, sv) for v in vals for sv in source_values):
+            unbacked.append(f"{tok} (readings: {', '.join(f'{v:g}' for v in vals)})")
 
     name = os.path.basename(deck)
     if unbacked:
@@ -167,7 +170,7 @@ for deck in decks:
         print("  or the figure was never sourced. Both read the same to a customer.")
         print("  Sources checked: " + ", ".join(SOURCES))
     else:
-        print(f"  {name}: {len(claims)} measured figure(s), all traceable to a source in the repo")
+        print(f"  {name}: {len(tokens)} measured figure(s), all traceable to a source in the repo")
 
 sys.exit(fail)
 PY

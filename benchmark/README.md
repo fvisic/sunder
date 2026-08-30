@@ -31,6 +31,9 @@ Latency, p50 / p99 in ms:
 
 | operation | Sunder | Databunker |
 |---|---|---|
+| write c=8 | 15.33 / 45.74 | 28.62 / 155.68 |
+| lookup c=8 | 5.22 / 22.30 | 10.12 / 43.17 |
+| read c=8 | 4.26 / 13.75 | 8.85 / 30.00 |
 | write c=32 | 45.9 / 146.5 | 61.4 / 150.9 |
 | lookup c=32 | 13.4 / 26.9 | 38.7 / 134.7 |
 | lookup c=64 | 25.9 / 128.0 | 109.7 / 328.3 |
@@ -113,7 +116,9 @@ tool. The real numbers, and what moved them:
 | condition | rate |
 |---|---|
 | empty database, untuned Docker Postgres | 3,006 rows/s |
-| **10M contacts, tuned host, index fits in cache, `ORDER BY` (shipped)** | **467 rows/s** |
+| **11M contacts, tuned host, full dedup, after the partial-index fix (shipped)** | **1,005 rows/s** |
+| same, with `person_tokens_search_idx` dropped for the load and rebuilt after | 1,430 rows/s (pays above ~130k rows) |
+| 10M contacts, before the dedup-probe fix, `ORDER BY` only | 273-467 rows/s |
 | same, pre-fix (file-order inserts) | 310 rows/s, varying 310-464 across runs |
 | 26.9M contacts on a deliberately saturated 47 GB host | 117 rows/s |
 
@@ -137,16 +142,37 @@ each other):
   speeds up (478 vs 467 rows/s) and the rebuild is a 36.5s fixed cost. Safe
   to do - the index is deliberately non-unique, so no invariant rests on it -
   but not worth automating at current gains.
+- **The dedup probe was a query-plan defect, fixed for 49x on that
+  statement.** `person_tokens_ident_uq` is a PARTIAL index
+  (`WHERE kind IN ('email','phone')`), and the planner may use a partial
+  index only when the query proves its predicate - a join condition
+  `pt.kind = m.kind` proves nothing, so the only available plan seq-scanned
+  ALL 36.4M token rows once per 5,000-row batch: 26.2s and 600k buffers
+  each, 64% of the import's wall time. Naming the predicate literally in
+  the probe (semantics unchanged) made it 0.54s of pure index hits.
+  End to end: 273 -> 1,005 rows/s. Found by `-timing`; invisible to the
+  per-batch rows/s line, to reading, and to every test.
+- **After the fix, the split is: inserts 84%, dedup 7%, copy 4%, crypto 4%.**
+  The insert cost is `person_tokens` index maintenance (three indexes, ~0.12
+  ms/row); a bigger `-batch` buys nothing (1,010 vs 1,005 rows/s at 20k),
+  because the primary key `(person_id, kind, token)` starts with a random
+  UUID and no sort order can give it locality. Dropping the non-unique
+  search index for the load now DOES pay - 1,430 rows/s, break-even ~130k
+  rows - which it did not before the dedup fix drowned the saving.
 - **Dedup is not the cost.** Re-importing an already-imported file (every
   row a duplicate, zero inserts) runs at 6,455 rows/s against 3,006 for the
   full path on the same empty-ish database: the probe is cheap, the index
   inserts are the work.
 
-The remaining 40x gap to bulkload's 20,274 rows/s on the same 10M dataset is
-therefore NOT insert locality and NOT deduplication. The untested suspects
-are the per-row crypto pipeline (HMAC per identifier, phonetic codes, AEAD
-blob - single-threaded) and per-batch transaction overhead; measuring those
-is Phase 11.3.
+The remaining gap to bulkload's 20,274 rows/s is now ~14x, and its shape is
+known: `person_tokens` carries three indexes and the import maintains all of
+them per row, while bulkload COPYs into the same tables but appends
+monotonically growing person ids. The measured suspects left are the random
+UUID primary key (a time-ordered id for imported persons would give the
+biggest index locality; a design decision, not a patch) and per-statement
+overhead. Crypto is 4% - the parallelisation steps the first draft of Phase
+11.3 planned would have been building the wrong thing, which is what
+measuring first is for.
 
 ## v0.5.0 re-measurement (2026-08-27, laptop): the second review cost nothing
 
