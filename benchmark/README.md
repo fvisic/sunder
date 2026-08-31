@@ -116,7 +116,8 @@ tool. The real numbers, and what moved them:
 <!-- authoritative:begin - ops/check-sales-deck.sh trusts ONLY what is between these markers -->
 | condition | rate |
 |---|---|
-| **offline mode (`-offline -parallel 12`): empty vault, 1M rows, INCLUDING the index rebuilds** | **11,235 rows/s** (load alone 13,127; rebuilds 4s + 7s; ident_uq re-proven UNIQUE) |
+| **offline mode (`-offline -parallel 12`): empty vault, 10M rows, INCLUDING the index rebuilds** | **8,347 rows/s - 10M contacts in 20 minutes** (load alone 10,256; rebuilds 1m58s + 1m43s; 70M tokens; ident_uq re-proven UNIQUE) |
+| offline mode, 1M rows | 11,235 rows/s (load alone 13,127; rebuilds 4s + 7s) |
 | online, `-parallel 12`, into 11.4M existing contacts, full dedup | 4,630 rows/s |
 | online, `-parallel 8` | 3,067 rows/s |
 | online, serial (`-parallel 1`), after the dedup-probe fix | 1,005 rows/s |
@@ -124,10 +125,16 @@ tool. The real numbers, and what moved them:
 | 10M contacts, before the dedup-probe fix, `ORDER BY` only | 273-467 rows/s |
 | serial, `search_idx` dropped and rebuilt | 1,430 rows/s - but at `-parallel 12` this stops paying (4,164 vs 4,630): contention moves, the drop buys nothing |
 
-At 100M rows that ladder reads: ~4 days before this work, ~6 hours online,
-**~2.5 hours offline** on this hardware class - with the standing caveat from
-the saturated-host measurement: size RAM so the token indexes fit, or the
-rates above do not transfer.
+Offline does NOT scale linearly, and the 1M-to-10M pair is the measurement
+of that: -26% end to end at 10x the size, because the primary key grows to
+70M random-UUID entries during the load and its inserts lose locality as it
+outgrows cache. So the honest 100M reading is: ~4 days before this work,
+~6 hours online, and offline **"10M in 20 minutes, measured" - with 100M
+plausibly 4-6 hours on this hardware class, not the ~2.5h a linear
+extrapolation promises**. The decay curve is also the concrete case for a
+time-ordered person id (the open bigint/UUIDv7 decision): it is exactly
+pkey insert locality that erodes. Standing caveat unchanged: size RAM so the
+token indexes fit, or none of these rates transfer.
 <!-- authoritative:end -->
 | same, pre-fix (file-order inserts) | 310 rows/s, varying 310-464 across runs |
 | 26.9M contacts on a deliberately saturated 47 GB host | 117 rows/s |
