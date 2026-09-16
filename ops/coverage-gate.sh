@@ -120,7 +120,11 @@ if excluded_pct > max_excluded_pct:
           f"{max_excluded_pct:.2f}% ceiling. The gate must not be satisfiable "
           f"by adding markers - test these branches instead.")
     sys.exit(1)
-if pct < minimum:
-    print(f"::error::coverage {pct:.2f}% is below the {minimum:.1f}% gate")
+# Compare at the precision the line above PRINTS. The chained CI leg once
+# failed with "coverage 90.00% is below the 90.0% gate": 89.996 rounded up
+# in the message and down in the comparison, and the report contradicted
+# its own verdict.
+if round(pct, 2) < minimum:
+    print(f"::error::coverage {pct:.3f}% is below the {minimum:.1f}% gate")
     sys.exit(1)
 PY
