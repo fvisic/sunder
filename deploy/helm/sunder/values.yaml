@@ -245,3 +245,8 @@ startupProbe:
 # command line. Set it to a pod-local address (e.g. "127.0.0.1:6060") and
 # reach it with `kubectl port-forward`, never through a Service.
 debugAddr: ""        # SUNDER_DEBUG_ADDR
+
+# Shape of the internal persons.id: "" (server default, v4 random) or "v7"
+# (time-ordered, append-like primary-key inserts for bulk import). Internal to
+# the database; safe to switch on a populated vault. docs/CONFIG.md.
+personId: ""         # SUNDER_PERSON_ID: v4 (default) | v7

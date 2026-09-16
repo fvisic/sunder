@@ -16,7 +16,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"flag"
 	"fmt"
 	"os"
@@ -47,6 +46,11 @@ func main() {
 	if err != nil {
 		die(err)
 	}
+	// Same authority as the server: the shape comes from the validated
+	// config, so a bulk-loaded dataset carries the id shape the server under
+	// test would have minted - a stale image once minted the WRONG shape and
+	// contaminated a cell that looked healthy.
+	crypto.SetPersonIDShape(cfg.PersonID)
 	pool, err := pgxpool.New(ctx, cfg.DBURL)
 	if err != nil {
 		die(err)
@@ -266,17 +270,4 @@ func die(err error) {
 		fmt.Fprintln(os.Stderr, "hint: set SUNDER_DB_URL and the keystore variables the server uses")
 	}
 	os.Exit(1)
-}
-
-// newUUID mirrors the server's own generator rather than adding a
-// dependency: the project keeps a stdlib-first policy for exactly the
-// supply-chain reasons a benchmark tool should not undercut.
-func newUUID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

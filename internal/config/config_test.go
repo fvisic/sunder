@@ -449,3 +449,32 @@ func TestAuditLookupActionsValidation(t *testing.T) {
 		}
 	}
 }
+
+// SUNDER_PERSON_ID is a closed choice, not a free string: a typo must be
+// refused at startup rather than quietly minting the default shape.
+func TestPersonIDValidation(t *testing.T) {
+	setBase(t)
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PersonID != "v4" {
+		t.Errorf("default must be v4, the shape every prior measurement used, got %q", c.PersonID)
+	}
+	for _, ok := range []string{"v4", "v7"} {
+		t.Setenv("SUNDER_PERSON_ID", ok)
+		c, err := FromEnv()
+		if err != nil {
+			t.Fatalf("%q must be accepted: %v", ok, err)
+		}
+		if c.PersonID != ok {
+			t.Errorf("%q round-tripped as %q", ok, c.PersonID)
+		}
+	}
+	for _, bad := range []string{"V7", "uuidv7", "7", "bigint", "true"} {
+		t.Setenv("SUNDER_PERSON_ID", bad)
+		if _, err := FromEnv(); err == nil {
+			t.Errorf("%q must be refused at startup, not silently defaulted", bad)
+		}
+	}
+}

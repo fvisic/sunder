@@ -19,7 +19,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -748,15 +747,4 @@ func importBatchTx(ctx context.Context, st *store.Store, scope, emailV, phoneV, 
 	err = tx.Commit(ctx)
 	stage(&tm.commit)
 	return inserted, skipped, err
-}
-
-// newUUIDStr mirrors the server's own stdlib-only UUIDv4 generator.
-func newUUIDStr() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

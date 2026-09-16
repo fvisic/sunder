@@ -93,6 +93,14 @@ type Config struct {
 	// exact-identifier resolution from phonetic or partial search. It costs
 	// bucket rows; see docs/CONFIG.md for the measured multiplier.
 	AuditLookupActions string
+	// PersonID is the shape of persons.id (SUNDER_PERSON_ID): "v4" (default,
+	// random) or "v7" (time-ordered). Internal to the database - it reaches no
+	// response, SDK or export - but it decides the insert locality of the
+	// person_tokens primary key and with it bulk-import throughput at scale.
+	// See docs/CONFIG.md for the measurement. Read once at startup; switching
+	// shapes on a populated vault is harmless (both are uuid) but the
+	// locality gain only applies to rows inserted afterwards.
+	PersonID string
 	// DebugAddr, when set, starts a net/http/pprof listener on that address
 	// (SUNDER_DEBUG_ADDR, e.g. "127.0.0.1:6060"). Empty = off, which is the
 	// only correct production value: pprof exposes stack traces, heap
@@ -419,6 +427,10 @@ func FromEnvNoDB() (Config, error) {
 	c.AuditLookupActions = getenv("SUNDER_AUDIT_LOOKUP_ACTIONS", "single")
 	if c.AuditLookupActions != "single" && c.AuditLookupActions != "split" {
 		return c, fmt.Errorf("SUNDER_AUDIT_LOOKUP_ACTIONS must be \"single\" or \"split\", got %q", c.AuditLookupActions)
+	}
+	c.PersonID = getenv("SUNDER_PERSON_ID", "v4")
+	if c.PersonID != "v4" && c.PersonID != "v7" {
+		return c, fmt.Errorf("SUNDER_PERSON_ID must be \"v4\" or \"v7\", got %q", c.PersonID)
 	}
 	if c.AuditSealExternal && c.AuditSealing == "sync" {
 		return c, fmt.Errorf("SUNDER_AUDIT_SEAL_EXTERNAL is meaningless with SUNDER_AUDIT_SEALING=sync (sync mode seals inline and runs no sealer)")

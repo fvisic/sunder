@@ -172,6 +172,12 @@ Off unless `SUNDER_FILES_STORAGE` is set. Objects are encrypted client-side of t
 |---|---|---|
 | `SUNDER_SHARES_PUBLIC` | `false` | When true, `GET /v1/shares/{uuid}` needs no credential (the UUID is the bearer) for cross-org partners. Default requires any valid client credential. Turning it on logs a startup warning: it exposes a credential-less read surface, rate-limited per IP via `SUNDER_API_CLIENT_IP_HEADER`. |
 
+## Person id shape
+
+| Variable | Default | Values | Notes |
+|---|---|---|---|
+| `SUNDER_PERSON_ID` | `v4` | `v4` \| `v7` | Shape of the internal `persons.id`: `v4` random, `v7` time-ordered (RFC 9562). It never leaves the database - the pseudonym you see is the CID - but the `person_tokens` primary key starts with it, so `v7` gives bulk imports append-like index inserts. Both are `uuid`; switching on a populated vault is safe and affects only rows inserted afterwards. Measured in the benchmark README under "Person id shape". |
+
 ## Setting variables
 
 Minimal viable process - just the required variable:

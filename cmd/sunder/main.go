@@ -91,6 +91,7 @@ func run(cmd string, args []string) error {
 	audit.SetMode(cfg.AuditSealing)
 	audit.SetReadsMode(cfg.AuditReads)
 	audit.SetStaleUnsealedBound(cfg.AuditStaleUnsealed)
+	crypto.SetPersonIDShape(cfg.PersonID)
 	st, err := store.New(ctx, cfg.DBURL)
 	if err != nil {
 		return err

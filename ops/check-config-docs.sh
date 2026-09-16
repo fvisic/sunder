@@ -5,9 +5,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Derived from the TREE, not from a list of files: the list this used to
+# name (config.go, the two mains, audit, api) missed a variable read with a
+# bare os.Getenv from internal/crypto - documented nowhere, invisible to this
+# guard, and it passed. Non-test Go under internal/, cmd/ and the bulk
+# loader; a name ending in "_" is a documented prefix (PLAYGROUND_CRED_<ROLE>),
+# not a variable.
 vars=$(grep -rhoE '"(SUNDER|PLAYGROUND)_[A-Z0-9_]+"' \
-        internal/config/config.go cmd/playground/main.go cmd/sunder/main.go internal/audit internal/api \
-        2>/dev/null | tr -d '"' | sort -u)
+        --include='*.go' --exclude='*_test.go' internal cmd benchmark/bulkload \
+        2>/dev/null | tr -d '"' | grep -v '_$' | sort -u)
 
 missing=0
 for v in $vars; do

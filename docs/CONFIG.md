@@ -326,6 +326,12 @@ The recovery key and the shares are never written to disk. Give each share
 to a SEPARATE custodian - five shares in one vault is 1-of-1 in a costume.
 `recovery.bundle` holds only ciphertext and is safe to back up.
 
+## Person id shape
+
+| Variable | Default | Values | Notes |
+|---|---|---|---|
+| `SUNDER_PERSON_ID` | `v4` | `v4` \| `v7` | The shape of `persons.id`, the internal key every person-linked table hangs off. It reaches no response, SDK, export or mail (the exposed pseudonym is the CID), but the `person_tokens` primary key starts with it, so its shape decides whether bulk inserts land on a random B-tree page (`v4`, RFC 9562 random) or at the right edge of the index (`v7`, 48-bit unix-millisecond prefix then randomness). Both are `uuid` to Postgres; mixing shapes in one vault is harmless, and the locality gain applies only to rows inserted after the switch. Read once at startup by `serve`, `import` and `benchmark/bulkload`. **Measured:** see `benchmark/README.md`, "Person id shape". |
+
 ## PostgreSQL sizing (P4.5)
 
 Stock Postgres defaults (128 MB `shared_buffers`) measure the defaults,
