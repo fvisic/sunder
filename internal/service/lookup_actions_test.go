@@ -239,6 +239,15 @@ func TestSplitLookupActionsBucketMultiplier(t *testing.T) {
 		wantSplit  = 8 // the same two, once per lookup form
 	)
 
+	// The multiplier is a property of bucketed reads - under
+	// SUNDER_AUDIT_READS=chained every lookup is one chain row and no bucket
+	// is ever written, so the measurement would be vacuous. The CI matrix
+	// runs both modes; pin the one this test is about rather than letting a
+	// global the test did not set decide whether it measures anything.
+	oldMode := audit.ReadsMode()
+	audit.SetReadsMode(audit.ReadsBucketed)
+	t.Cleanup(func() { audit.SetReadsMode(oldMode) })
+
 	// hours reports how many distinct bucket hours the traffic landed in.
 	// A run straddling an hour boundary doubles rows for reasons that have
 	// nothing to do with the split, and would fail the assertion below.
@@ -299,7 +308,7 @@ func TestSplitLookupActionsBucketMultiplier(t *testing.T) {
 
 	if before == 0 {
 		t.Fatal("no read buckets were written - the measurement is vacuous " +
-			"(is SUNDER_AUDIT_READS set to chained in this environment?)")
+			"(read events are not reaching audit_read_buckets under bucketed mode)")
 	}
 	if beforeHours != 1 || afterHours != 1 {
 		t.Skipf("the run straddled an hour boundary (%d and %d distinct hours), which "+
