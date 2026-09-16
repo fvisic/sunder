@@ -330,7 +330,10 @@ func (c *Contacts) registerTx(ctx context.Context, client *auth.Client, emailSet
 	}
 
 	if !found {
-		personID = newUUID()
+		var perr error
+		if personID, perr = crypto.NewPersonID(); perr != nil {
+			return "", perr
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID); err != nil {
 			return "", err
 		}

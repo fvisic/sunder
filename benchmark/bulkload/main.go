@@ -150,7 +150,7 @@ func loadBatch(ctx context.Context, pool *pgxpool.Pool, tok *crypto.Tokenizer,
 	tokens := make([][]any, 0, n*2)
 
 	for i := lo; i < hi; i++ {
-		pid, err := newUUID()
+		pid, err := crypto.NewPersonID()
 		if err != nil {
 			return err
 		}

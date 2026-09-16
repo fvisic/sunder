@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16
+    image: postgres:18
     # Stock Postgres ships with 128 MB shared_buffers - a footgun the 26.8M
     # scale test paid for (P4.5). These values suit a small host (2-4 GB
     # for the database); size shared_buffers to ~25% of the RAM you give

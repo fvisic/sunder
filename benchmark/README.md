@@ -505,7 +505,7 @@ CRED=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client cr
 # 2. Databunker on its own PostgreSQL 16
 docker network create bench-net
 docker run -d --name bench-pg --network bench-net \
-  -e POSTGRES_PASSWORD=benchpass postgres:16
+  -e POSTGRES_PASSWORD=benchpass postgres:18
 docker exec bench-pg psql -U postgres -c "CREATE DATABASE databunkerdb"
 MK=$(python3 -c "import secrets;print(secrets.token_hex(24))")
 docker run --rm --network bench-net -e PGSSLMODE=disable -e DATABUNKER_MASTERKEY=$MK \

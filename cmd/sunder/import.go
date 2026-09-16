@@ -321,7 +321,7 @@ func importCmd(ctx context.Context, cfg config.Config, st *store.Store, args []s
 			row.suffixTok = st2
 		}
 		var err error
-		if row.pid, err = newUUIDStr(); err != nil {
+		if row.pid, err = crypto.NewPersonID(); err != nil {
 			return importRow{}, err
 		}
 		if row.cid, err = crypto.NewCID(); err != nil {
