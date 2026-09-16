@@ -1,0 +1,9 @@
+[00:55:07] generating 1000000 contacts
+[00:55:11] fixture:  1000000 lines,  96M
+[00:55:48] r1-v4: 30.2s = 33113 rows/s, WAL 1934 MB, pkey after load 415 MB
+[00:56:09] r1-v7: 17.9s = 55866 rows/s, WAL 1923 MB, pkey after load 413 MB
+[00:56:37] r2-v4: 25.6s = 39062 rows/s, WAL 1934 MB, pkey after load 415 MB
+[00:56:57] r2-v7: 17.5s = 57143 rows/s, WAL 1925 MB, pkey after load 412 MB
+[00:57:28] r3-v4: 27.9s = 35842 rows/s, WAL 1937 MB, pkey after load 415 MB
+[00:57:52] r3-v7: 19.2s = 52083 rows/s, WAL 1925 MB, pkey after load 413 MB
+[00:57:53] done: benchmark/personid/results/B-tight-1M

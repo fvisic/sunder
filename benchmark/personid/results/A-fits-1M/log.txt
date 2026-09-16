@@ -1,0 +1,9 @@
+[00:53:24] generating 1000000 contacts
+[00:53:28] fixture:  1000000 lines,  97M
+[00:53:51] r1-v4: 18.7s = 53476 rows/s, WAL 1934 MB, pkey after load 416 MB
+[00:54:06] r1-v7: 12.3s = 81301 rows/s, WAL 1922 MB, pkey after load 413 MB
+[00:54:22] r2-v4: 13.8s = 72464 rows/s, WAL 1934 MB, pkey after load 415 MB
+[00:54:36] r2-v7: 11.6s = 86207 rows/s, WAL 1923 MB, pkey after load 413 MB
+[00:54:51] r3-v4: 12.6s = 79365 rows/s, WAL 1934 MB, pkey after load 415 MB
+[00:55:05] r3-v7: 11.1s = 90090 rows/s, WAL 1925 MB, pkey after load 411 MB
+[00:55:05] done: benchmark/personid/results/A-fits-1M

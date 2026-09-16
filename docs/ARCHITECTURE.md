@@ -17,7 +17,7 @@ with its own credentials, scope, allowed actions and purposes.
  │  store/     pgx + migrations │
  └──────────────┬───────────────┘
                 ▼
-           PostgreSQL 16
+           PostgreSQL 18
 ```
 
 ## Packages

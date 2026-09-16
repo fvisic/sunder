@@ -12,7 +12,7 @@
 services:
   # --- EU jurisdiction -------------------------------------------------------
   eu-postgres:
-    image: postgres:16
+    image: postgres:18
     environment:
       POSTGRES_DB: sunder
       POSTGRES_USER: sunder
@@ -48,7 +48,7 @@ services:
 
   # --- US jurisdiction -------------------------------------------------------
   us-postgres:
-    image: postgres:16
+    image: postgres:18
     environment:
       POSTGRES_DB: sunder
       POSTGRES_USER: sunder

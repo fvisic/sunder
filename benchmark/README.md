@@ -199,6 +199,48 @@ overhead. Crypto is 4% - the parallelisation steps the first draft of Phase
 11.3 planned would have been building the wrong thing, which is what
 measuring first is for.
 
+## Person id shape (2026-09-17, laptop, memory-bounded Postgres): v7 pays where the primary key outgrows cache
+
+The import section above ends on a decay - -26% per 10x - and names its
+cause: the `person_tokens` primary key starts with `persons.id`, a random
+UUID, so every insert lands on a random B-tree page. `SUNDER_PERSON_ID=v7`
+(RFC 9562, 48-bit unix-millisecond prefix) is the direct test of that claim.
+Measured with `benchmark/personid/measure.sh`: `sunder import -offline
+-parallel 8`, 1,000,000 rows of identical bytes for both variants, a fresh
+database per run, variants interleaved v4 v7 v4 v7 v4 v7, median of three,
+every raw run kept under `benchmark/personid/results/`. The Postgres
+container has a **bounded memory budget**, so the index-to-RAM ratio is the
+parameter under test rather than whatever the host has.
+
+| condition | v4 (random) rows/s | v7 (time-ordered) rows/s | v7 / v4 | WAL, both | pkey size, both |
+|---|---|---|---|---|---|
+| A: fits - 6 GB container, `shared_buffers` 1.5 GB (pkey 415 MB) | 72,464 (53,476 / 72,464 / 79,365) | 86,207 (81,301 / 86,207 / 90,090) | **1.19x** | 1.93 GB | 415 vs 413 MB |
+| B: outgrows - 1 GB container, `shared_buffers` 256 MB (same pkey) | 35,842 (33,113 / 39,062 / 35,842) | 55,866 (55,866 / 57,143 / 52,083) | **1.56x** | 1.93 GB | 415 vs 413 MB |
+
+What the deterministic columns say, before the rates: **WAL and relation
+sizes are identical across variants** (within 0.5%), so v7 writes no fewer
+bytes and builds no smaller index - the whole difference is *where* the
+inserts land. That is exactly the locality claim, and it rules out the
+alternatives (less WAL, less bloat) that would have pointed elsewhere.
+
+Read the two conditions together: when the primary key fits comfortably in
+`shared_buffers`, random inserts cost about a fifth extra; when it does not,
+they cost more than half again, and the v7 advantage grows with exactly the
+ratio the 10M/100M decay was blamed on. Condition A also shows a warm-up
+trend across rounds (both variants climb round over round, v4 more) - the
+median absorbs it, but that is why there are three rounds and why the raw
+values are printed. Condition B is flat across rounds for both variants.
+
+Conditions to quote with these numbers: Apple Silicon laptop, Docker VM with
+6 CPUs, PostgreSQL 18.6 in a container, Go 1.26, rev `23deb7a`. The
+absolute rows/s are NOT comparable with the reference-server rows above
+(different CPU, different worker count, 1M rows); the ratios and the
+size/WAL equality are the result. The same protocol at 10M on the reference
+server, with `shared_buffers` shrunk to reproduce a 100M-scale ratio, is the
+remaining run - the harness takes `ROWS`, `PG_MEM` and `SHARED_BUFFERS` for
+exactly that. Every measurement above this section was taken under v4, the
+default.
+
 ## v0.5.0 re-measurement (2026-08-27, laptop): the second review cost nothing
 
 The remediation for the second external review added roughly a thousand

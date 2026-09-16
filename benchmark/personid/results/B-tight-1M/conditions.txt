@@ -1,0 +1,6 @@
+rev=23deb7a-dirty rows=1000000 repeats=3 parallel=8
+pg_image=postgres:18 pg_mem=1g shared_buffers=256MB
+host=Darwin 25.6.0 arm64 go=go1.26.7
+docker=6 cpus, 6208868352 bytes VM
+shared_buffers (effective): 256MB
+PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit

@@ -27,7 +27,7 @@ sequenceDiagram
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-This starts `postgres:16` with the tuned flags already baked into the
+This starts `postgres:18` with the tuned flags already baked into the
 compose command (`shared_buffers=512MB`, `effective_cache_size=1536MB`,
 `max_wal_size=4GB`, `random_page_cost=1.1` - sized for a 2-4 GB host, see
 [Postgres sizing](postgres-sizing.md)), waits for `pg_isready`, then starts

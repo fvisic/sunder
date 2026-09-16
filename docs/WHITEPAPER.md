@@ -301,7 +301,7 @@ Wallet principles", never "certified".
 ## 5. Deployment model
 
 One instance per organisation: a single stateless Go binary in front of
-PostgreSQL 16.
+PostgreSQL 18.
 
 There is no multi-tenant mode, and that is a decision rather than a missing
 feature. The threat motivating the entire design is the existence of one

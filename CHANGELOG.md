@@ -4,6 +4,23 @@ All notable changes to Sunder. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+### `SUNDER_PERSON_ID=v7`: time-ordered person ids, measured
+The internal `persons.id` can now be minted as RFC 9562 v7 (48-bit
+millisecond prefix) instead of random v4. It never leaves the database - the
+pseudonym is still the CID - but the `person_tokens` primary key starts with
+it, and the import section's -26%-per-10x decay was blamed on exactly that
+key losing insert locality. Measured on 1M rows, interleaved, median of 3:
+**1.19x** import throughput when the key fits in `shared_buffers`, **1.56x**
+when it does not, with WAL and index sizes identical - the gain is where the
+inserts land, nothing else. Default stays `v4`; a typo is refused at startup;
+switching on a populated vault is safe and affects only new rows. Also:
+`ops/check-config-docs.sh` now derives its variable set from the tree
+instead of a file list (it had missed this variable, and immediately found
+`PLAYGROUND_WEBHOOK_SECRET` undocumented too), the Docker/CI/example stacks
+run PostgreSQL 18, and `benchmark/personid/measure.sh` is the reusable
+A/B harness (bounded-memory container, fresh database per run, WAL and
+relation sizes recorded before any rate).
+
 ### Import: 41x, measured end to end (273 -> 11,235 rows/s at 10M+ scale)
 Three shipped changes and one mode. The dedup probe names the partial unique
 index's predicate - the planner was sequential-scanning ALL of person_tokens

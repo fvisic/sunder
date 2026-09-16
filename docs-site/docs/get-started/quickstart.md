@@ -8,7 +8,7 @@ minutes, on your own machine.
 
 ```mermaid
 flowchart TD
-    Compose["docker compose up --build -d"] -- "starts" --> PG["postgres:16 (loopback :5432)"]
+    Compose["docker compose up --build -d"] -- "starts" --> PG["postgres:18 (loopback :5432)"]
     Compose -- "starts" --> Svc["sunder service (loopback :8080)"]
     Svc -- "depends_on: service_healthy" --> PG
     Boot["/sunder bootstrap"] -- "migrates schema + generates keys in" --> PG

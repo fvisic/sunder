@@ -1,0 +1,7 @@
+round	variant	seconds	rows_per_s	wal_mb	pkey_mb_after_load	pkey_mb_after_vacuum	tokens_heap_mb	ident_uq_mb	search_idx_mb	cids_pkey_mb
+1	v4	30.2	33113	1934	415	415	384	182	7	63
+1	v7	17.9	55866	1923	413	413	384	182	7	62
+2	v4	25.6	39062	1934	415	415	384	182	7	63
+2	v7	17.5	57143	1925	412	412	384	182	7	62
+3	v4	27.9	35842	1937	415	415	384	182	7	63
+3	v7	19.2	52083	1925	413	413	384	182	7	62
