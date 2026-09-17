@@ -12,7 +12,10 @@ it, and the import section's -26%-per-10x decay was blamed on exactly that
 key losing insert locality. Measured on 1M rows, interleaved, median of 3:
 **1.19x** import throughput when the key fits in `shared_buffers`, **1.56x**
 when it does not, with WAL and index sizes identical - the gain is where the
-inserts land, nothing else. Default stays `v4`; a typo is refused at startup;
+inserts land, nothing else. (The 10M interleaved server matrix, recovered from
+the bench host and now in `benchmark/personid/results/server-10M/`, puts a
+bigint identity key a further 1.18x ahead of v7 with 8% off the largest index -
+an open decision coupled to the Phase 9 schema reset, not a shipped option.) Default stays `v4`; a typo is refused at startup;
 switching on a populated vault is safe and affects only new rows. Also:
 `ops/check-config-docs.sh` now derives its variable set from the tree
 instead of a file list (it had missed this variable, and immediately found

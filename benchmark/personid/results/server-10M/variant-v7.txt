@@ -1,0 +1,26 @@
+=== variant v7: fresh stack, 10000000 rows ===
+
+--- offline import, 10000000 rows, parallel=12 ---
+import: exit=0 wall=1343s -> 7446 rows/s incl. index rebuild
+import done: 10000000 imported, 0 skipped as existing, 0 in-file duplicates, 10000000 lines, 19m16.042s
+timing: crypto+read 7m4.137s (3%), database 3h43m30.841s (97%)
+timing: db = copy 7m2.889s + dedup-match 6m44.577s + inserts 3h28m2.852s + commit 1m40.507s
+offline mode: index rebuilt in 1m9s
+offline mode: index rebuilt in 1m55s
+10000000|70000000|23 GB
+
+--- single instance (18090) ---
+op       c    rps       p50      p95      p99   errors
+write    8        387.2     14.74    52.97    96.61        0
+lookup   8       1202.7      5.48    14.60    25.56        0
+read     8        893.2      6.34    23.49    47.97        0
+write    32       599.1     41.55   132.04   179.88        0
+lookup   32      1139.9     22.84    65.41    95.02        0
+read     32      1980.6     14.09    32.15    45.26        0
+
+--- three instances (18090/18081/18082), c=8 EACH, concurrently ---
+write    3x c=8: TOTAL      782 rps  errors 0  worst p99  142.1 ms
+lookup   3x c=8: TOTAL     1595 rps  errors 0  worst p99   71.5 ms
+read     3x c=8: TOTAL     2292 rps  errors 0  worst p99   74.0 ms
+
+done 2026-08-31T16:09:07+02:00

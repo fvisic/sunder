@@ -1,0 +1,18 @@
+=== variant v4: fresh stack, 10000000 rows ===
+(SKIP_IMPORT=1: reusing the standing dataset, benches only)
+
+--- single instance (18090) ---
+op       c    rps       p50      p95      p99   errors
+write    8        221.0     23.15    96.36   228.48        0
+lookup   8        601.1      7.30    42.68    93.73        0
+read     8        714.9      7.54    33.05    66.69        0
+write    32       245.0     98.22   364.68   575.59        0
+lookup   32       714.1     26.98   133.53   274.94        0
+read     32      1012.3     22.97    84.22   120.76        0
+
+--- three instances (18090/18081/18082), c=8 EACH, concurrently ---
+write    3x c=8: TOTAL      351 rps  errors 0  worst p99  295.4 ms
+lookup   3x c=8: TOTAL      938 rps  errors 0  worst p99  176.1 ms
+read     3x c=8: TOTAL      935 rps  errors 0  worst p99  139.9 ms
+
+done 2026-08-31T15:43:16+02:00

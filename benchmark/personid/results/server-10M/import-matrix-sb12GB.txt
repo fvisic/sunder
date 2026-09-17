@@ -1,0 +1,117 @@
+import matrix: rounds=3 n=10000000 shared_buffers=12GB interleaved v7,bigint
+
+=== round 1  variant v7  ===
+TOTAL exit=0 wall=1293s  rows/s=7733  WAL=74.47GB
+  import done: 10000000 imported, 0 skipped as existing, 0 in-file duplicates, 10000000 lines, 18m15.942s
+  timing: crypto+read 7m10.302s (3%), database 3h31m36.398s (97%)
+  timing: db = copy 6m43.735s + dedup-match 8m46.819s + inserts 3h14m28.862s + commit 1m36.964s
+  offline mode: index rebuilt in 1m18s
+  offline mode: index rebuilt in 1m57s
+  sizes after load:
+    person_tokens|9229 MB
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|9782 MB
+    person_tokens_search_idx|2641 MB
+    persons|498 MB
+    persons_pkey|340 MB
+  VACUUM: 12s; sizes after vacuum:
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|9782 MB
+    person_tokens_search_idx|2641 MB
+
+=== round 1  variant bigint  ===
+TOTAL exit=0 wall=1087s  rows/s=9199  WAL=70.96GB
+  import done: 10000000 imported, 0 skipped as existing, 0 in-file duplicates, 10000000 lines, 15m11.638s
+  timing: crypto+read 9m38.653s (5%), database 2h52m17.717s (95%)
+  timing: db = copy 5m21.619s + dedup-match 8m35.9s + inserts 2h36m49.507s + commit 1m30.662s
+  offline mode: index rebuilt in 1m1s
+  offline mode: index rebuilt in 1m53s
+  sizes after load:
+    person_tokens|8724 MB
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|8977 MB
+    person_tokens_search_idx|2641 MB
+    persons|422 MB
+    persons_pkey|250 MB
+  VACUUM: 17s; sizes after vacuum:
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|8977 MB
+    person_tokens_search_idx|2641 MB
+
+=== round 2  variant v7  ===
+TOTAL exit=0 wall=1040s  rows/s=9615  WAL=73.89GB
+  import done: 10000000 imported, 0 skipped as existing, 0 in-file duplicates, 10000000 lines, 14m39.042s
+  timing: crypto+read 5m34.309s (3%), database 2h49m56.579s (97%)
+  timing: db = copy 5m40.075s + dedup-match 8m35.945s + inserts 2h34m26.983s + commit 1m13.557s
+  offline mode: index rebuilt in 58s
+  offline mode: index rebuilt in 1m41s
+  sizes after load:
+    person_tokens|9229 MB
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|9790 MB
+    person_tokens_search_idx|2641 MB
+    persons|498 MB
+    persons_pkey|343 MB
+  VACUUM: 14s; sizes after vacuum:
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|9790 MB
+    person_tokens_search_idx|2641 MB
+
+=== round 2  variant bigint  ===
+TOTAL exit=0 wall=883s  rows/s=11325  WAL=70.44GB
+  import done: 10000000 imported, 0 skipped as existing, 0 in-file duplicates, 10000000 lines, 11m52.003s
+  timing: crypto+read 7m31.374s (5%), database 2h14m33.833s (95%)
+  timing: db = copy 4m26.46s + dedup-match 8m33.047s + inserts 2h0m33.204s + commit 1m1.102s
+  offline mode: index rebuilt in 1m4s
+  offline mode: index rebuilt in 1m46s
+  sizes after load:
+    person_tokens|8723 MB
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|8973 MB
+    person_tokens_search_idx|2641 MB
+    persons|422 MB
+    persons_pkey|248 MB
+  VACUUM: 13s; sizes after vacuum:
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|8973 MB
+    person_tokens_search_idx|2641 MB
+
+=== round 3  variant v7  ===
+TOTAL exit=0 wall=894s  rows/s=11185  WAL=73.75GB
+  import done: 10000000 imported, 0 skipped as existing, 0 in-file duplicates, 10000000 lines, 12m10.208s
+  timing: crypto+read 5m16.456s (4%), database 2h20m28.063s (96%)
+  timing: db = copy 5m19.797s + dedup-match 8m26.879s + inserts 2h5m44.765s + commit 56.61s
+  offline mode: index rebuilt in 1m5s
+  offline mode: index rebuilt in 1m37s
+  sizes after load:
+    person_tokens|9229 MB
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|9802 MB
+    person_tokens_search_idx|2641 MB
+    persons|498 MB
+    persons_pkey|347 MB
+  VACUUM: 18s; sizes after vacuum:
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|9802 MB
+    person_tokens_search_idx|2641 MB
+
+=== round 3  variant bigint  ===
+TOTAL exit=0 wall=871s  rows/s=11481  WAL=70.63GB
+  import done: 10000000 imported, 0 skipped as existing, 0 in-file duplicates, 10000000 lines, 11m47.934s
+  timing: crypto+read 7m28.228s (5%), database 2h13m45.429s (95%)
+  timing: db = copy 4m14.843s + dedup-match 8m24.648s + inserts 2h0m7.378s + commit 58.547s
+  offline mode: index rebuilt in 1m0s
+  offline mode: index rebuilt in 1m42s
+  sizes after load:
+    person_tokens|8723 MB
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|8985 MB
+    person_tokens_search_idx|2641 MB
+    persons|422 MB
+    persons_pkey|245 MB
+  VACUUM: 12s; sizes after vacuum:
+    person_tokens_ident_uq|1823 MB
+    person_tokens_pkey|8985 MB
+    person_tokens_search_idx|2641 MB
+
+ALL DONE 2026-08-31T19:08:40+02:00

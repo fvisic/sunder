@@ -1,0 +1,26 @@
+=== variant bigint-pg18: fresh stack, 10000000 rows ===
+
+--- offline import, 10000000 rows, parallel=12 ---
+import: exit=0 wall=1329s -> 7524 rows/s incl. index rebuild
+import done: 10000000 imported, 0 skipped as existing, 0 in-file duplicates, 10000000 lines, 19m7.109s
+timing: crypto+read 9m53.846s (4%), database 3h39m10.003s (96%)
+timing: db = copy 5m47.915s + dedup-match 8m58.332s + inserts 3h22m30.775s + commit 1m52.965s
+offline mode: index rebuilt in 1m5s
+offline mode: index rebuilt in 1m56s
+10000000|70000000|22 GB
+
+--- single instance (18090) ---
+op       c    rps       p50      p95      p99   errors
+write    8        209.1     27.09   103.40   177.20        0
+lookup   8        490.9     10.36    49.00    87.87        0
+read     8        458.0     11.57    48.03    93.03        0
+write    32       371.8     70.17   202.25   254.64        0
+lookup   32       683.3     31.49   144.56   246.01        0
+read     32      1025.0     24.61    79.90   108.87        0
+
+--- three instances (18090/18081/18082), c=8 EACH, concurrently ---
+write    3x c=8: TOTAL      462 rps  errors 0  worst p99  242.0 ms
+lookup   3x c=8: TOTAL     1094 rps  errors 0  worst p99  129.8 ms
+read     3x c=8: TOTAL     1626 rps  errors 0  worst p99   77.9 ms
+
+done 2026-08-31T17:12:43+02:00

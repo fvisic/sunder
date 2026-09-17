@@ -1,0 +1,34 @@
+== import matrix, shared_buffers=12GB (index fits)
+  bigint   runs=3  wall median=883s (871/883/1087)  rows/s median=11325  WAL median=70.6GB
+      person_tokens              8723 MB
+      person_tokens_ident_uq     1823 MB
+      person_tokens_pkey         8985 MB
+      person_tokens_search_idx   2641 MB
+      persons                    422 MB
+      persons_pkey               245 MB
+  v7       runs=3  wall median=1040s (894/1040/1293)  rows/s median=9615  WAL median=73.9GB
+      person_tokens              9229 MB
+      person_tokens_ident_uq     1823 MB
+      person_tokens_pkey         9802 MB
+      person_tokens_search_idx   2641 MB
+      persons                    498 MB
+      persons_pkey               347 MB
+
+== low-SB round, shared_buffers=2GB (200M-like ratio)
+  bigint   runs=1  wall median=817s (817)  rows/s median=12239  WAL median=70.2GB
+      person_tokens              8723 MB
+      person_tokens_ident_uq     1823 MB
+      person_tokens_pkey         8985 MB
+      person_tokens_search_idx   2641 MB
+      persons                    422 MB
+      persons_pkey               246 MB
+  v7       runs=1  wall median=909s (909)  rows/s median=11001  WAL median=73.7GB
+      person_tokens              9229 MB
+      person_tokens_ident_uq     1823 MB
+      person_tokens_pkey         9785 MB
+      person_tokens_search_idx   2641 MB
+      persons                    498 MB
+      persons_pkey               344 MB
+
+raw files: import-matrix-sb12GB.txt, import-matrix-sb2GB.txt
+CHAIN DONE 2026-08-31T19:42:17+02:00

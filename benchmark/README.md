@@ -199,47 +199,92 @@ overhead. Crypto is 4% - the parallelisation steps the first draft of Phase
 11.3 planned would have been building the wrong thing, which is what
 measuring first is for.
 
-## Person id shape (2026-09-17, laptop, memory-bounded Postgres): v7 pays where the primary key outgrows cache
+## Person id shape (2026-08-31 server, 2026-09-17 laptop): the key width is worth more than the ordering
 
-The import section above ends on a decay - -26% per 10x - and names its
-cause: the `person_tokens` primary key starts with `persons.id`, a random
-UUID, so every insert lands on a random B-tree page. `SUNDER_PERSON_ID=v7`
-(RFC 9562, 48-bit unix-millisecond prefix) is the direct test of that claim.
-Measured with `benchmark/personid/measure.sh`: `sunder import -offline
--parallel 8`, 1,000,000 rows of identical bytes for both variants, a fresh
-database per run, variants interleaved v4 v7 v4 v7 v4 v7, median of three,
-every raw run kept under `benchmark/personid/results/`. The Postgres
-container has a **bounded memory budget**, so the index-to-RAM ratio is the
-parameter under test rather than whatever the host has.
+The import section above ends on a decay - -26% per 10x - and names its cause:
+the `person_tokens` primary key starts with `persons.id`, a random UUID, so
+every insert lands on a random B-tree page. Two variants attack that: `v7`
+(RFC 9562, 48-bit millisecond prefix - time-ordered, same 16 bytes) and
+**bigint identity** (time-ordered AND half the width, in every index that
+carries a person id).
 
-| condition | v4 (random) rows/s | v7 (time-ordered) rows/s | v7 / v4 | WAL, both | pkey size, both |
-|---|---|---|---|---|---|
-| A: fits - 6 GB container, `shared_buffers` 1.5 GB (pkey 415 MB) | 72,464 (53,476 / 72,464 / 79,365) | 86,207 (81,301 / 86,207 / 90,090) | **1.19x** | 1.93 GB | 415 vs 413 MB |
-| B: outgrows - 1 GB container, `shared_buffers` 256 MB (same pkey) | 35,842 (33,113 / 39,062 / 35,842) | 55,866 (55,866 / 57,143 / 52,083) | **1.56x** | 1.93 GB | 415 vs 413 MB |
+### 10M rows on the reference server: v7 vs bigint
 
-What the deterministic columns say, before the rates: **WAL and relation
-sizes are identical across variants** (within 0.5%), so v7 writes no fewer
-bytes and builds no smaller index - the whole difference is *where* the
-inserts land. That is exactly the locality claim, and it rules out the
-alternatives (less WAL, less bloat) that would have pointed elsewhere.
+`sunder import -offline -parallel 12`, 10,000,000 rows, fresh stack per run,
+interleaved v7/bigint, three rounds, median reported, PostgreSQL 18. Raw runs
+in `benchmark/personid/results/server-10M/` (`import-matrix-sb12GB.txt`,
+`import-matrix-sb2GB.txt`, driven by `import-matrix.sh`).
 
-Read the two conditions together: when the primary key fits comfortably in
-`shared_buffers`, random inserts cost about a fifth extra; when it does not,
-they cost more than half again, and the v7 advantage grows with exactly the
-ratio the 10M/100M decay was blamed on. Condition A also shows a warm-up
-trend across rounds (both variants climb round over round, v4 more) - the
-median absorbs it, but that is why there are three rounds and why the raw
-values are printed. Condition B is flat across rounds for both variants.
+| | v7 (time-ordered uuid) | bigint identity | bigint / v7 |
+|---|---|---|---|
+| rows/s, median of 3 (`shared_buffers` 12 GB) | 9,615 | **11,325** | **1.18x** |
+| wall seconds, the three rounds | 894 / 1040 / 1293 | 871 / 883 / 1087 | bigint wins every round |
+| rows/s, `shared_buffers` 2 GB (1 round) | 11,001 | **12,239** | 1.11x |
+| WAL written | 73.9 GB | 70.6 GB | 0.96x |
+| `person_tokens_pkey` | 9,802 MB | **8,985 MB** | 0.92x |
+| `person_tokens` heap | 9,229 MB | 8,723 MB | 0.95x |
+| `persons_pkey` | 347 MB | **245 MB** | 0.71x |
+| `persons` heap | 498 MB | 422 MB | 0.85x |
+| `person_tokens_ident_uq` | 1,823 MB | 1,823 MB | **1.00x** |
+| `person_tokens_search_idx` | 2,641 MB | 2,641 MB | **1.00x** |
 
-Conditions to quote with these numbers: Apple Silicon laptop, Docker VM with
-6 CPUs, PostgreSQL 18.6 in a container, Go 1.26, rev `23deb7a`. The
-absolute rows/s are NOT comparable with the reference-server rows above
-(different CPU, different worker count, 1M rows); the ratios and the
-size/WAL equality are the result. The same protocol at 10M on the reference
-server, with `shared_buffers` shrunk to reproduce a 100M-scale ratio, is the
-remaining run - the harness takes `ROWS`, `PG_MEM` and `SHARED_BUFFERS` for
-exactly that. Every measurement above this section was taken under v4, the
-default.
+**The last two rows are the control that makes the rest trustworthy.**
+`ident_uq` and `search_idx` are `(kind, token)` - the only two structures here
+that do NOT carry a person id - and they come out byte-identical across
+variants, run after run. Every structure that DOES carry one shrinks by
+roughly the key-width difference. So the size win is the 8-byte key, measured,
+not an artefact of bloat or vacuum timing.
+
+Read the timing honestly: both variants get faster round over round (a
+warm-up trend the interleaving exposes rather than hides), and by round three
+the gap narrows to 871 vs 894 seconds - nearly a tie. The robust statement is
+**bigint won every paired round and every deterministic metric**, not "1.18x
+always".
+
+### 1M rows on a laptop: v4 vs v7
+
+The server matrix never imported `v4` (it was dropped from the product
+question before those rounds), so the default's own baseline was measured
+separately with `benchmark/personid/measure.sh`: 1,000,000 rows of identical
+bytes per variant, fresh database per run, interleaved v4/v7, median of three,
+a Postgres container with a **bounded memory budget** so the index-to-RAM
+ratio is the parameter under test.
+
+| condition | v4 (random) | v7 (time-ordered) | v7 / v4 |
+|---|---|---|---|
+| pkey fits - 6 GB container, `shared_buffers` 1.5 GB | 72,464 rows/s (53,476 / 72,464 / 79,365) | 86,207 rows/s (81,301 / 86,207 / 90,090) | **1.19x** |
+| pkey outgrows it - 1 GB container, `shared_buffers` 256 MB | 35,842 rows/s (33,113 / 39,062 / 35,842) | 55,866 rows/s (55,866 / 57,143 / 52,083) | **1.56x** |
+
+WAL (1.93 GB) and every relation size came out equal across v4 and v7 to
+within 0.5%, which is the point: same bytes, same index, different landing
+places. And the advantage grows as the key outgrows cache - the mechanism the
+10M/100M decay was blamed on. Laptop conditions: Apple Silicon, Docker VM with
+6 CPUs, PostgreSQL 18.6, `-parallel 8`. Those absolute rates are NOT comparable
+with the server rows above; the ratios and the size/WAL equality are the result.
+
+### What is NOT a result
+
+The `variant-*.txt` files in the same directory carry write/lookup/read rps
+cells per variant. They do not decide anything and are kept only as a record:
+two of them (`variant-v4`, `variant-bigint`) ran with `SKIP_IMPORT=1` against
+whatever dataset was standing, so their cells do not describe the shape in
+their own filename; and the cells that did run clean contradict themselves -
+v7 lookup falls from 1,203 rps at c=8 to 1,140 at c=32, which is not physical
+on a read-only path, and the three-instance totals reach only ~1.7x of one
+instance, meaning they measured the server's ceiling rather than the variable.
+`.claude/skills/measure/SKILL.md` exists because of exactly these cells.
+
+### Where this leaves the decision
+
+`SUNDER_PERSON_ID=v7` is shipped, defaults to `v4`, and is free: no schema
+change, no code churn, and it pays 1.19x-1.56x over the default. bigint
+identity pays a further 1.18x on top at 10M plus 8% off the biggest index and
+29% off `persons_pkey`, but it exists only as a source tree on the bench host
+(`~/sunder-bigint-tree`: `persons.id BIGINT GENERATED BY DEFAULT AS IDENTITY`,
+every `person_id` column and ~132 Go call sites converted, 6 migrations
+touched) and is not on any branch. It is naturally coupled to the Phase 9
+schema reset. Every number above this section, and every number in the import
+section, was measured under `v4`.
 
 ## v0.5.0 re-measurement (2026-08-27, laptop): the second review cost nothing
 
