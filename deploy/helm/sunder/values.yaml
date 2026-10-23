@@ -201,6 +201,12 @@ retention:
 audit:
   sealing: ""        # SUNDER_AUDIT_SEALING: async (default) | sync
   reads: ""          # SUNDER_AUDIT_READS: bucketed (default) | chained
+  # Record lookups as one action or three (lookup / lookup.fuzzy /
+  # lookup.suffix). Splitting is what lets an auditor tell exact-identifier
+  # resolution from phonetic or partial search once the per-event detail has
+  # been dropped by bucketing. Worst case it triples read-bucket rows for a
+  # client that uses all three forms in one hour - measured, see docs/CONFIG.md.
+  lookupActions: ""  # SUNDER_AUDIT_LOOKUP_ACTIONS: single (default) | split
   sealInterval: ""   # SUNDER_AUDIT_SEAL_INTERVAL, e.g. "200ms"
   sealDelay: ""      # SUNDER_AUDIT_SEAL_DELAY, e.g. "2s"
   sealBatch: ""      # SUNDER_AUDIT_SEAL_BATCH, e.g. "5000"
@@ -233,3 +239,9 @@ resources:
 startupProbe:
   periodSeconds: 10
   failureThreshold: 60   # 10 minutes
+
+# A pprof listener for diagnosing a stall. EMPTY in production: the endpoint
+# has no authentication and exposes stack traces, heap contents and the
+# command line. Set it to a pod-local address (e.g. "127.0.0.1:6060") and
+# reach it with `kubectl port-forward`, never through a Service.
+debugAddr: ""        # SUNDER_DEBUG_ADDR

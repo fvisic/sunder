@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -84,6 +85,20 @@ type Config struct {
 	// docs/THREAT-MODEL.md - tamper evidence for reads drops to hour
 	// granularity under "bucketed".
 	AuditReads string // SUNDER_AUDIT_READS: "bucketed" (default) or "chained"
+	// AuditLookupActions splits the single `lookup` audit action into
+	// lookup / lookup.fuzzy / lookup.suffix (SUNDER_AUDIT_LOOKUP_ACTIONS:
+	// "single" by default, "split" to enable). Under bucketed reads the
+	// per-event Detail is dropped, so the action is the only field that
+	// survives to the sealed hour - splitting is what lets an auditor tell
+	// exact-identifier resolution from phonetic or partial search. It costs
+	// bucket rows; see docs/CONFIG.md for the measured multiplier.
+	AuditLookupActions string
+	// DebugAddr, when set, starts a net/http/pprof listener on that address
+	// (SUNDER_DEBUG_ADDR, e.g. "127.0.0.1:6060"). Empty = off, which is the
+	// only correct production value: pprof exposes stack traces, heap
+	// contents and the command line, and its profile endpoints burn CPU on
+	// request.
+	DebugAddr string
 
 	// Derived search indexes (Phase 3, F1/F2). OFF by default: each one
 	// widens the search surface and adds token rows per contact, and an
@@ -394,6 +409,16 @@ func FromEnvNoDB() (Config, error) {
 	c.AuditReads = getenv("SUNDER_AUDIT_READS", "bucketed")
 	if c.AuditReads != "bucketed" && c.AuditReads != "chained" {
 		return c, fmt.Errorf("SUNDER_AUDIT_READS must be \"bucketed\" or \"chained\", got %q", c.AuditReads)
+	}
+	c.DebugAddr = getenv("SUNDER_DEBUG_ADDR", "")
+	if c.DebugAddr != "" {
+		if _, _, err := net.SplitHostPort(c.DebugAddr); err != nil {
+			return c, fmt.Errorf("SUNDER_DEBUG_ADDR must be host:port, got %q: %v", c.DebugAddr, err)
+		}
+	}
+	c.AuditLookupActions = getenv("SUNDER_AUDIT_LOOKUP_ACTIONS", "single")
+	if c.AuditLookupActions != "single" && c.AuditLookupActions != "split" {
+		return c, fmt.Errorf("SUNDER_AUDIT_LOOKUP_ACTIONS must be \"single\" or \"split\", got %q", c.AuditLookupActions)
 	}
 	if c.AuditSealExternal && c.AuditSealing == "sync" {
 		return c, fmt.Errorf("SUNDER_AUDIT_SEAL_EXTERNAL is meaningless with SUNDER_AUDIT_SEALING=sync (sync mode seals inline and runs no sealer)")

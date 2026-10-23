@@ -6,13 +6,16 @@ import (
 	"path/filepath"
 	"testing"
 
+	"fmt"
 	"github.com/fvisic/sunder/internal/api"
 	"github.com/fvisic/sunder/internal/audit"
 	"github.com/fvisic/sunder/internal/auth"
 	"github.com/fvisic/sunder/internal/config"
 	"github.com/fvisic/sunder/internal/crypto"
 	"github.com/fvisic/sunder/internal/service"
+	"github.com/fvisic/sunder/internal/store"
 	"github.com/fvisic/sunder/internal/testutil"
+	"strings"
 )
 
 // TestImportCmd drives the supported bulk path end to end: import, verify
@@ -160,7 +163,7 @@ func TestImportBatchRetryOnUniqueRace(t *testing.T) {
 		{pid: "6f000000-0000-4000-8000-000000000002", cid: "CID-AAAAAAAAAAAAAAAAAAAAAAAAA2",
 			emailTok: "tok-same", blob: []byte("b"), keyID: "v1", alg: "aes256gcm"},
 	}
-	if _, _, err := importBatch(ctx, st, "crm", "v1", "v1", "v1", rows); err == nil {
+	if _, _, err := importBatch(ctx, st, "crm", "v1", "v1", "v1", rows, &importTimings{}); err == nil {
 		t.Fatal("a persistent unique conflict must surface after the retry")
 	}
 	// The failed batch imported nothing (whole-batch transactionality).
@@ -177,7 +180,7 @@ func TestImportBatchSurfacesCopyErrors(t *testing.T) {
 	st := testutil.NewDB(t)
 	ctx := context.Background()
 	rows := []importRow{{pid: "not-a-uuid", cid: "CID-X", emailTok: "t", blob: []byte("b"), keyID: "v1", alg: "aes256gcm"}}
-	if _, _, err := importBatch(ctx, st, "crm", "v1", "v1", "v1", rows); err == nil {
+	if _, _, err := importBatch(ctx, st, "crm", "v1", "v1", "v1", rows, &importTimings{}); err == nil {
 		t.Fatal("a malformed staged row must surface, not vanish")
 	}
 }
@@ -505,5 +508,202 @@ func TestImportDedupsAcrossKeyRotation(t *testing.T) {
 	}
 	if persons != 2 {
 		t.Fatalf("mid-rotation re-import must dedup by RETIRING-version tokens too: want 2 persons (1 existing + 1 new), got %d", persons)
+	}
+}
+
+// TestParallelImportMatchesSerialResult pins the property that made the
+// worker fan-out safe to ship: -parallel changes the SPEED of an import and
+// nothing else. Same file, one run serial and one with eight workers over
+// two-row batches (maximum interleaving), into two fresh databases - the
+// resulting persons, token shapes and duplicate accounting must be
+// identical. The file deliberately repeats an identifier with DIFFERENT
+// payloads: first-wins is the semantic that raced when dedup lived in the
+// workers, and this is the test that failed until it moved to the reader.
+func TestParallelImportMatchesSerialResult(t *testing.T) {
+	ctx := context.Background()
+	var lines []string
+	for i := 0; i < 60; i++ {
+		lines = append(lines,
+			fmt.Sprintf(`{"email":"p%d@example.com","name":"Prva Verzija %d"}`, i, i))
+	}
+	// The SAME identifiers again, later in the file, without names: with
+	// first-wins these must all be dropped as in-file duplicates, so every
+	// person keeps a name token. An arbitrary-winner regression loses some.
+	for i := 0; i < 60; i++ {
+		lines = append(lines, fmt.Sprintf(`{"email":"p%d@example.com"}`, i))
+	}
+	f := filepath.Join(t.TempDir(), "same.jsonl")
+	if err := os.WriteFile(f, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	shape := func(st *store.Store, args []string) (persons, nameTokens int64) {
+		cfg := testCfg(t)
+		if err := importCmd(ctx, cfg, st, args); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Pool.QueryRow(ctx, `SELECT
+			(SELECT count(*) FROM persons),
+			(SELECT count(*) FROM person_tokens WHERE kind='name')`,
+		).Scan(&persons, &nameTokens); err != nil {
+			t.Fatal(err)
+		}
+		return persons, nameTokens
+	}
+
+	serialP, serialN := shape(testutil.NewDB(t),
+		[]string{"-file", f, "-scope", "crm", "-parallel", "1"})
+	parP, parN := shape(testutil.NewDB(t),
+		[]string{"-file", f, "-scope", "crm", "-parallel", "8", "-batch", "2"})
+
+	if serialP != 60 || serialN != 60 {
+		t.Fatalf("serial run: want 60 persons with 60 name tokens, got %d/%d", serialP, serialN)
+	}
+	if parP != serialP || parN != serialN {
+		t.Fatalf("-parallel changed the RESULT, not just the speed: serial %d persons/%d name "+
+			"tokens, parallel %d/%d. First-wins dedup has raced back into the workers.",
+			serialP, serialN, parP, parN)
+	}
+}
+
+// TestConcurrentImportsConvergeOnUniqueIdentifiers is the cross-process
+// race: two imports running at once, workers and all, carrying the SAME
+// identifiers. The dedup invariant is enforced by person_tokens_ident_uq
+// plus the 23505 retry in importBatch - scheduling never guarantees it. One
+// person per identifier must come out, with no error surfaced to either
+// operator, exactly as a concurrent API registration is absorbed.
+func TestConcurrentImportsConvergeOnUniqueIdentifiers(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+
+	const n = 120
+	var lines []string
+	for i := 0; i < n; i++ {
+		lines = append(lines, fmt.Sprintf(`{"email":"race%d@example.com","name":"Race %d"}`, i, i))
+	}
+	dir := t.TempDir()
+	fA := filepath.Join(dir, "a.jsonl")
+	fB := filepath.Join(dir, "b.jsonl")
+	for _, f := range []string{fA, fB} {
+		if err := os.WriteFile(f, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	errs := make(chan error, 2)
+	for _, f := range []string{fA, fB} {
+		go func(f string) {
+			errs <- importCmd(ctx, cfg, st, []string{
+				"-file", f, "-scope", "crm", "-parallel", "4", "-batch", "10"})
+		}(f)
+	}
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("a concurrent import surfaced an error the retry should have absorbed: %v", err)
+		}
+	}
+
+	var persons, emailToks int64
+	if err := st.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM persons),
+		(SELECT count(*) FROM person_tokens WHERE kind='email')`,
+	).Scan(&persons, &emailToks); err != nil {
+		t.Fatal(err)
+	}
+	if persons != n || emailToks != n {
+		t.Fatalf("two concurrent imports of the same %d identifiers produced %d persons and "+
+			"%d email tokens - the unique-index-plus-retry path is not converging", n, persons, emailToks)
+	}
+}
+
+// TestOfflineImportRefusesANonEmptyVault. Offline mode's uniqueness argument
+// is "the vault starts empty + the reader dedups the file"; on a non-empty
+// vault that argument is void and running anyway could breed duplicate
+// persons with the unique index down. Refusal is the feature.
+func TestOfflineImportRefusesANonEmptyVault(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+
+	f := filepath.Join(t.TempDir(), "one.jsonl")
+	if err := os.WriteFile(f, []byte(`{"email":"a@example.com"}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm"}); err != nil {
+		t.Fatal(err)
+	}
+	err := importCmd(ctx, cfg, st, []string{"-file", f, "-scope", "crm", "-offline"})
+	if err == nil || !strings.Contains(err.Error(), "EMPTY vault") {
+		t.Fatalf("offline import into a non-empty vault must refuse, got: %v", err)
+	}
+	// And the refusal must not have dropped anything.
+	var n int
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM pg_indexes WHERE indexname IN ('person_tokens_ident_uq','person_tokens_search_idx')`,
+	).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("the refused offline run left %d of 2 secondary indexes standing", n)
+	}
+}
+
+// TestOfflineImportRebuildsAndReprovesUniqueness: the full offline pass.
+// After it, both secondary indexes must exist again, ident_uq must be UNIQUE
+// (the rebuild is what re-proves the dedup invariant), the in-file duplicate
+// must have lost to its first occurrence, and the loaded contacts must carry
+// the same token shapes as an online import.
+func TestOfflineImportRebuildsAndReprovesUniqueness(t *testing.T) {
+	st := testutil.NewDB(t)
+	ctx := context.Background()
+	cfg := testCfg(t)
+
+	f := filepath.Join(t.TempDir(), "off.jsonl")
+	if err := os.WriteFile(f, []byte(`{"email":"ana@example.com","name":"Ana Anic"}
+{"phone":"+385 91 111 2222"}
+{"email":"ana@example.com","name":"Uzurpator"}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importCmd(ctx, cfg, st, []string{
+		"-file", f, "-scope", "crm", "-offline", "-parallel", "4", "-batch", "1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var persons, dup int64
+	if err := st.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM persons),
+		(SELECT count(*) FROM person_tokens WHERE kind='email')`,
+	).Scan(&persons, &dup); err != nil {
+		t.Fatal(err)
+	}
+	if persons != 2 || dup != 1 {
+		t.Fatalf("want 2 persons / 1 email token, got %d/%d", persons, dup)
+	}
+
+	var uniq bool
+	err := st.Pool.QueryRow(ctx, `SELECT indisunique FROM pg_index i
+		 JOIN pg_class c ON c.oid = i.indexrelid
+		WHERE c.relname = 'person_tokens_ident_uq'`).Scan(&uniq)
+	if err != nil {
+		t.Fatalf("ident_uq was not rebuilt: %v", err)
+	}
+	if !uniq {
+		t.Fatal("the rebuilt ident_uq is not UNIQUE - the dedup invariant is unproven and unenforced")
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT true FROM pg_indexes
+		WHERE indexname = 'person_tokens_search_idx'`).Scan(&uniq); err != nil {
+		t.Fatalf("search_idx was not rebuilt: %v", err)
+	}
+	// The duplicate's payload must be the FIRST occurrence's.
+	var nameToks int64
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM person_tokens WHERE kind='name'`).Scan(&nameToks); err != nil {
+		t.Fatal(err)
+	}
+	if nameToks != 1 {
+		t.Fatalf("want exactly the first occurrence's name token, got %d name tokens", nameToks)
 	}
 }

@@ -28,7 +28,7 @@ sequenceDiagram
     Note over Sunder,DB: On a miss, person_id is set to an impossible UUID -<br/>the next query always runs, so "no such person"<br/>and "person exists in another scope" cost identical work.
     Sunder->>DB: SELECT cid FROM cids WHERE person_id=? AND scope=client.scope
     DB-->>Sunder: cid, or no rows
-    Sunder->>Sunder: audit.ReadEvent(action=lookup, cid, matched, by) - always, hit or miss
+    Sunder->>Sunder: audit.ReadEvent(action=lookup*, cid, matched, by) - always, hit or miss
     alt matched in caller's own scope
         Sunder-->>Client: 200 {"cid": "CID-..."}
     else no match, or match belongs to another scope only

@@ -803,7 +803,8 @@ func keysCmd(ctx context.Context, cfg config.Config, st *store.Store, args []str
 		pii.Alg = cfg.PIIAlg
 		contacts := &service.Contacts{Pool: st.Pool, Tok: crypto.NewTokenizer(eng), PII: pii, Ring: ring,
 			FuzzyName: cfg.SearchFuzzyName, PhoneSuffix: cfg.SearchPhoneSuffix,
-			VersionsKeep: cfg.VersionsKeep,
+			SplitLookupActions: cfg.AuditLookupActions == "split",
+			VersionsKeep:       cfg.VersionsKeep,
 			// The sweep runs for hours on a large dataset; without this the
 			// operator watches a silent terminal and cannot tell a working
 			// sweep from a hung one.

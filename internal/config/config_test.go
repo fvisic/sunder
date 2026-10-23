@@ -417,3 +417,35 @@ func TestMaxCascadeChildrenConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestAuditLookupActionsValidation. The value decides what the audit trail
+// says a lookup was, so a typo must be a startup failure rather than a
+// silent fallback: an operator who wrote "splt" and got the single-action
+// default would believe the trail distinguished suffix probes when it did
+// not.
+func TestAuditLookupActionsValidation(t *testing.T) {
+	setBase(t)
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AuditLookupActions != "single" {
+		t.Errorf("default must be the unchanged posture, got %q", c.AuditLookupActions)
+	}
+	for _, ok := range []string{"single", "split"} {
+		t.Setenv("SUNDER_AUDIT_LOOKUP_ACTIONS", ok)
+		c, err := FromEnv()
+		if err != nil {
+			t.Fatalf("%q must be accepted: %v", ok, err)
+		}
+		if c.AuditLookupActions != ok {
+			t.Errorf("%q round-tripped as %q", ok, c.AuditLookupActions)
+		}
+	}
+	for _, bad := range []string{"splt", "true", "yes", "SPLIT"} {
+		t.Setenv("SUNDER_AUDIT_LOOKUP_ACTIONS", bad)
+		if _, err := FromEnv(); err == nil {
+			t.Errorf("%q must be refused at startup, not silently defaulted", bad)
+		}
+	}
+}

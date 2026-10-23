@@ -217,6 +217,18 @@ jobs:
           done
       - name: Run feature demo F9 (Shamir, CLI)
         run: SUNDER_EXEC='docker compose -f deploy/docker-compose.yml exec -T sunder /sunder' bash demo/f9-shamir-recovery.sh
+      # escalation.sh needs its own pair of credentials (a notifier scope),
+      # which is why it was never added here - and it then sat broken,
+      # returning 403 at step 2, while docs/API.md pointed readers at it.
+      # Every shipped demo script runs in CI now, and the `demos` check in
+      # ops/check-artifact-coverage.sh fails the build if a new one is added
+      # without a job that executes it.
+      - name: Create escalation demo clients
+        run: |
+          echo "SUNDER_CRED_CRM=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id crm-esc -name CRM -scope crm -actions contacts.register,oti.issue,attributes.read -purposes escalation_notify -rate 1000 | tail -1)" >> "$GITHUB_ENV"
+          echo "SUNDER_CRED_NOTIFIER=$(docker compose -f deploy/docker-compose.yml exec sunder /sunder client create -id notifier -name Notifier -scope notifier -actions oti.verify,attributes.read,consent.manage -purposes escalation_notify -rate 1000 | tail -1)" >> "$GITHUB_ENV"
+      - name: Run delayed-flow demo (escalation)
+        run: bash demo/escalation.sh
       - name: Verify audit chain
         run: docker compose -f deploy/docker-compose.yml exec sunder /sunder verify-audit
 
@@ -284,12 +296,24 @@ jobs:
       - name: Config reference covers every variable
         run: ./ops/check-config-docs.sh
 
+      # VERSION exists so "which build is this?" is one command on a machine
+      # with no git and no toolchain. A version file nobody checks drifts, and
+      # a drifted one answers confidently and wrongly.
+      - name: VERSION, the tag, the SDK manifests and the CHANGELOG agree
+        run: ./ops/check-versions.sh
+
       # The same shape, extended to the artifacts that had NO guard: the Helm
       # chart, the Postman collection, SDK parity across all six languages,
       # and the docs-site mirror of the config reference. v0.5.0 shipped with
       # gaps in three of those four, every one found by a person asking.
       - name: Every feature reaches every artifact
         run: ./ops/check-artifact-coverage.sh
+
+      # sales/ is gitignored, so this is a no-op here by design - it exists so
+      # the same command works locally and at release time, where the deck IS
+      # present. Running it in CI keeps the script itself from bit-rotting.
+      - name: Sales deck figures trace to a measurement
+        run: ./ops/check-sales-deck.sh
 
       - name: Refuse retracted claims
         run: |

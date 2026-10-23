@@ -68,6 +68,10 @@ func main() {
 	if err != nil {
 		die(err)
 	}
+	nameV, err := ring.Newest(ctx, crypto.KeyHMACName)
+	if err != nil {
+		die(err)
+	}
 	kekV, err := ring.Newest(ctx, crypto.KeyPIIKEK)
 	if err != nil {
 		die(err)
@@ -117,7 +121,8 @@ func main() {
 					hi = to
 				}
 				if err := loadBatch(ctx, pool, tok, pii, *scope,
-					emailV, phoneV, kekV, lo, hi); err != nil {
+					emailV, phoneV, nameV, kekV, cfg.SearchFuzzyName,
+					cfg.SearchPhoneSuffix, lo, hi); err != nil {
 					die(fmt.Errorf("worker %d batch %d: %w", w, lo, err))
 				}
 				atomic.AddInt64(&done, int64(hi-lo))
@@ -136,7 +141,8 @@ func main() {
 // streams. COPY is the only way to reach this scale; row-at-a-time INSERT
 // is an order of magnitude slower.
 func loadBatch(ctx context.Context, pool *pgxpool.Pool, tok *crypto.Tokenizer,
-	pii *crypto.PIIBox, scope, emailV, phoneV, kekV string, lo, hi int) error {
+	pii *crypto.PIIBox, scope, emailV, phoneV, nameV, kekV string,
+	fuzzyName, phoneSuffix bool, lo, hi int) error {
 
 	n := hi - lo
 	persons := make([][]any, 0, n)
@@ -174,10 +180,26 @@ func loadBatch(ctx context.Context, pool *pgxpool.Pool, tok *crypto.Tokenizer,
 		if err != nil {
 			return err
 		}
+		// The name is tokenized, not merely stored in the blob. A contact
+		// registered through the API with a name gets a `name` row, and with
+		// the derived indexes on gets `name_phonetic` and `phone_suffix` too;
+		// a loader that wrote only email and phone produced a person the
+		// dedup path and the fuzzy path could not see, and a person_tokens
+		// table roughly a third smaller than the real one - so every scale
+		// measurement taken on it was measuring a lighter table than
+		// production has.
+		name, err := crypto.NormalizeName(fmt.Sprintf("Test Osoba %d", i))
+		if err != nil {
+			return err
+		}
+		nt, err := tok.NameToken(ctx, nameV, name)
+		if err != nil {
+			return err
+		}
 		blob, err := pii.Encrypt(ctx, cid, kekV, map[string]string{
 			"email":        email,
 			"phone":        phone,
-			"name":         fmt.Sprintf("Test Osoba %d", i),
+			"name":         name,
 			"loyalty_tier": []string{"bronze", "silver", "gold"}[i%3],
 			"segment":      fmt.Sprintf("seg-%d", i%50),
 		})
@@ -189,7 +211,24 @@ func loadBatch(ctx context.Context, pool *pgxpool.Pool, tok *crypto.Tokenizer,
 		cids = append(cids, []any{cid, pid, scope, blob, kekV, pii.Algorithm()})
 		tokens = append(tokens,
 			[]any{pid, "email", et, emailV},
-			[]any{pid, "phone", pt, phoneV})
+			[]any{pid, "phone", pt, phoneV},
+			[]any{pid, "name", nt, nameV})
+		if fuzzyName {
+			for _, code := range crypto.PhoneticNameCodes(name) {
+				pht, err := tok.NamePhoneticToken(ctx, nameV, code)
+				if err != nil {
+					return err
+				}
+				tokens = append(tokens, []any{pid, "name_phonetic", pht, nameV})
+			}
+		}
+		if phoneSuffix {
+			st, err := tok.PhoneSuffixToken(ctx, phoneV, crypto.PhoneSuffix(phone))
+			if err != nil {
+				return err
+			}
+			tokens = append(tokens, []any{pid, "phone_suffix", st, phoneV})
+		}
 	}
 
 	conn, err := pool.Acquire(ctx)

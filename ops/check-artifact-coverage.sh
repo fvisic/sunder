@@ -266,8 +266,56 @@ print("  no assignment-style corruption in tests")
 PYEOF2
 
 echo
+echo "== demos: every shipped demo script runs in CI"
+# demo/escalation.sh shipped, was linked from docs/API.md as something a
+# reader can run, and returned 403 at step 2 for however long it had been
+# out of sync with the server - because no job ever executed it. A demo that
+# nothing runs is documentation of a system that may not exist.
+#
+# lib.sh is a sourced helper, not a walkthrough, so it is the one exemption.
+python3 - <<'PYEOF3' || fail=1
+import re, subprocess, sys
+
+EXEMPT = {
+    "lib.sh": "a sourced helper, not a walkthrough - it has no main()",
+}
+
+scripts = sorted(
+    p.split("/")[-1]
+    for p in subprocess.run(["ls"], cwd="demo", capture_output=True, text=True).stdout.split()
+    if p.endswith(".sh")
+)
+ci = open(".github/workflows/ci.yml").read()
+
+missing, exempted = [], []
+for s in scripts:
+    if s in EXEMPT:
+        exempted.append(f"{s} ({EXEMPT[s]})")
+        continue
+    stem = s[:-3]
+    # Either named with its path, or by stem inside a for-loop list.
+    if f"demo/{s}" in ci or re.search(rf"\b{re.escape(stem)}\b", ci):
+        continue
+    missing.append(s)
+
+if not scripts:
+    print("::error::no demo scripts found - this check has stopped checking")
+    sys.exit(1)
+if missing:
+    print("::error::demo scripts that no CI job runs:")
+    for m in missing:
+        print("   demo/" + m)
+    print("  Add a step to the e2e-demo job (with whatever credentials it needs),")
+    print("  or add it to EXEMPT here with the reason it is not runnable.")
+    sys.exit(1)
+print(f"  {len(scripts)} demo script(s), {len(exempted)} exempt with a stated reason, 0 unrun")
+for e in exempted:
+    print("    exempt:", e)
+PYEOF3
+
+echo
 if [ "$fail" -ne 0 ]; then
   echo "::error::artifact coverage check failed - a feature is missing from an artifact that describes it"
   exit 1
 fi
-echo "artifact coverage: helm, postman, sdk parity and the docs mirror all complete"
+echo "artifact coverage: helm, postman, sdk parity, the docs mirror and the demo scripts all complete"

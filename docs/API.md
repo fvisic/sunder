@@ -328,16 +328,36 @@ touched by a registration. `sunder keys list` shows the ring.
 
 ## Audit
 
-Actions `contacts.register`, `scopes.issue`, `attributes.read`, `lookup`
-(hits and misses), `oti.issue` and `oti.verify` append to the hash-chained
-audit log (client, action, CID, purpose/jti - never attribute values or raw
-identifiers). Mutating operations (register, scopes.issue, oti.issue,
-oti.verify, consent, DSR) write their audit record inside the SAME
-transaction as the operation - both commit or neither does. Read
-operations (`attributes.read`, `lookup`) append in their own transaction
-BEFORE the value is released, so an audit failure fails the read closed
-rather than disclosing unaudited data.
-See docs/ARCHITECTURE.md and docs/THREAT-MODEL.md.
+Every operation is audited (client, action, CID, purpose/jti - never
+attribute values or raw identifiers). `action` is a CLOSED SET: every value
+the server can write is registered in `internal/audit/actions.go` with a
+one-line meaning, and a build guard fails when the code writes an action
+nobody registered or the registry describes one nothing writes. So a SIEM
+rule or a retention policy written against `action` has an answer that
+cannot go stale between releases.
+
+Mutating operations (register, scopes.issue, oti.issue, oti.verify, consent,
+DSR) write their audit record inside the SAME transaction as the operation -
+both commit or neither does.
+
+Read operations (`attributes.read`, `lookup*`) are recorded BEFORE the value
+is released, so an audit failure fails the read closed rather than disclosing
+unaudited data. Where that record goes depends on `SUNDER_AUDIT_READS`: under
+`bucketed` (the default since P4.2) it UPSERTs into an hourly bucket that a
+closer later seals into ONE chained row carrying a digest over the hour;
+under `chained` every read is its own chained row. Buckets are per-event
+evidence only for the open hour's contents, not per-event tamper evidence -
+docs/THREAT-MODEL.md states the trade precisely.
+
+Lookups record as the single action `lookup` by default. Setting
+`SUNDER_AUDIT_LOOKUP_ACTIONS=split` separates them into `lookup` (exact
+identifier), `lookup.fuzzy` (widened by phonetic name codes), `lookup.suffix`
+(partial phone-suffix search) and `lookup.suffix.fuzzy` (both wideners at
+once - the widest search this API offers) - worth doing under bucketed reads,
+where the per-event detail is dropped and the action is the only field that
+reaches the auditor. Consumers must then match the `lookup.*` prefix rather
+than the bare string; the cost is at most 4x the read-bucket rows, measured.
+See docs/ARCHITECTURE.md, docs/CONFIG.md and docs/THREAT-MODEL.md.
 
 ## Operational notes
 

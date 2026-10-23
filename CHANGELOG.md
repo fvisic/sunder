@@ -4,6 +4,23 @@ All notable changes to Sunder. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+### Import: 41x, measured end to end (273 -> 11,235 rows/s at 10M+ scale)
+Three shipped changes and one mode. The dedup probe names the partial unique
+index's predicate - the planner was sequential-scanning ALL of person_tokens
+once per 5,000-row batch (49x on that statement, found by the new `-timing`
+flag). Batch token INSERTs are sorted (`ORDER BY` per token: 1.5x, and it
+removes run-to-run variance). `-parallel N` fans batches across workers
+(default 4; 12 measured 4,630 rows/s online). `-offline` is the
+initial-migration mode: refuses unless the vault is empty, drops the
+secondary token indexes for the load, rebuilds them afterwards with
+`ident_uq` UNIQUE so the dedup invariant is re-proven rather than assumed -
+**10M rows in 20 minutes including the rebuilds** (1M in 89s; the pair also
+measures the decay: -26% at 10x, pkey insert locality eroding as it outgrows
+cache, which is the concrete case for the open time-ordered-id decision).
+In-file duplicates resolve first-occurrence-wins, deterministically,
+regardless of parallelism.
+
+
 ### Phase 7.3: two more multi-replica scenarios
 `ops/coldboot-scenarios.sh` grows to six, all green. A replica joining while
 a rekey sweep runs (40 pre-existing and 15 concurrently-created contacts must

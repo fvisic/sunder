@@ -78,6 +78,42 @@ Two Databunker measurements in that run's round 5 (lookup 328 rps, read no resul
 
 Per-request Sunder was still faster at every point (+43% at c=1, +67% at c=4), but total throughput told the opposite story at high concurrency. This was a real, measured regression under load - not a bug in the benchmark.
 
+<!-- authoritative:begin - ops/check-sales-deck.sh trusts ONLY what is between these markers -->
+### v0.5.0 on the reference server (2026-08-29) - the current numbers
+
+Reference server (12 cores, 47 GB, PostgreSQL 16), **26,927,777 contacts**, both systems in Docker, n=3000 per cell, a fresh seed per cell. **Zero errors in all twenty-four cells.** Sunder is deliberately handicapped throughout: it answers over a dense 26.9M keyspace against Databunker's own ~10k set, and does more per request.
+
+| operation | Sunder | Databunker | delta |
+|---|---:|---:|---:|
+| write c=1 | 73.2 rps | 87.6 rps | **0.8x - Databunker wins here** |
+| write c=8 | 466.9 rps | 222.7 rps | 2.1x |
+| write c=32 | 625.6 rps | 490.4 rps | 1.3x |
+| write c=64 | 657.9 rps | 406.5 rps | 1.6x |
+| lookup c=8 | 1,260.0 rps | 635.1 rps | 2.0x |
+| lookup c=32 | 2,241.2 rps | 733.7 rps | 3.1x |
+| lookup c=64 | 2,062.2 rps | 537.2 rps | 3.8x |
+| read c=8 | 1,647.1 rps | 730.0 rps | 2.3x |
+| read c=32 | 2,901.9 rps | 879.1 rps | 3.3x |
+| read c=64 | 3,208.8 rps | 289.4 rps | 11.1x - see the caveat |
+
+p99 latency, ms:
+
+| operation | Sunder | Databunker |
+|---|---:|---:|
+| lookup c=32 | 26.9 | 134.7 |
+| lookup c=64 | 128.0 | 328.3 |
+| read c=64 | 30.0 | 898.0 |
+
+**Three caveats, because a comparison without them is marketing:**
+
+- **Databunker writes faster with one client** (87.6 against 73.2 rps). Sunder does more per write - an HMAC token per identifier per live key version, phonetic and suffix tokens when those indexes are on, an AEAD blob, and an audit row. That is the cost of what those tokens buy, and it is a real cost.
+- **The 11.1x on read c=64 is Databunker degrading, not Sunder accelerating.** Databunker peaks at c=32 (879 rps) and falls to 289 rps with a p99 of 898 ms; Sunder rises from 2,902 to 3,209. The honest sentence is "Databunker falls over above 32 concurrent readers".
+- **The shape matters more than any ratio.** Sunder holds or climbs to c=64 on reads and lookups; Databunker peaks at c=32 and declines on every operation. Which of those describes your traffic is the question worth asking.
+
+These numbers replace the P4.1/P4.2 table below, which was measured on the v0.4-era build. That table is kept because the deltas between the two are the record of what changed.
+
+<!-- authoritative:end -->
+
 ### Server, after `SUNDER_AUDIT_SEALING=async` (P4.1, 2026-08-25) and bucketed reads (P4.2, 2026-08-26)
 
 Same server, 26.8M-contact dataset, Sunder deliberately handicapped (answering over a dense 20M+ keyspace against Databunker's own ~10k set, and still doing more per request):

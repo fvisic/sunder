@@ -141,3 +141,50 @@ altered after the fact, not that it was true.
   hours, must set `SUNDER_AUDIT_READS=chained` - bucketing is an explicit
   trade of read-level tamper granularity for storage and operator-privacy
   gains, not a free lunch.
+
+## The action vocabulary
+
+`action` is a closed set, not free text. Every value the server can write is
+registered in `internal/audit/actions.go` with a one-line meaning, and two
+guards keep the registry honest: one fails the build when the code writes an
+action nobody registered, the other when the registry describes an action
+nothing writes. So "what can this column contain?" has an answer that cannot
+go stale between releases.
+
+That matters most for anyone writing a SIEM rule or a retention policy
+against the trail: a typo used to produce a new action silently, and a filter
+matching the old spelling went quiet rather than red.
+
+### Lookups: one action or three
+
+By default every lookup - exact e-mail, phonetic name match, partial phone
+suffix - records as `lookup`. Setting
+
+```
+SUNDER_AUDIT_LOOKUP_ACTIONS=split
+```
+
+separates them into `lookup` (exact identifier), `lookup.fuzzy` (widened by
+phonetic name codes), `lookup.suffix` (partial phone-suffix search) and
+`lookup.suffix.fuzzy` - a suffix search narrowed by a phonetic name, which is
+the widest search the API offers. suffix and fuzzy are independent wideners,
+not alternatives.
+
+It is worth doing under bucketed reads, where the per-event detail carrying
+`by` is dropped before the hour is sealed - the action is then the only field
+that reaches the auditor, and the three forms have visibly different
+enumeration profiles. `lookup.fuzzy` means the phonetic branch actually
+widened that query, not merely that phonetic search is enabled somewhere in
+the config.
+
+Two things to know before enabling:
+
+- **Consumers must move to the prefix.** Anything filtering
+  `action = 'lookup'` will stop seeing fuzzy and suffix searches. Use
+  `action LIKE 'lookup%'`, or enumerate `audit.LookupActions`. The set is
+  closed and guarded, so a prefix match cannot miss a form added later.
+- **It costs bucket rows.** Buckets key on
+  `(client_id, user_id, cid, action, hour)`. The worst case is one client
+  using all three forms within one hour, whose misses all share the empty
+  cid: measured at **4.00x** the rows (2 becomes 8). A deployment whose
+  clients use a single form sees no increase at all.

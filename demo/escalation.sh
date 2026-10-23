@@ -8,7 +8,14 @@
 # Requires a running stack (deploy/docker-compose.yml) and two credentials:
 #
 #   SUNDER_CRED_CRM       scope crm:      contacts.register, oti.issue,
+#                                         attributes.read,
 #                                         purposes: escalation_notify
+#
+# attributes.read on the ISSUER is not decoration: an OTI carrying
+# share_attributes IS a delegated read, so the read boundary applies to the
+# credential that authorizes it (TOKENS-LOOKUP-6). Without it, step 2 is a
+# 403 - which is how this script was found broken, having drifted out of
+# sync with the server while nothing ran it.
 #   SUNDER_CRED_NOTIFIER  scope notifier: oti.verify, attributes.read,
 #                                         consent.manage,
 #                                         purposes: escalation_notify
@@ -22,7 +29,8 @@ Missing credentials. Create them with:
 
   docker compose -f deploy/docker-compose.yml exec sunder /sunder client create \
     -id crm-esc -name CRM -scope crm \
-    -actions contacts.register,oti.issue -purposes escalation_notify -rate 1000
+    -actions contacts.register,oti.issue,attributes.read \
+    -purposes escalation_notify -rate 1000
 
   docker compose -f deploy/docker-compose.yml exec sunder /sunder client create \
     -id notifier -name Notifier -scope notifier \

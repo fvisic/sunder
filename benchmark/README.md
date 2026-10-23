@@ -3,6 +3,202 @@
 Goal: same machine, same database engine, same load tool, comparable
 operations - and Sunder at least 50% more efficient.
 
+<!-- authoritative:begin - ops/check-sales-deck.sh trusts ONLY what is between these markers -->
+## v0.5.0 server head-to-head (2026-08-29): the authoritative numbers
+
+**Quote these.** Reference server (12 cores, 47 GB, Debian, PostgreSQL 16),
+26,927,777 contacts, both systems in Docker, benchmark client on the same
+host, n=3000 per cell, fresh seed per cell. **Zero errors in all twenty-four
+cells** - the first run of this shape on the v0.5.0 build in which that is
+true, and the reason is below under "What this run had to fix first".
+
+| operation | Sunder | Databunker | delta |
+|---|---:|---:|---:|
+| write c=1  |    73.2 rps |    87.6 rps | **0.8x - Databunker is faster here** |
+| write c=8  |   466.9 rps |   222.7 rps | 2.1x |
+| write c=32 |   625.6 rps |   490.4 rps | 1.3x |
+| write c=64 |   657.9 rps |   406.5 rps | 1.6x |
+| lookup c=1  |   241.4 rps |   220.1 rps | 1.1x |
+| lookup c=8  | 1,260.0 rps |   635.1 rps | 2.0x |
+| lookup c=32 | 2,241.2 rps |   733.7 rps | 3.1x |
+| lookup c=64 | 2,062.2 rps |   537.2 rps | 3.8x |
+| read c=1  |   293.1 rps |   234.3 rps | 1.3x |
+| read c=8  | 1,647.1 rps |   730.0 rps | 2.3x |
+| read c=32 | 2,901.9 rps |   879.1 rps | 3.3x |
+| read c=64 | 3,208.8 rps |   289.4 rps | 11.1x - but see below |
+
+Latency, p50 / p99 in ms:
+
+| operation | Sunder | Databunker |
+|---|---|---|
+| write c=8 | 15.33 / 45.74 | 28.62 / 155.68 |
+| lookup c=8 | 5.22 / 22.30 | 10.12 / 43.17 |
+| read c=8 | 4.26 / 13.75 | 8.85 / 30.00 |
+| write c=32 | 45.9 / 146.5 | 61.4 / 150.9 |
+| lookup c=32 | 13.4 / 26.9 | 38.7 / 134.7 |
+| lookup c=64 | 25.9 / 128.0 | 109.7 / 328.3 |
+| read c=64 | 19.3 / 30.0 | 168.7 / 898.0 |
+
+### Three things this table says that a sales slide would rather it did not
+
+**Databunker writes faster at c=1** - 87.6 against 73.2 rps. Sunder does more
+per write: an HMAC token per identifier per live key version, phonetic codes
+and a phone suffix when those indexes are on, an AEAD blob, and an audit row.
+Single-client write throughput is the price of that, and it is the honest
+number to show beside the rest.
+
+**The 11.1x on read c=64 is Databunker degrading, not Sunder accelerating.**
+Databunker's reads peak at c=32 (879 rps) and fall to 289 rps at c=64 with a
+p99 of 898 ms. Sunder's climb from 2,902 to 3,209 rps. Quote it as "Databunker
+falls over above 32 concurrent readers", never as "eleven times faster" - the
+second phrasing invites a reader to check it on their own hardware and
+conclude you were selling.
+
+**The shape is the finding, not any single ratio.** Sunder's reads and lookups
+rise to c=32 and hold or keep rising to c=64; Databunker peaks at c=32 and
+declines on every operation. That is a pool-bound path against a
+contention-bound one, and it is what a buyer with growing concurrency should
+care about.
+
+### What this run had to fix first
+
+Two earlier attempts at this table were discarded, and both failures are
+worth recording because each looked like a measurement.
+
+The first reused seeds against an already-populated dataset, so registrations
+collided on existing e-mail addresses and the lookups that followed found
+nothing: 18 rps, 160 errors, 404s on every read cell. Every seed now carries
+the run stamp.
+
+The second was real. Writes ran at 516 rps with zero errors at c=8 and
+collapsed to 18 rps with 150 client timeouts at c=32, while the database sat
+at **zero active queries and zero ungranted locks for ninety seconds**. That
+localised the stall to the server process, and a goroutine dump named it:
+`KeyRing.Newest` held an exclusive mutex and then asked the pool for a
+connection - from inside `registerTx`, which already held one. Once
+concurrency reached the pool size, every connection was held by a goroutine
+queued on that mutex, and the goroutine holding it waited for a connection
+that could never be freed. It resolved only when clients timed out.
+
+After the fix (a background ring refresher, and a read path that structurally
+refuses to query), the same cells measure:
+
+| c | before | after |
+|---|---|---|
+| 8  | 516 rps, 0 errors | 467 rps, 0 errors |
+| 32 | **18 rps, 150 timeouts** | **626 rps, 0 errors** |
+| 64 | **22 rps, 256 timeouts** | **658 rps, 0 errors** |
+
+Nothing in this repository could have found that by reading. It needed
+concurrency at or above the pool size, a write workload, and a rotation - or
+the once-a-second epoch check - landing inside a transaction.
+`TestConcurrentWritesDoNotStallOnTheKeyRing` reproduces it, and
+`TestNoPoolAcquireWhileHoldingATransaction` walks the call graph for the same
+shape anywhere else.
+
+### Reproduce
+
+`~/bench050c.sh` on the reference server. It creates its own credential, uses
+a run-stamped seed per cell, keeps raw output per cell so a parse failure is
+diagnosable rather than reported as a result, and prints which errors it
+counted - the harness used to print only the first five requests by index,
+which is how two 26.9M-row runs were thrown away as "exit status 1".
+
+<!-- authoritative:end -->
+
+## Import ingest, measured honestly at last (2026-08-29)
+
+`sunder import` had never been measured, and the sales deck quoted 28,000/s
+for it anyway - a figure that turned out to be `benchmark/bulkload` (a COPY
+fixture that skips deduplication) at its best point, described as a different
+tool. The real numbers, and what moved them:
+
+<!-- authoritative:begin - ops/check-sales-deck.sh trusts ONLY what is between these markers -->
+| condition | rate |
+|---|---|
+| **offline mode (`-offline -parallel 12`): empty vault, 10M rows, INCLUDING the index rebuilds** | **8,347 rows/s - 10M contacts in 20 minutes** (load alone 10,256; rebuilds 1m58s + 1m43s; 70M tokens; ident_uq re-proven UNIQUE) |
+| offline mode, 1M rows | 11,235 rows/s (load alone 13,127; rebuilds 4s + 7s) |
+| online, `-parallel 12`, into 11.4M existing contacts, full dedup | 4,630 rows/s |
+| online, `-parallel 8` | 3,067 rows/s |
+| online, serial (`-parallel 1`), after the dedup-probe fix | 1,005 rows/s |
+| empty database, untuned Docker Postgres, serial | 3,006 rows/s |
+| 10M contacts, before the dedup-probe fix, `ORDER BY` only | 273-467 rows/s |
+| serial, `search_idx` dropped and rebuilt | 1,430 rows/s - but at `-parallel 12` this stops paying (4,164 vs 4,630): contention moves, the drop buys nothing |
+
+Offline does NOT scale linearly, and the 1M-to-10M pair is the measurement
+of that: -26% end to end at 10x the size, because the primary key grows to
+70M random-UUID entries during the load and its inserts lose locality as it
+outgrows cache. So the honest 100M reading is: ~4 days before this work,
+~6 hours online, and offline **"10M in 20 minutes, measured" - with 100M
+plausibly 4-6 hours on this hardware class, not the ~2.5h a linear
+extrapolation promises**. The decay curve is also the concrete case for a
+time-ordered person id (the open bigint/UUIDv7 decision): it is exactly
+pkey insert locality that erodes. Standing caveat unchanged: size RAM so the
+token indexes fit, or none of these rates transfer.
+<!-- authoritative:end -->
+| same, pre-fix (file-order inserts) | 310 rows/s, varying 310-464 across runs |
+| 26.9M contacts on a deliberately saturated 47 GB host | 117 rows/s |
+
+The saturated-host figure is real and is NOT a production number: that
+dataset exists to surface problems (31 GB of token indexes against 12 GB of
+shared_buffers), and nobody serves 30M contacts on 47 GB. Size the host so
+`person_tokens` and its indexes fit in memory and the middle rows are what
+you get.
+
+**Offline mode** (`-offline`) is the initial-migration answer: it refuses
+unless the vault is EMPTY, drops the secondary token indexes for the load
+(uniqueness is guaranteed by the empty start plus the reader's global
+first-wins in-file dedup), skips the existing-person probe, and rebuilds both
+indexes over settled data at the end - `ident_uq` as UNIQUE, so the dedup
+invariant is re-proven by the rebuild, not assumed. The system is not
+serving during it, which for a first migration is the point.
+
+**What was tried, with verdicts** (10-11M dataset, 200k rows per run, one
+run at a time - two earlier attempts ran concurrently and quietly
+invalidated each other):
+
+- **`ORDER BY <token>` on the batch INSERTs: 1.51x, shipped.** A keyed HMAC
+  is uniformly distributed, so file-order inserts touch a random B-tree page
+  per row; sorting the staged batch makes them arrive in index order. One
+  clause per statement. It also removes the variance: file-order throughput
+  swung 310-464 rows/s across runs, sorted runs measured 446/447/467.
+- **Dropping `person_tokens_search_idx` for the load, rebuilding after:
+  does not pay below ~725k rows.** With ORDER BY in place the load barely
+  speeds up (478 vs 467 rows/s) and the rebuild is a 36.5s fixed cost. Safe
+  to do - the index is deliberately non-unique, so no invariant rests on it -
+  but not worth automating at current gains.
+- **The dedup probe was a query-plan defect, fixed for 49x on that
+  statement.** `person_tokens_ident_uq` is a PARTIAL index
+  (`WHERE kind IN ('email','phone')`), and the planner may use a partial
+  index only when the query proves its predicate - a join condition
+  `pt.kind = m.kind` proves nothing, so the only available plan seq-scanned
+  ALL 36.4M token rows once per 5,000-row batch: 26.2s and 600k buffers
+  each, 64% of the import's wall time. Naming the predicate literally in
+  the probe (semantics unchanged) made it 0.54s of pure index hits.
+  End to end: 273 -> 1,005 rows/s. Found by `-timing`; invisible to the
+  per-batch rows/s line, to reading, and to every test.
+- **After the fix, the split is: inserts 84%, dedup 7%, copy 4%, crypto 4%.**
+  The insert cost is `person_tokens` index maintenance (three indexes, ~0.12
+  ms/row); a bigger `-batch` buys nothing (1,010 vs 1,005 rows/s at 20k),
+  because the primary key `(person_id, kind, token)` starts with a random
+  UUID and no sort order can give it locality. Dropping the non-unique
+  search index for the load now DOES pay - 1,430 rows/s, break-even ~130k
+  rows - which it did not before the dedup fix drowned the saving.
+- **Dedup is not the cost.** Re-importing an already-imported file (every
+  row a duplicate, zero inserts) runs at 6,455 rows/s against 3,006 for the
+  full path on the same empty-ish database: the probe is cheap, the index
+  inserts are the work.
+
+The remaining gap to bulkload's 20,274 rows/s is now ~14x, and its shape is
+known: `person_tokens` carries three indexes and the import maintains all of
+them per row, while bulkload COPYs into the same tables but appends
+monotonically growing person ids. The measured suspects left are the random
+UUID primary key (a time-ordered id for imported persons would give the
+biggest index locality; a design decision, not a patch) and per-statement
+overhead. Crypto is 4% - the parallelisation steps the first draft of Phase
+11.3 planned would have been building the wrong thing, which is what
+measuring first is for.
+
 ## v0.5.0 re-measurement (2026-08-27, laptop): the second review cost nothing
 
 The remediation for the second external review added roughly a thousand

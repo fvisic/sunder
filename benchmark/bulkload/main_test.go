@@ -38,6 +38,7 @@ type loaderEnv struct {
 	pii      *crypto.PIIBox
 	ring     *service.KeyRing
 	emailV   string
+	nameV    string
 	phoneV   string
 	kekV     string
 	scopeStr string
@@ -61,6 +62,10 @@ func newLoaderEnv(t *testing.T) *loaderEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	nameV, err := ring.Newest(ctx, crypto.KeyHMACName)
+	if err != nil {
+		t.Fatal(err)
+	}
 	kekV, err := ring.Newest(ctx, crypto.KeyPIIKEK)
 	if err != nil {
 		t.Fatal(err)
@@ -69,10 +74,14 @@ func newLoaderEnv(t *testing.T) *loaderEnv {
 	svc := &service.Contacts{
 		Pool: st.Pool, Tok: crypto.NewTokenizer(eng),
 		PII: crypto.NewPIIBox(eng), Ring: ring,
+		// ON, so the shape comparison covers the derived kinds too. With
+		// them off the test would compare three token kinds and call the
+		// loader faithful, which is how the missing `name` token survived.
+		FuzzyName: true, PhoneSuffix: true,
 	}
 	return &loaderEnv{
 		svc: svc, tok: crypto.NewTokenizer(eng), pii: crypto.NewPIIBox(eng), ring: ring,
-		emailV: emailV, phoneV: phoneV, kekV: kekV, scopeStr: "bench",
+		emailV: emailV, phoneV: phoneV, nameV: nameV, kekV: kekV, scopeStr: "bench",
 		client: &auth.Client{
 			ID: "bench", Scope: "bench",
 			AllowedActions:  []string{"contacts.register", "lookup", "attributes.read"},
@@ -90,7 +99,7 @@ func TestBulkLoadedContactResolvesThroughTheServer(t *testing.T) {
 
 	const n = 25
 	if err := loadBatch(ctx, e.svc.Pool, e.tok, e.pii,
-		e.scopeStr, e.emailV, e.phoneV, e.kekV, 0, n); err != nil {
+		e.scopeStr, e.emailV, e.phoneV, e.nameV, e.kekV, true, true, 0, n); err != nil {
 		t.Fatal(err)
 	}
 
@@ -121,7 +130,7 @@ func TestBulkLoadedBlobDecryptsUnderTheServersAAD(t *testing.T) {
 	ctx := context.Background()
 
 	if err := loadBatch(ctx, e.svc.Pool, e.tok, e.pii,
-		e.scopeStr, e.emailV, e.phoneV, e.kekV, 100, 105); err != nil {
+		e.scopeStr, e.emailV, e.phoneV, e.nameV, e.kekV, true, true, 100, 105); err != nil {
 		t.Fatal(err)
 	}
 
@@ -157,7 +166,7 @@ func TestBulkLoadedAndRegisteredContactsAreIndistinguishable(t *testing.T) {
 	ctx := context.Background()
 
 	if err := loadBatch(ctx, e.svc.Pool, e.tok, e.pii,
-		e.scopeStr, e.emailV, e.phoneV, e.kekV, 200, 201); err != nil {
+		e.scopeStr, e.emailV, e.phoneV, e.nameV, e.kekV, true, true, 200, 201); err != nil {
 		t.Fatal(err)
 	}
 	loadedCID, err := e.svc.Lookup(ctx, e.client, service.LookupInput{
@@ -200,9 +209,23 @@ func TestBulkLoadedAndRegisteredContactsAreIndistinguishable(t *testing.T) {
 		return out
 	}
 	loaded, registered := shape(loadedCID), shape(registeredCID)
+	// BOTH directions. The first version ran only the first loop - it proved
+	// the loader wrote nothing EXTRA and said nothing about what it left
+	// out. It passed while the loader wrote no `name` token at all: the name
+	// went into the encrypted blob and never into the index, so a loaded
+	// contact could not be narrowed by name and person_tokens was about a
+	// third smaller than production's. Every scale number taken on such a
+	// dataset measured a lighter table than the one it claimed to describe.
 	for k := range loaded {
 		if _, ok := registered[k]; !ok {
 			t.Fatalf("bulk-loaded contact has a %+v token the registered one does not", k)
+		}
+	}
+	for k := range registered {
+		if _, ok := loaded[k]; !ok {
+			t.Fatalf("a REGISTERED contact has a %+v token the bulk-loaded one lacks - the "+
+				"loader is not writing the real shapes, and a dataset built from it is "+
+				"lighter than production. Fix loadBatch, not this test.", k)
 		}
 	}
 	for _, want := range []string{"email", "phone"} {
