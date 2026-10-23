@@ -112,7 +112,7 @@ final class SunderClientTest extends TestCase
     /** @return array<int, array{method: string, path: string, headers: array, body: ?array}> */
     private function requests(): array
     {
-        $lines = array_filter(explode("\n", (string) file_get_contents(self::$stateDir . '/requests.log')), 'strlen');
+        $lines = array_filter(explode("\n", (string) file_get_contents(self::$stateDir . '/requests.log')), static fn (string $l): bool => $l !== '');
         return array_map(static fn (string $l): array => json_decode($l, true), array_values($lines));
     }
 

@@ -20,20 +20,20 @@ import urllib.parse
 import urllib.request
 
 __all__ = [
+    "AudienceMismatchError",
+    "ForbiddenError",
+    "NotFoundError",
+    "PurposeNotAllowedError",
+    "RateLimitedError",
+    "ServiceUnavailableError",
     "SunderClient",
     "SunderError",
-    "NotFoundError",
-    "UnauthorizedError",
-    "ForbiddenError",
-    "PurposeNotAllowedError",
-    "UnlockRequiredError",
-    "AudienceMismatchError",
-    "TokenUsedError",
     "TokenExpiredError",
     "TokenInvalidError",
-    "RateLimitedError",
+    "TokenUsedError",
+    "UnauthorizedError",
+    "UnlockRequiredError",
     "ValidationError",
-    "ServiceUnavailableError",
 ]
 
 __version__ = "0.5.0"
@@ -246,7 +246,9 @@ class SunderClient:
         enforced client-side: at least one of email/phone is required.
         """
         if email is None and phone is None:
-            raise ValidationError("validation", None, "lookup_by_name requires email or phone as a second factor")
+            raise ValidationError(
+                "validation", None,
+                "lookup_by_name requires email or phone as a second factor")
         body: dict = {"name": name}
         if email is not None:
             body["email"] = email
@@ -445,9 +447,10 @@ class SunderClient:
         """
         boundary = "----SunderFormBoundary" + secrets.token_hex(16)
         head = (f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-                f"Content-Type: {content_type}\r\n\r\n").encode("utf-8")
-        tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
+                'Content-Disposition: form-data; name="file"; '
+                f'filename="{filename}"\r\n'
+                f"Content-Type: {content_type}\r\n\r\n").encode()
+        tail = f"\r\n--{boundary}--\r\n".encode()
         headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
         if expires_at is not None:
             headers["X-Sunder-File-Expiry"] = expires_at
@@ -629,7 +632,8 @@ class SunderClient:
         except urllib.error.HTTPError as e:
             raise _map_error(e.code, e.read()) from None
         except (urllib.error.URLError, OSError, TimeoutError) as e:
-            raise ServiceUnavailableError("service_unavailable", None, f"network failure: {e}") from e
+            raise ServiceUnavailableError(
+                "service_unavailable", None, f"network failure: {e}") from e
 
     # -- transport ----------------------------------------------------------
 
@@ -673,7 +677,8 @@ class SunderClient:
         except urllib.error.HTTPError as e:
             raise _map_error(e.code, e.read()) from None
         except (urllib.error.URLError, OSError, TimeoutError) as e:
-            raise ServiceUnavailableError("service_unavailable", None, f"network failure: {e}") from e
+            raise ServiceUnavailableError(
+                "service_unavailable", None, f"network failure: {e}") from e
         try:
             parsed = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):

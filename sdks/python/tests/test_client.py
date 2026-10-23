@@ -9,7 +9,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import sunder_client  # noqa: E402
+import sunder_client
 
 
 class MockHandler(http.server.BaseHTTPRequestHandler):
@@ -30,7 +30,7 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
             status, payload = self.server.responses.pop(0)
         else:
             status, payload = 500, {"error": "internal"}
-        if isinstance(payload, (dict, list)):
+        if isinstance(payload, dict | list):
             data = json.dumps(payload).encode("utf-8")
             ctype = "application/json"
         else:
@@ -125,7 +125,8 @@ class ClientTest(unittest.TestCase):
                          "/v1/contacts/CID-1/attributes/loyalty_tier?purpose=support")
 
     def test_issue_oti(self):
-        self.queue((201, {"token": "v4.public.x", "expires_at": "2026-01-01T00:00:00Z"}))
+        self.queue((201, {"token": "v4.public.x",
+                          "expires_at": "2026-01-01T00:00:00Z"}))
         out = self.client.issue_oti("CID-1", "create_order", "erp")
         self.assertEqual(out, {"token": "v4.public.x",
                                "expires_at": "2026-01-01T00:00:00Z"})
@@ -139,7 +140,8 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(self.server.requests[0]["path"], "/v1/oti/verify")
 
     def test_predicates_roundtrip(self):
-        self.queue((201, {"token": "v4.public.x", "expires_at": "2026-01-01T00:00:00Z"}))
+        self.queue((201, {"token": "v4.public.x",
+                          "expires_at": "2026-01-01T00:00:00Z"}))
         self.client.issue_oti("CID-1", "age_check", "webshop",
                               share_predicates=[{"attr": "birthdate",
                                                  "op": "age_gte", "value": 18}])

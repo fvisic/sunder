@@ -246,12 +246,6 @@ func mustRand(b []byte) {
 	}
 }
 
-// isUniqueViolation reports a Postgres 23505.
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
-}
-
 // PruneValueTokens removes expired rows (final deadline passed, or the
 // sliding window starved). Wired into `sunder retention run`.
 func PruneValueTokens(ctx context.Context, pool *pgxpool.Pool) (int64, error) {

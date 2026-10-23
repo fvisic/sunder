@@ -18,10 +18,10 @@ func TestFileKeystoreRecoveryHelpers(t *testing.T) {
 		t.Fatal("AllKeys on an empty keystore must error")
 	}
 	// Create two keys via Ensure.
-	if err := ks.Ensure(nil, "pii-kek/v1"); err != nil {
+	if err := ks.Ensure(context.Background(), "pii-kek/v1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ks.Ensure(nil, "hmac-email/v1"); err != nil {
+	if err := ks.Ensure(context.Background(), "hmac-email/v1"); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := ks.AllKeys()
@@ -125,7 +125,7 @@ func TestFileKeystoreWriteFailuresOnReadOnlyDir(t *testing.T) {
 	ks := &FileKeystore{Dir: dir}
 	// Seed one key, then make the directory read-only so CreateTemp fails
 	// in writeKey / WriteRecoveryBundle / RestoreKeys.
-	if err := ks.Ensure(nil, "pii-kek/v1"); err != nil {
+	if err := ks.Ensure(context.Background(), "pii-kek/v1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(dir, 0o500); err != nil {
@@ -134,7 +134,7 @@ func TestFileKeystoreWriteFailuresOnReadOnlyDir(t *testing.T) {
 	defer os.Chmod(dir, 0o700)
 
 	// Ensure of a NEW key must fail (CreateTemp in a read-only dir).
-	if err := ks.Ensure(nil, "hmac-email/v1"); err == nil {
+	if err := ks.Ensure(context.Background(), "hmac-email/v1"); err == nil {
 		t.Fatal("Ensure into a read-only dir must fail")
 	}
 	if err := ks.WriteRecoveryBundle([]byte("x")); err == nil {

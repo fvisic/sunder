@@ -66,6 +66,13 @@ jobs:
         run: CGO_ENABLED=0 go build -mod=readonly ./...
       - name: Vet
         run: go vet ./...
+      # `go vet` catches a narrow class. staticcheck catches the ones that
+      # read as fine: unused writes, dead code, nil contexts, impossible type
+      # assertions. It found dead code in internal/service on its first run.
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+          "$(go env GOPATH)/bin/staticcheck" ./...
       # Race detection and the coverage gate are separate concerns. The
       # race detector reschedules goroutines aggressively, which makes the
       # coverage of concurrency branches (sealer, outbox worker) vary run to
@@ -131,6 +138,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # A warning printed by a green job is a warning nobody reads: the .NET
+      # SDK carried two batches of them across a whole release for exactly
+      # that reason. Java has had -Xlint:all -Werror since it was written and
+      # has never accumulated one.
+      - name: Lint
+        working-directory: sdks/python
+        run: |
+          pip install ruff
+          ruff check --select E,F,W,I,UP,B,SIM,RUF .
       - name: Test
         working-directory: sdks/python
         run: python3 -m unittest discover -s tests -v
@@ -147,6 +163,11 @@ jobs:
         run: |
           composer install --no-interaction
           vendor/bin/phpunit tests
+      # Level 5 with three written-down exceptions, each a case where PHPStan
+      # trusts a docblock further than the runtime does (see phpstan.neon).
+      - name: Static analysis
+        working-directory: sdks/php
+        run: vendor/bin/phpstan analyse --no-progress
 
   sdk-java:
     runs-on: ubuntu-latest

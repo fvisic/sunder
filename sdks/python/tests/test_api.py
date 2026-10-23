@@ -16,7 +16,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import sunder_client  # noqa: E402
+import sunder_client
 
 
 class MockHandler(http.server.BaseHTTPRequestHandler):
@@ -43,7 +43,7 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
             status, payload = self.server.responses.pop(0)
         else:
             status, payload = 500, {"error": "internal"}
-        if isinstance(payload, (dict, list)):
+        if isinstance(payload, dict | list):
             data = json.dumps(payload).encode("utf-8")
             ctype = "application/json"
         elif isinstance(payload, bytes):
@@ -91,7 +91,8 @@ class ApiTest(unittest.TestCase):
 
     def only(self):
         self.assertEqual(len(self.server.requests), 1,
-                         f"expected exactly one request, saw {len(self.server.requests)}")
+                         "expected exactly one request, saw "
+                         f"{len(self.server.requests)}")
         return self.server.requests[0]
 
     # -- consent ------------------------------------------------------------
@@ -220,7 +221,8 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(req["headers"]["Content-Type"].startswith("multipart/form-data"))
         self.assertIn(b'filename="scan.pdf"', req["raw"])
         self.assertIn(b"hello", req["raw"])
-        self.assertEqual(req["headers"].get("X-Sunder-File-Expiry"), "2030-01-02T03:04:05Z")
+        self.assertEqual(req["headers"].get("X-Sunder-File-Expiry"),
+                         "2030-01-02T03:04:05Z")
 
     def test_upload_omits_the_expiry_header_when_none(self):
         self.queue((201, {"id": "f1"}))

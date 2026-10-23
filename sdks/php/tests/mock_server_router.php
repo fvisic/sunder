@@ -49,7 +49,7 @@ $payload = ['error' => 'internal'];
 $fh = fopen($dir . '/responses.queue', 'c+');
 if ($fh !== false) {
     flock($fh, LOCK_EX);
-    $lines = array_values(array_filter(explode("\n", (string) stream_get_contents($fh)), 'strlen'));
+    $lines = array_values(array_filter(explode("\n", (string) stream_get_contents($fh)), static fn (string $l): bool => $l !== ''));
     if ($lines !== []) {
         $next = json_decode(array_shift($lines), true);
         $status = (int) $next['status'];

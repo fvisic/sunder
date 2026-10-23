@@ -443,11 +443,11 @@ func TestValueTokenHTTPSingleItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := &e2eEnv{srv: srv, credCRM: cred}
-	rec, out := e.do(t, cred, "POST", "/v1/tokens", map[string]any{"value": "HR12", "type": "card"})
+	rec, _ := e.do(t, cred, "POST", "/v1/tokens", map[string]any{"value": "HR12", "type": "card"})
 	if rec.Code != 400 { // "HR12" is not Luhn-valid
 		t.Fatalf("non-card value as card must 400: %d", rec.Code)
 	}
-	rec, out = e.do(t, cred, "POST", "/v1/tokens", map[string]any{"value": "HR12 secret"})
+	rec, out := e.do(t, cred, "POST", "/v1/tokens", map[string]any{"value": "HR12 secret"})
 	if rec.Code != 201 {
 		t.Fatalf("tokenize: %d %s", rec.Code, rec.Body.String())
 	}
