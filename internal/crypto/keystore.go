@@ -104,6 +104,12 @@ func MintedKeys() int64 { return mintedKeys.Load() }
 // Ensure generates the key if absent. The final path only ever appears via
 // an atomic rename of a fully-written temp file; an O_EXCL lock file elects
 // a single generator across processes sharing the directory.
+// staleLockAge is how old a generator lock must be before another process
+// treats it as abandoned. Long enough that a slow but live generation is
+// never interrupted; short enough that a killed process does not block the
+// next one for the length of a maintenance window.
+const staleLockAge = 30 * time.Second
+
 func (f *FileKeystore) Ensure(ctx context.Context, name string) error {
 	if err := checkName(name); err != nil {
 		return err
@@ -112,6 +118,19 @@ func (f *FileKeystore) Ensure(ctx context.Context, name string) error {
 	defer f.mu.Unlock()
 	p := f.path(name)
 	if b, err := os.ReadFile(p); err == nil && len(b) == 32 {
+		// The key is here, so this call is done. Before returning, sweep up
+		// a lock left behind by a process killed between its rename and its
+		// unlock: the early return meant such a lock was never reclaimed,
+		// because reclaiming only happens on the path that needs to
+		// generate. It is harmless while the key exists - and stops being
+		// harmless the moment the key does not, when a generator would wait
+		// out the full timeout on a lock nobody holds.
+		//
+		// Only an AGED lock: a fresh one belongs to a live generator racing
+		// this call, and removing it would break the election it is part of.
+		if st, serr := os.Stat(p + ".lock"); serr == nil && time.Since(st.ModTime()) > staleLockAge {
+			_ = os.Remove(p + ".lock")
+		}
 		return nil
 	}
 	if err := os.MkdirAll(f.Dir, 0o700); err != nil {
@@ -123,8 +142,8 @@ func (f *FileKeystore) Ensure(ctx context.Context, name string) error {
 		if !os.IsExist(err) {
 			return err
 		}
-		// A crashed generator leaves a stale lock; reclaim it after 30s.
-		if st, serr := os.Stat(lockPath); serr == nil && time.Since(st.ModTime()) > 30*time.Second {
+		// A crashed generator leaves a stale lock; reclaim it after staleLockAge.
+		if st, serr := os.Stat(lockPath); serr == nil && time.Since(st.ModTime()) > staleLockAge {
 			_ = os.Remove(lockPath)
 			return f.ensureLocked(ctx, name)
 		}

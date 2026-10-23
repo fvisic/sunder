@@ -4,6 +4,37 @@ All notable changes to Sunder. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+### Phase 7.2: the crash-safety claims are now tested, and one was wrong
+Every claim-before-side-effect design in the tree was DOCUMENTED as
+crash-safe and none was tested that way. Four kill points now have a test
+that stops the operation exactly where a crash would land:
+
+| Killed at | Invariant asserted |
+|---|---|
+| outbox claim committed, POST not sent | the reaper returns the row to `PENDING`; the notification is not lost |
+| POST succeeded, acknowledgement not written | the event is RE-delivered rather than silently marked done |
+| erasure transaction not yet committed | nothing happened at all - no wiped blob, no tombstone, no queued events, no deleted tokens |
+| key renamed into place, generator lock not released | the reclaim does NOT re-mint over live key material |
+
+Three passed. **The fourth found a real defect**: `Ensure` returns early
+when the key already exists, so a lock left by a process killed between its
+rename and its unlock was never reclaimed - harmless while the key exists,
+and not harmless the moment it does not, when a generator waits out the full
+timeout on a lock nobody holds. `Ensure` now sweeps up an aged lock on that
+path too (only aged: a fresh lock belongs to a live generator racing the
+call).
+
+One test was rewritten after being written wrong: a panic-based seam cannot
+model a `SIGKILL`, because Go runs deferred functions while panicking - the
+lock would be removed on the way out, which is exactly what a kill does not
+do. The on-disk state is now constructed directly, and the seam was deleted
+rather than left in the production path pretending to be useful.
+
+`docs-site/docs/admin/backup-dr.md` gains a recovery table: what each kill
+leaves behind, what recovers it automatically, and what to do by hand if it
+does not - including the two rules that follow, that a crash never produces
+a half-erased person and that it CAN produce a duplicate webhook delivery.
+
 ### L6 complete: a cascading erasure is now bounded, self-healing and provable
 The v0.4.1 backlog item shipped half-done in v0.5.0: the cascade got a
 durable plan and a resume path, but none of the guards around them.

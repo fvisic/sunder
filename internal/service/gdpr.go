@@ -56,6 +56,28 @@ type GDPR struct {
 	wg sync.WaitGroup
 }
 
+// CrashAtForTest fires at a named point inside an operation, nil in
+// production. It exists so a test can stop the process WHERE a crash would
+// actually land, rather than approximating one.
+//
+// Every claim-before-side-effect design in this tree is documented as
+// crash-safe. Documented is not tested: the invariants below hold because
+// of where a commit sits relative to a side effect, and nothing was
+// verifying that relationship. A panic from here is the closest thing to a
+// SIGKILL that a test can assert on.
+//
+// Points: "outbox.claimed" (claim committed, POST not yet sent),
+// "outbox.posted" (POST succeeded, acknowledgement not yet written),
+// "erasure.before_commit" (blob wiped and events queued in the transaction,
+// nothing committed).
+var CrashAtForTest func(point string)
+
+func crashAt(point string) {
+	if CrashAtForTest != nil {
+		CrashAtForTest(point)
+	}
+}
+
 // DefaultMaxCascadeChildren bounds a cascading erasure when nothing else
 // says otherwise. One thousand people is already a large deliberate act;
 // beyond it the operator should be choosing batches, not discovering the
@@ -1087,6 +1109,11 @@ func (g *GDPR) erasePersonOnce(ctx context.Context, actor, auditCID, personID st
 	}); err != nil {
 		return 0, 0, err
 	}
+	// Everything the erasure does - the blob wipe, the token deletion, the
+	// tombstone, the queued events - is in this one transaction and none of
+	// it is durable yet. A crash here must leave the person entirely intact,
+	// not half-erased: TestCrashBeforeErasureCommitLeavesNothingHalfDone.
+	crashAt("erasure.before_commit")
 	if err := tx.Commit(ctx); err != nil {
 		return 0, 0, err
 	}
@@ -1260,6 +1287,11 @@ func (g *GDPR) deliverPending(ctx context.Context, onlyErasure int64) (delivered
 	if err := claim.Commit(ctx); err != nil {
 		return 0, err
 	}
+	// The claim is now durable and no POST has happened. A worker killed
+	// here leaves rows in SENDING that nothing else will ever pick up
+	// unless the reaper's lease works - which is exactly the invariant
+	// TestCrashAfterOutboxClaimIsReaped asserts.
+	crashAt("outbox.claimed")
 	// release returns unattempted claims immediately rather than leaving
 	// them to the reaper's grace period.
 	release := func(rest []ev) {
@@ -1333,6 +1365,11 @@ func (g *GDPR) deliverPending(ctx context.Context, onlyErasure int64) (delivered
 			_ = resp.Body.Close()
 		}
 		if ok {
+			// The receiver has acted; our record of it has not been written.
+			// A worker killed here is the reason delivery is at-least-once
+			// and the reason receivers must dedup on
+			// (scope, cid, erasure_id) - TestCrashBetweenPostAndAckRedelivers.
+			crashAt("outbox.posted")
 			if serr := terminal(e, "DELIVERED", "dsr.erase.delivered"); serr != nil {
 				// The downstream system HAS deleted the record; only our
 				// bookkeeping failed. The reaper will requeue the claim and

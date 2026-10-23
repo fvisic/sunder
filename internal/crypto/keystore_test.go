@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -424,5 +425,61 @@ func TestEnsureDoesNotOverwriteAKeyMintedWhileWaitingForTheLock(t *testing.T) {
 	if !bytes.Equal(got, winner) {
 		t.Fatal("Ensure minted over key material that already existed - every " +
 			"blob encrypted under the previous key is now unreadable")
+	}
+}
+
+// TestCrashBetweenRenameAndLockRelease is the fourth commit-boundary kill
+// point (PLAN 7.2): the key is durably in place and its generator lock is
+// still held.
+//
+// A process killed there leaves a REAL key beside a lock nobody owns. Thirty
+// seconds later the stale-lock reclaim runs - and if it treats an orphaned
+// lock as licence to generate, it mints over live key material and every
+// blob sealed under the old key becomes unreadable. Same destruction as the
+// O_EXCL race, reached from the other side.
+//
+// The state is BUILT rather than crashed into, deliberately. A panic-based
+// seam cannot model this: Go runs deferred functions while panicking, so the
+// lock would be removed on the way out - exactly what a SIGKILL does not do.
+// Constructing the on-disk state a killed process leaves is the honest way
+// to test the recovery path, and the recovery path is what is under test.
+func TestCrashBetweenRenameAndLockRelease(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// A key that a previous process finished writing...
+	if err := (&FileKeystore{Dir: dir}).Ensure(ctx, "orphan/v1"); err != nil {
+		t.Fatal(err)
+	}
+	original, err := (&FileKeystore{Dir: dir}).Key(ctx, "orphan/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ...and the lock it never got to release, aged past the reclaim window.
+	lock := filepath.Join(dir, "orphan_v1.key.lock")
+	if err := os.WriteFile(lock, []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// A restart. It must reclaim the stale lock AND notice the key is there.
+	if err := (&FileKeystore{Dir: dir}).Ensure(ctx, "orphan/v1"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := (&FileKeystore{Dir: dir}).Key(ctx, "orphan/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, original) {
+		t.Fatal("reclaiming a stale lock MINTED OVER a key that was already durable - " +
+			"every blob sealed under the previous key is now unreadable")
+	}
+	if _, err := os.Stat(lock); err == nil {
+		t.Fatal("the stale lock survived the reclaim: the next generation attempt " +
+			"will wait on a lock nobody holds")
 	}
 }
