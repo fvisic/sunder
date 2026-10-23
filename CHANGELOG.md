@@ -4,6 +4,15 @@ All notable changes to Sunder. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+### Phase 7.3: two more multi-replica scenarios
+`ops/coldboot-scenarios.sh` grows to six, all green. A replica joining while
+a rekey sweep runs (40 pre-existing and 15 concurrently-created contacts must
+all still resolve - the sweep's compare-and-swap on `updated_at` exists for
+exactly this), and a sealing-mode switch performed WITH the fleet up, which
+the runbook forbids. The second asserts the failure is VISIBLE: `verify-audit`
+must give a clear verdict rather than crash or fail mutely. A documented rule
+nobody can observe being broken is a rule nobody will follow.
+
 ### Phase 7.9: every language now fails on its own warnings
 Two rounds of "a green job printed warnings nobody read" happened in one
 release, both in the .NET SDK. Reading all six afterwards found the reason,

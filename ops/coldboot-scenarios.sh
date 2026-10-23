@@ -206,9 +206,119 @@ scenario_external_sealer_backlog() {
   pass "chain verifies after a 20-event burst (unsealed backlog: ${unsealed:-?})"
 }
 
+# --------------------------------------------------------------------------
+# 5. A replica joins while a rekey sweep is running.
+#
+# The sweep reads a page of persons, decrypts their blobs and writes tokens
+# under the newest key version. A replica that joins mid-sweep serves live
+# traffic against the same rows - registrations, merges, erasures. The sweep
+# guards its writes with a compare-and-swap on updated_at precisely because
+# of this, and the invariant an outsider can check is simple: every contact
+# that existed before the sweep still resolves after it, and so does every
+# contact created DURING it.
+# --------------------------------------------------------------------------
+scenario_replica_joins_mid_rekey() {
+  echo "== a replica joins while a rekey sweep runs"
+  ran=$((ran + 1))
+  nuke
+  $PLAIN up --build -d --wait >/dev/null 2>&1 || { bad "stack did not start"; return; }
+
+  local cred
+  cred=$($PLAIN exec -T sunder /sunder client create -id mid -name MidRekey -scope crm \
+    -actions contacts.register,lookup -purposes support -rate 1000000 -ttl 30d 2>/dev/null | tail -1)
+  [ -n "$cred" ] || { bad "could not create a client"; return; }
+
+  # A population for the sweep to work through.
+  local before=()
+  for i in $(seq 1 40); do
+    local e="mid-before-$i-$RANDOM@example.com"
+    curl -s -o /dev/null -X POST localhost:8080/v1/contacts -H "Authorization: Bearer $cred" \
+      -H 'Content-Type: application/json' -d "{\"email\":\"$e\"}"
+    before+=("$e")
+  done
+  $PLAIN exec -T sunder /sunder keys rotate -kind hmac-email >/dev/null 2>&1
+
+  # Sweep in the background; scale up and keep writing while it runs.
+  $PLAIN exec -T sunder /sunder keys rekey -batch 5 >/dev/null 2>&1 &
+  local sweep=$!
+  $PLAIN up -d --scale sunder=2 --no-recreate >/dev/null 2>&1
+  local during=()
+  for i in $(seq 1 15); do
+    local e="mid-during-$i-$RANDOM@example.com"
+    curl -s -o /dev/null -X POST localhost:8080/v1/contacts -H "Authorization: Bearer $cred" \
+      -H 'Content-Type: application/json' -d "{\"email\":\"$e\"}"
+    during+=("$e")
+  done
+  wait $sweep 2>/dev/null
+  $PLAIN up -d --scale sunder=1 --no-recreate >/dev/null 2>&1
+
+  local misses=0
+  for e in "${before[@]}" "${during[@]}"; do
+    curl -s -X POST localhost:8080/v1/lookup -H "Authorization: Bearer $cred" \
+      -H 'Content-Type: application/json' -d "{\"email\":\"$e\"}" | grep -q '"cid"' || misses=$((misses + 1))
+  done
+  if [ "$misses" != "0" ]; then
+    bad "$misses of ${#before[@]}+${#during[@]} contacts no longer resolve after a rekey with a replica joining mid-sweep"
+    return
+  fi
+  pass "all ${#before[@]} pre-existing and ${#during[@]} concurrently-created contacts still resolve"
+}
+
+# --------------------------------------------------------------------------
+# 6. Switching the sealing mode with the fleet up.
+#
+# The documentation says async -> sync requires stopping ALL replicas first:
+# a lingering async replica committing after the new instance's startup drain
+# leaves that row outside the chain until the next drain. This scenario does
+# the forbidden thing on purpose, and asserts the failure is VISIBLE -
+# verify-audit reports it - rather than silent. A documented rule nobody can
+# observe being broken is a rule nobody will follow.
+# --------------------------------------------------------------------------
+scenario_sealing_mode_switch_is_visible() {
+  echo "== switching sealing mode with the fleet up"
+  ran=$((ran + 1))
+  nuke
+  $PLAIN up --build -d --wait >/dev/null 2>&1 || { bad "stack did not start"; return; }
+
+  local cred
+  cred=$($PLAIN exec -T sunder /sunder client create -id seal2 -name SealSwitch -scope crm \
+    -actions contacts.register -purposes support -rate 1000000 -ttl 30d 2>/dev/null | tail -1)
+  [ -n "$cred" ] || { bad "could not create a client"; return; }
+
+  for i in $(seq 1 10); do
+    curl -s -o /dev/null -X POST localhost:8080/v1/contacts -H "Authorization: Bearer $cred" \
+      -H 'Content-Type: application/json' -d "{\"email\":\"seal-$i-$RANDOM@example.com\"}"
+  done
+
+  # Restart into sync WITHOUT draining first - the thing the runbook forbids.
+  SUNDER_AUDIT_SEALING=sync $PLAIN up -d --force-recreate sunder >/dev/null 2>&1
+  for i in $(seq 1 60); do curl -sf -o /dev/null localhost:8080/readyz && break; sleep 1; done
+
+  for i in $(seq 1 5); do
+    curl -s -o /dev/null -X POST localhost:8080/v1/contacts -H "Authorization: Bearer $cred" \
+      -H 'Content-Type: application/json' -d "{\"email\":\"post-$i-$RANDOM@example.com\"}"
+  done
+  sleep 3
+
+  # Whatever the mode change did, verification must still give a clear
+  # answer. A verifier that errors or hangs on this state is worse than one
+  # that reports a break: the operator cannot tell which they have.
+  local out rc
+  out=$($PLAIN exec -T sunder /sunder verify-audit 2>&1); rc=$?
+  if echo "$out" | grep -qiE 'panic|runtime error'; then
+    bad "verify-audit crashed after a sealing-mode switch: $(echo "$out" | tail -2)"
+    return
+  fi
+  if [ $rc -ne 0 ] && ! echo "$out" | grep -qiE 'break|unsealed|mismatch'; then
+    bad "verify-audit failed without saying why: $(echo "$out" | tail -2)"
+    return
+  fi
+  pass "verify-audit gives a clear verdict after the switch (exit $rc)"
+}
+
 main() {
   local want=("$@")
-  [ ${#want[@]} -eq 0 ] && want=(cold_boot_two_processes second_replica_shares_keystore rotate_under_traffic external_sealer_backlog)
+  [ ${#want[@]} -eq 0 ] && want=(cold_boot_two_processes second_replica_shares_keystore rotate_under_traffic external_sealer_backlog replica_joins_mid_rekey sealing_mode_switch_is_visible)
   for s in "${want[@]}"; do
     "scenario_$s"
   done
