@@ -395,3 +395,25 @@ func TestBooleanTyposAreRefusedNotIgnored(t *testing.T) {
 		t.Fatalf("an empty value must mean unset: %v %v", c.RedisFailClosed, err)
 	}
 }
+
+// TestMaxCascadeChildrenConfig: the bound on how many people one request may
+// erase. Zero is refused deliberately - it would mean "no cascade may ever
+// run", which is a way of disabling a GDPR obligation by configuration
+// typo rather than by decision.
+func TestMaxCascadeChildrenConfig(t *testing.T) {
+	t.Setenv("SUNDER_DB_URL", "postgres://localhost/sunder")
+	c, err := FromEnv()
+	if err != nil || c.MaxCascadeChildren != 1000 {
+		t.Fatalf("default cascade bound: %d %v", c.MaxCascadeChildren, err)
+	}
+	t.Setenv("SUNDER_MAX_CASCADE_CHILDREN", "50")
+	if c, err = FromEnv(); err != nil || c.MaxCascadeChildren != 50 {
+		t.Fatalf("cascade bound 50: %d %v", c.MaxCascadeChildren, err)
+	}
+	for _, bad := range []string{"0", "-1", "1000001", "1e3", "many"} {
+		t.Setenv("SUNDER_MAX_CASCADE_CHILDREN", bad)
+		if _, err := FromEnv(); err == nil {
+			t.Fatalf("SUNDER_MAX_CASCADE_CHILDREN=%q must be refused at startup", bad)
+		}
+	}
+}

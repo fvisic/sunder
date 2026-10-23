@@ -492,7 +492,8 @@ func dsrCmd(ctx context.Context, cfg config.Config, st *store.Store, args []stri
 	switch args[0] {
 	case "deliver":
 		g := &service.GDPR{Pool: st.Pool, HTTPTimeout: cfg.WebhookTimeout,
-			MaxAttempts: cfg.WebhookMaxAttempts, ClaimTTL: cfg.WorkerClaimTTL}
+			MaxAttempts: cfg.WebhookMaxAttempts, ClaimTTL: cfg.WorkerClaimTTL,
+			MaxCascadeChildren: cfg.MaxCascadeChildren}
 		n, err := g.DeliverPending(ctx)
 		if err != nil {
 			return err

@@ -250,9 +250,26 @@ are erased first and the parent last, and the plan is recorded durably
 inside the parent's own erasure transaction - so an interruption (a client
 timeout, a pod eviction) leaves an accurate record of what is outstanding.
 Re-issuing the identical request for the parent's cid RESUMES the
-outstanding children. Once everything is done the same call answers 404,
+outstanding children, and since v0.5.2 a background sweep does the same
+without being asked - the durable plan made an interrupted cascade
+recoverable, and the sweep is what makes it recover when nobody noticed it
+stopped. Once everything is done the same call answers 404,
 indistinguishable from a cid that never existed. `sunder dsr cascade-status`
-lists any outstanding child erasures.
+lists any outstanding child erasures, and
+`sunder_erasure_cascade_oldest_seconds` alarms on ones that stop.
+
+**A cascade is bounded.** More linked children than
+`SUNDER_MAX_CASCADE_CHILDREN` (default 1000) and the request is refused with
+`400 cascade_too_large` **before anything is erased** - the parent and every
+child stay untouched. The detail carries the count and the limit, so the
+caller can batch the work or the operator can raise the bound deliberately.
+Unbounded, one request would run tens of thousands of transactions inside a
+single HTTP call, with the client timing out before learning how far it got.
+
+The SDKs surface this as their validation error with the detail attached
+(the code is `cascade_too_large`, the status is 400); it does not have its
+own sentinel in the six SDKs, because the remedy is in the message rather
+than in the branch.
 
 For a single person, in one transaction: every
 scope's blob is wiped (with its version history), all search tokens

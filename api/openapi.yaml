@@ -704,6 +704,22 @@ paths:
                         cid: {type: string}
                         link_type: {type: string}
                         cascaded: {type: boolean}
+        '400':
+          description: |
+            `cascade_too_large` - the named link types resolve to more
+            children than SUNDER_MAX_CASCADE_CHILDREN allows (default 1000).
+            NOTHING was erased: the parent and every child are untouched, so
+            the caller can batch the work or the operator can raise the bound
+            after deciding that destroying this many people's data in one
+            request is intended. The detail carries both the count and the
+            limit.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: {type: string, enum: [cascade_too_large, validation, bad_json]}
+                  detail: {type: string}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}

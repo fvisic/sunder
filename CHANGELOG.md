@@ -2,6 +2,42 @@
 
 All notable changes to Sunder. Dates are YYYY-MM-DD.
 
+## Unreleased
+
+### L6 complete: a cascading erasure is now bounded, self-healing and provable
+The v0.4.1 backlog item shipped half-done in v0.5.0: the cascade got a
+durable plan and a resume path, but none of the guards around them.
+
+- **Bounded.** `dsr/erase` erases one person PER TRANSACTION. Unbounded, a
+  request naming a link type with tens of thousands of members ran that many
+  transactions inside one HTTP call - connections held for minutes, no way to
+  stop it, and a client timeout that left the operator unable to tell how far
+  it got. Above `SUNDER_MAX_CASCADE_CHILDREN` (default 1000) the request is
+  **refused before anything is erased** (`400 cascade_too_large`, naming the
+  count and the limit). The check sits after the plan is known and before the
+  parent's transaction opens, because that transaction is what deletes
+  `person_links` - refusing later would mean refusing after the only
+  description of the work was destroyed.
+- **Self-healing.** The durable plan made an interrupted cascade
+  *recoverable*; nothing made it *recover*. Resuming required an operator
+  re-issuing the identical call - which assumes they know it stopped, and the
+  report that would have told them is exactly what the interruption
+  swallowed. `RunPendingCascades` now runs in the same sweep as webhook
+  delivery, attributed to `system` rather than to a client that did not ask.
+- **Visible.** `sunder_erasure_cascade_pending` and
+  `sunder_erasure_cascade_oldest_seconds`, with an alert on the AGE - a large
+  cascade in progress and one that stopped an hour ago look identical by
+  count, and the second is an Article 17 commitment not being kept.
+- **Provable.** A cascade reaching zero outstanding children writes
+  `dsr.cascade_completed` to the audit chain. Without it the only evidence
+  was the ABSENCE of pending rows, which is indistinguishable from a plan
+  that was never written.
+
+Both new tests were verified by breaking what they protect: disabling the
+bound makes the refusal test fail with `must be refused, got <nil>`, and
+skipping the terminal record makes the worker test fail with `no
+dsr.cascade_completed audit record`.
+
 ## v0.5.1 - 2026-08-28
 
 A patch release with no API change and no new configuration beyond one knob:

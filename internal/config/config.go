@@ -132,6 +132,18 @@ type Config struct {
 	// setting this to 1 restores the old behaviour and the old duration.
 	RekeyBatch int // SUNDER_REKEY_BATCH
 
+	// MaxCascadeChildren bounds a single cascading erasure.
+	//
+	// `dsr/erase` with a cascade type erases one person PER TRANSACTION,
+	// children first. Without a bound, a request naming a link type that
+	// happens to have tens of thousands of members runs that many
+	// transactions inside one HTTP call: connections held for minutes, no
+	// way to stop it, and a client timeout that leaves the operator unable
+	// to tell how far it got. The request is REFUSED above this count rather
+	// than started - the parent and every child stay untouched, and the
+	// operator decides the scope deliberately.
+	MaxCascadeChildren int // SUNDER_MAX_CASCADE_CHILDREN
+
 	// SharesPublic enables credential-less fetch of F8 shared records (for
 	// cross-org partners who hold only the UUID). Off by default: the
 	// stronger default requires any valid client credential.
@@ -343,6 +355,10 @@ func FromEnvNoDB() (Config, error) {
 	// arrays are bound as one statement's parameters.
 	if c.RekeyBatch, err = strconv.Atoi(rawRB); err != nil || c.RekeyBatch < 1 || c.RekeyBatch > 10000 {
 		return c, fmt.Errorf("SUNDER_REKEY_BATCH: %q must be 1-10000", rawRB)
+	}
+	rawMC := getenv("SUNDER_MAX_CASCADE_CHILDREN", "1000")
+	if c.MaxCascadeChildren, err = strconv.Atoi(rawMC); err != nil || c.MaxCascadeChildren < 1 || c.MaxCascadeChildren > 1000000 {
+		return c, fmt.Errorf("SUNDER_MAX_CASCADE_CHILDREN: %q must be 1-1000000", rawMC)
 	}
 	rawVK := getenv("SUNDER_VERSIONS_KEEP", "0")
 	if c.VersionsKeep, err = strconv.Atoi(rawVK); err != nil || c.VersionsKeep < 0 || c.VersionsKeep > 1000 {

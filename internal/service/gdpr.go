@@ -47,10 +47,31 @@ type GDPR struct {
 	// Log receives the settle failures that used to be swallowed. Nil means
 	// slog.Default().
 	Log *slog.Logger
+	// MaxCascadeChildren bounds one cascading erasure; zero means
+	// DefaultMaxCascadeChildren. Wired from SUNDER_MAX_CASCADE_CHILDREN.
+	MaxCascadeChildren int
 
 	// wg holds the detached deliveries dispatched by erasePerson so a
 	// graceful shutdown can wait for them (Drain).
 	wg sync.WaitGroup
+}
+
+// DefaultMaxCascadeChildren bounds a cascading erasure when nothing else
+// says otherwise. One thousand people is already a large deliberate act;
+// beyond it the operator should be choosing batches, not discovering the
+// size from a timeout.
+const DefaultMaxCascadeChildren = 1000
+
+// ErrCascadeTooLarge is returned BEFORE anything is erased. The parent and
+// every child are untouched: a request that would destroy more data than
+// the deployment allows must not half-run.
+var ErrCascadeTooLarge = errors.New("cascade too large")
+
+func (g *GDPR) maxCascadeChildren() int {
+	if g.MaxCascadeChildren <= 0 {
+		return DefaultMaxCascadeChildren
+	}
+	return g.MaxCascadeChildren
 }
 
 func (g *GDPR) logger() *slog.Logger {
@@ -628,6 +649,18 @@ func (g *GDPR) EraseWithCascade(ctx context.Context, client *auth.Client, cid st
 		}
 	}
 
+	// Refuse BEFORE touching anything. The check has to sit here - after the
+	// plan is known, before the parent's erasure transaction opens -
+	// because the parent's own transaction is what deletes person_links,
+	// i.e. the map to the children. Refusing later would mean refusing
+	// after the only description of the work had been destroyed.
+	if limit := g.maxCascadeChildren(); len(plan) > limit {
+		return 0, 0, nil, fmt.Errorf("%w: %d linked children exceed the limit of %d; "+
+			"erase them in smaller batches, or raise SUNDER_MAX_CASCADE_CHILDREN "+
+			"after deciding that destroying this many people's data in one request is intended",
+			ErrCascadeTooLarge, len(plan), limit)
+	}
+
 	// The parent is erased LAST. Its transaction is what deletes
 	// person_links, i.e. the map to the children - doing that first meant a
 	// partial cascade could not even be described afterwards. The durable
@@ -725,7 +758,91 @@ func (g *GDPR) runCascade(ctx context.Context, actor string, erasureID int64) (m
 		}
 		done[t.person] = true
 	}
+	// A cascade that reaches zero outstanding children is FINISHED, and that
+	// is an accountability fact: it is the moment the organisation can say
+	// "every person named by this erasure is gone". Without a terminal
+	// record, the only evidence is the absence of PENDING rows - which is
+	// indistinguishable from a plan that was never written.
+	if len(targets) > 0 {
+		var left int
+		if err := g.Pool.QueryRow(ctx,
+			`SELECT count(*) FROM erasure_cascade WHERE erasure_id=$1 AND status='PENDING'`,
+			erasureID).Scan(&left); err == nil && left == 0 {
+			var total int
+			_ = g.Pool.QueryRow(ctx,
+				`SELECT count(*) FROM erasure_cascade WHERE erasure_id=$1`, erasureID).Scan(&total)
+			if aerr := audit.Append(ctx, g.Pool, audit.Entry{
+				ClientID: actor, Action: "dsr.cascade_completed",
+				Detail: map[string]any{"erasure_id": erasureID, "children": total},
+			}); aerr != nil {
+				// Not fatal: the children ARE erased, and failing here would
+				// make a completed cascade look like a failed one on retry.
+				g.logger().Error("cascade completed but its audit record failed",
+					"erasure_id", erasureID, "err", aerr.Error())
+			}
+		}
+	}
 	return done, nil
+}
+
+// PendingCascades reports outstanding cascade work: how many children are
+// still PENDING and how old the oldest one is.
+//
+// Both numbers are needed. A count alone cannot distinguish "a large cascade
+// is progressing" from "a cascade stopped an hour ago", and the second is an
+// Article 17 problem: people the organisation has committed to erasing, and
+// has not.
+func PendingCascades(ctx context.Context, pool *pgxpool.Pool) (pending int64, oldestSeconds float64, err error) {
+	err = pool.QueryRow(ctx, `
+		SELECT count(*),
+		       COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at))), 0)
+		  FROM erasure_cascade WHERE status='PENDING'`).Scan(&pending, &oldestSeconds)
+	return pending, oldestSeconds, err
+}
+
+// RunPendingCascades finishes cascades left outstanding by an interrupted
+// request, without waiting for someone to re-issue it.
+//
+// The durable plan made an interrupted cascade RECOVERABLE; it did not make
+// it recover. Until now the only thing that resumed one was an operator
+// re-issuing the identical erase call - which assumes they know it stopped,
+// and the report that would have told them is exactly what the interruption
+// swallowed. Runs from the same sweep as webhook delivery.
+func (g *GDPR) RunPendingCascades(ctx context.Context) (finished int, err error) {
+	rows, err := g.Pool.Query(ctx, `
+		SELECT DISTINCT erasure_id FROM erasure_cascade
+		 WHERE status='PENDING' ORDER BY erasure_id LIMIT 20`)
+	if err != nil {
+		return 0, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil { //coverage:defensive rows.Scan failure needs a DB fault injected at this exact statement
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil { //coverage:defensive rows.Err failure needs a DB fault injected at this exact statement
+		return 0, err
+	}
+	for _, id := range ids {
+		// "system" rather than a client id: nobody asked for THIS run. The
+		// original request is on the chain under its own actor; this is the
+		// deployment finishing what that request started.
+		if _, cerr := g.runCascade(ctx, "system", id); cerr != nil {
+			// One stuck erasure must not stop the others - and it must be
+			// visible, because a child that cannot be erased is a person the
+			// organisation said it would forget and has not.
+			g.logger().Error("pending cascade did not finish",
+				"erasure_id", id, "err", cerr.Error())
+			continue
+		}
+		finished++
+	}
+	return finished, nil
 }
 
 // resumeCascade finishes an interrupted cascade for an already-tombstoned
